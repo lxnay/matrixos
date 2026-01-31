@@ -31,8 +31,8 @@ qa_lib.check_secureboot() {
 
     local modulesdir="${imagedir}/lib/modules"
     local usb_storage_mods=
-    usb_storage_mods=$(find "${modulesdir}" -type f -name "usb-storage.ko*")
-    if [ -z "${usb_storage_mods}" ]; then
+    read -ra usb_storage_mods <<< "$(find "${modulesdir}" -type f -name "usb-storage.ko*")"
+    if [[ "${#usb_storage_mods[@]}" -eq 0 ]]; then
         echo "No usb-storage.ko found in ${modulesdir}" >&2
         return 1
     fi
@@ -47,7 +47,9 @@ qa_lib.check_secureboot() {
     echo "SecureBoot Serial of cert ${sbcert_path}: '${sb_serial}' ::"
 
     # Check SecureBoot signing key:
-    for mod in ${usb_storage_mods}; do
+    local mod=
+    for mod in "${usb_storage_mods[@]}"; do
+        mod="${mod#${imagedir%/}}"
         echo "Checking module signature for: ${mod}"
         local sig_key=
         sig_key=$(chroot "${imagedir}" modinfo -F sig_key "${mod}")
@@ -281,8 +283,8 @@ qa_lib.check_kernel_and_external_module() {
     fi
 
     local kernel_mods=
-    kernel_mods=$(find "${modulesdir}"/* -type f -name "${module_name}")
-    if [ -z "${kernel_mods}" ]; then
+    read -ra kernel_mods <<< "$(find "${modulesdir}"/* -type f -name "${module_name}")"
+    if [[ "${#kernel_mods[@]}" -eq 0 ]]; then
         echo "No ${module_name} found in ${modulesdir}" >&2
         return 1
     fi
@@ -294,7 +296,8 @@ qa_lib.check_kernel_and_external_module() {
     local vmlinuz_kernel_ver=
     local mod_count=0
     local failure=
-    for kernel_mod in ${kernel_mods}; do
+    for kernel_mod in "${kernel_mods[@]}"; do
+        kernel_mod="${kernel_mod#${imagedir%/}}"
         mod_count=$((mod_count+1))
         echo "Testing module: ${kernel_mod}"
 
@@ -323,7 +326,7 @@ qa_lib.check_kernel_and_external_module() {
     if [ "${mod_count}" != "${vmlinuz_count}" ]; then
         echo "Unexpected number of ${module_name} files found! Refusing to release." >&2
         echo "Number of ${module_name} modules: ${mod_count} -- vmlinuz found: ${vmlinuz_count}" >&2
-        echo "${kernel_mods}" >&2
+        echo "${kernel_mods[@]}" >&2
         return 1
     fi
 }
