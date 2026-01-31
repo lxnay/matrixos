@@ -1,6 +1,6 @@
 # 👋 Welcome to matrixOS
 
-matrixOS is a Gentoo-based Linux distribution that blends the power and customizability of Gentoo with the reliability of OSTree atomic upgrades (yes bootc will come). It comes with Flatpak and Docker ready to go out of the box.
+matrixOS is a Gentoo-based Linux distribution that blends the power and customizability of Gentoo with the reliability of OSTree atomic upgrades (yes bootc will come). It comes with Flatpak, Snap and Docker ready to go out of the box.
 
 Our two main goals are:
 
