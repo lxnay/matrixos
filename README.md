@@ -136,13 +136,13 @@ matrixOS uses BLS config files stored in `/boot/loader/entries/`.
 ostree admin kargs edit-in-place --append-if-missing=rootflags=discard=async
 ```
 
-This command will open an editor to modify the kernel arguments. The changes will be populated in the `/boot/loader/entries/ostree-*.conf` files.
+The changes will be showing up in the `/boot/loader/entries/ostree-*.conf` files.
 
 ### 🔒 SecureBoot
 
 matrixOS supports SecureBoot in two ways:
 
-1. The image ships with a public certificate that you can enroll in your PC's BIOS by switching your UEFI system to SecureBoot setup mode.
+1. The image ships with a public certificate that you can enroll at first boot via the Shim MOK Manager.
 2. To make things easier, matrixOS also ships with a MOK file (a DER binary format of the certificate) that you can enroll directly into `shim`. The `shim` is already signed with both the 2011 and 2023 Microsoft certificates.
 
 ### ⛓️ How to temporarily turn your matrixOS into a mutable system
