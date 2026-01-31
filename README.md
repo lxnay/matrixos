@@ -221,6 +221,25 @@ ostree admin upgrade
 reboot # the ostree:0 boot entry will be the latest image. ostree:1 will be the old one (rollback).
 ```
 
+I am working on better CLI upgrade experience, you can find two nice wrappers here:
+
+> **Note:** The following command must be run as root.
+
+```shell
+./install/upgrade
+# alternative, on an installed system
+/matrixos/install/upgrade
+```
+
+and a Golang based version (still WIP):
+
+> **Note:** The following command must be run as root.
+
+```shell
+cd vector/
+go run vector.go upgrade
+```
+
 ### How to hop between matrixOS images with (almost no harm)
 
 List the available remote branches:
