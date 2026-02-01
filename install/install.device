@@ -4,6 +4,8 @@
 set -eu
 
 MATRIXOS_DEV_DIR=$(realpath $(dirname "${0}")/../)
+export MATRIXOS_DEV_DIR  # this is calling image_main.sh so we need to export.
+
 source "${MATRIXOS_DEV_DIR}"/headers/env.include.sh
 source "${MATRIXOS_DEV_DIR}"/image/headers/imagerenv.include.sh
 
@@ -14,6 +16,8 @@ source "${MATRIXOS_DEV_DIR}"/image/lib/image_lib.sh
 
 ARG_BATCH=
 ARG_DRY_RUN=
+ARG_OSTREE_REF=
+ARG_OSTREE_REPODIR=
 ARG_WHOLE_DEVICE_PATH=
 ARG_EFI_DEVICE_PATH=
 ARG_BOOT_DEVICE_PATH=
@@ -34,6 +38,40 @@ parse_args() {
         ARG_DRY_RUN=1
 
         shift
+        ;;
+
+        -r|--ref|--ref=*)
+        local val=
+        if [[ "${1}" =~ --ref=.* ]]; then
+            val=${1/--ref=/}
+            shift
+        else
+            val="${2}"
+            shift 2
+        fi
+        if [ -z "${val}" ]; then
+            echo "parse_args: invalid ref flag." >&2
+            return 1
+        fi
+
+        if ostree_lib.is_branch_shortname "${val}"; then
+            # assume dev to be safe.
+            echo "${0}: WARNING: branch shortname specified, assuming dev release stage." >&2
+            val=$(ostree_lib.branch_shortname_to_normal "dev" "${val}")
+        fi
+        ARG_OSTREE_REF="${val}"
+        ;;
+
+        -repo|--ostree-repo|--ostree-repo=*)
+        local val=
+        if [[ "${1}" =~ --ostree-repo=.* ]]; then
+            val=${1/--ostree-repo=/}
+            shift
+        else
+            val="${2}"
+            shift 2
+        fi
+        ARG_OSTREE_REPODIR="${val}"
         ;;
 
         -instdev|--install-device|--install-device=*)
@@ -91,6 +129,9 @@ parse_args() {
 
         echo -e "-b, --batch \t\t\t\t\t Run in batch mode, expecting valid arguments for the other flags mentioned here." >&2
         echo -e "-dry, --dry-run \t\t\t\t Don't make any changes, just dry run everything." >&2
+        echo -e "-r, --ref  \t\t\t\t\t [DEV ONLY] the ostree ref name to install (in case you already have a local ostree repo initialized)." >&2
+        echo -e "-repo PATH, --ostree-repo=PATH  \t\t [DEV ONLY] provide an alternative path to ostree repo." >&2
+        echo -e "  \t\t\t\t\t\t     default: ${MATRIXOS_OSTREE_REPO_DIR}" >&2
         echo -e "-instdev <device>, --install-device=<device>  \t provide an alternative block device path (e.g. /dev/sda) for imaging (installation)." >&2
         echo -e "-efidev <device>, --efi-device-path=<device>  \t provide an alternative EFI System Partition path (will not be formatted)." >&2
         echo -e "-bootdev <device>, --boot-device-path=<device>   format and install /boot into the specified device (DATA WIPED)." >&2
@@ -326,21 +367,62 @@ main() {
     fi
 
     local repodir="/ostree/repo"
-    if [ ! -d "${repodir}" ]; then
-        echo "${repodir} does not exist." >&2
+    if [ -n "${ARG_OSTREE_REPODIR}" ]; then
+        repodir="${ARG_OSTREE_REPODIR}"
     fi
 
-    local sysroot=/
-    local booted_ref=
-    booted_ref=$(ostree_lib.booted_ref "${sysroot}")
-    if [ -z "${booted_ref}" ]; then
-        echo "Unable to find booted ostree ref." >&2
+    if [ ! -d "${repodir}" ]; then
+        echo "${repodir} does not exist." >&2
         return 1
     fi
-    ostree_lib.run admin status --sysroot="${sysroot}"
-    echo
-    echo "You are currently booted using the ostree branch: ${booted_ref} ."
-    echo
+
+    local missing_ostree_params=
+    local ostree_params_specified=
+    if [ -z "${ARG_OSTREE_REF}" ] && [ -n "${ARG_OSTREE_REPODIR}" ]; then
+        missing_ostree_params=1
+    elif [ -n "${ARG_OSTREE_REF}" ] && [ -z "${ARG_OSTREE_REPODIR}" ]; then
+        missing_ostree_params=1
+    elif [ -n "${ARG_OSTREE_REF}" ] && [ -n "${ARG_OSTREE_REPODIR}" ]; then
+        ostree_params_specified=1
+    fi
+    if [ -n "${missing_ostree_params}" ]; then
+        echo "Please specify both --ref and --ostree-repo." >&2
+        return 1
+    fi
+
+    local wanted_ref=
+    if [ -n "${ostree_params_specified}" ]; then
+        wanted_ref="${ARG_OSTREE_REF}"
+        echo "Requested install from ostree repo ${repodir} with ostree ref: ${wanted_ref}"
+
+        ostree_lib.show_local_refs "${repodir}"
+        local local_refs=()
+        read -ra local_refs <<< "$(ostree_lib.local_refs "${repodir}")"
+        local found=
+        for ref in "${local_refs[@]}"
+        do
+            if [ "${ref}" = "${wanted_ref}" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ -z "${found}" ]; then
+            echo "${wanted_ref} not found locally. You either need to 'ostree pull' or give up" >&2
+            echo "and download the images from images.${MATRIXOS_OSNAME}.org" >&2
+            return 1
+        fi
+
+    else
+        wanted_ref=$(ostree_lib.booted_ref "/")
+        if [ -z "${wanted_ref}" ]; then
+            echo "Unable to find booted ostree ref." >&2
+            return 1
+        fi
+        ostree_lib.run admin status --sysroot="/"
+        echo
+        echo "You are currently booted using the ostree branch: ${wanted_ref} ."
+        echo
+    fi
 
     local d=
     local any_device=
@@ -435,7 +517,7 @@ main() {
     local imager_args=(
         --local-ostree
         --ostree-repo="${repodir}"
-        --ref="${booted_ref}"
+        --ref="${wanted_ref}"
     )
     if  [ -n "${whole_device}" ]; then
         imager_args+=(
