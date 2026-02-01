@@ -300,13 +300,14 @@ You can customize your matrixOS build by modifying files in several directories:
 The main build process is orchestrated by scripts in the `dev/` directory. The general workflow is **seeder -> release -> imager**.
 
 1. **`build/seeder`**: Builds a seeder layer in a chroot environment.
-2. **`release/release_main.sh`**: Releases a built seeder to an OSTree repository.
-3. **`image/image_main.sh`**: Creates a bootable image from a release in the OSTree repository.
+2. **`release/release.seeds`**: Releases all the built seeds to an OSTree repository.
+3. **`image/image.releases`**: Creates a bootable image from all the created releases, committing them to the local OSTree repository.
 
-The `dev/build.sh` script automates this entire process. It is **very** important to know that **if** you want to
-make changes to the build configs in `seeders/`, you **must** fork this repository, and commit the changes there, then
-before launching `dev/build.sh`, you **must** export `MATRIXOS_GIT_REPO=<url of your forked git repo>`. The build tool
-is going to warn you about this whole thing. Example:
+The `dev/build.sh` script automates this entire process. It is **very** important to keep in mind that
+**if** you want to make changes to the build configs in `seeders/`, you **must** fork this repository,
+and commit the changes there, then before launching `dev/build.sh`, you **must** export
+`MATRIXOS_GIT_REPO=<url of your forked git repo>`. The build tool is going to warn you about this
+whole thing. Example:
 
 > **Note:** The following command must be run as root.
 
@@ -355,7 +356,7 @@ If for whatever reason you need to enter the chroot of a to-be-built or built se
 
 #### Cleaning old artifacts
 
-All the generated artifacts are in the `out/` directory. You can just clean it up as you like. Careful that if something failed hard [OOMs] or something is running, you may remove data ported there via `--bind` mounts. For this reason, you can take a look at the in-active-development `dev/janitor` code (you need Golang) or at the `dev/clean_old_builds.sh` script.
+All the generated artifacts are in the `out/` and `ostree/` directories. You can just clean it up as you like. Careful that if something failed hard [OOMs] or something is running, you may remove data ported there via `--bind` mounts. For this reason, you can take a look at the in-active-development `dev/janitor` code (you need Golang) or at the `dev/clean_old_builds.sh` script. Eventually the `janitor` binary will be the only one orchestrating cleanups.
 
 #### Resurce requirements
 
