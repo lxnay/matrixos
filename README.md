@@ -7,6 +7,8 @@ Our two main goals are:
 - **Reliability**: Providing a stable, immutable base system through OSTree, which allows for atomic upgrades and rollbacks.
 - **Gaming-Friendly**: Shipping with the Steam loader, Lutris and optimizations to get you gaming on both NVIDIA and AMD GPUs with minimal fuss.
 
+![MatrixOS Desktop Screenshot](./screenshots/1.png)
+
 ## ⚠️ Disclaimer
 
 matrixOS distro images are coming on **2026-02-07** at the latest.
