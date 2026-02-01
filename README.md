@@ -358,7 +358,7 @@ If for whatever reason you need to enter the chroot of a to-be-built or built se
 
 All the generated artifacts are in the `out/` and `ostree/` directories. You can just clean it up as you like. Careful that if something failed hard [OOMs] or something is running, you may remove data ported there via `--bind` mounts. For this reason, you can take a look at the in-active-development `dev/janitor` code (you need Golang) or at the `dev/clean_old_builds.sh` script. Eventually the `janitor` binary will be the only one orchestrating cleanups.
 
-#### Resurce requirements
+#### Resource requirements
 
 - x86-64-v3 CPU
 - 32+GB RAM
