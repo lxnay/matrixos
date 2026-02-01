@@ -7,7 +7,40 @@ Our two main goals are:
 - **Reliability**: Providing a stable, immutable base system through OSTree, which allows for atomic upgrades and rollbacks.
 - **Gaming-Friendly**: Shipping with the Steam loader, Lutris and optimizations to get you gaming on both NVIDIA and AMD GPUs with minimal fuss.
 
-![MatrixOS Desktop Screenshot](./screenshots/1.png)
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="./screenshots/1.png">
+        <img src="./screenshots/1.png" width="250" alt="Desktop 1" />
+      </a>
+      <br />
+      <sub>GNOME Desktop w/Steam and GNOME Software</sub>
+    </td>
+    <td align="center">
+      <a href="./screenshots/2.png">
+        <img src="./screenshots/2.png" width="250" alt="Desktop 2" />
+      </a>
+      <br />
+      <sub>System/OS and Flatpak integration</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <a href="./screenshots/3.png">
+        <img src="./screenshots/3.png" width="250" alt="Terminal" />
+      </a>
+      <br />
+      <sub>OSTree integration</sub>
+    </td>
+    <td align="center">
+      <a href="./screenshots/5.png">
+        <img src="./screenshots/5.png" width="250" alt="Dontknow"/>
+      </a>
+      <br />
+      <sub>Coding and AI</sub>
+    </td>
+  </tr>
+</table>
 
 ## ⚠️ Disclaimer
 
