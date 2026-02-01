@@ -445,6 +445,22 @@ To achieve the goals in the Roadmap, the work is chunked into three milestones f
         GObject introspection or some other forms of bindings to minimize the use of bash.
 - [ ] Write appropriate unit and integration tests and write proper CI/CD pipelining.
 
+## Known issues
+
+### Flatpak and Snap fight in GNOME Software
+
+When I enable both, Snap takes over gnome-software, which misses a lot of cool apps compared to Flathub.
+So, I decided last minute, until gnome-software can work with both at the same time, to disable Snap. However,
+you can re-enable it at runtime with the following trick:
+
+```shell
+systemctl enable apparmor
+systemctl enable snapd.apparmor
+systemctl enable snapd
+rm -rf ~/.cache/gnome-software  # remove this directory for every user affected
+reboot  # just in case gnome-software has it's ETOOMUCHCACHING moments
+```
+
 ## 🙏 Contributing
 
 There are many ways you can contribute, whether with [time](#time), [resources](#resources), or [donations](#donations).
