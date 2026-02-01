@@ -472,6 +472,8 @@ setup_image() {
 
     image_lib.install_secureboot_certs "${rootfs}" "${mount_efifs}" "${efibootdir}"
     image_lib.install_memtest "${rootfs}" "${efibootdir}"
+    local pkglist=()
+    image_lib.package_list "pkglist" "${rootfs}"
     image_lib.finalize_filesystems "${mount_rootfs}" "${mount_bootfs}" "${mount_efifs}"
     image_lib.show_final_filesystem_info "${block_device}" "${mount_bootfs}" "${mount_efifs}"
 
@@ -485,7 +487,8 @@ setup_image() {
             echo "Productionizing ${image_path} for release version: ${release_version} ..."
             local new_image_path=
             _productionize_image "${release_version}" "${image_path}" "${ref}" \
-                "${productionize}" "${gpg_enabled}" "${create_qcow2}" "new_image_path"
+                "${productionize}" "${gpg_enabled}" "${create_qcow2}" "new_image_path" \
+                "pkglist"
             echo "Final image path: ${new_image_path}"
             image_path="${new_image_path}"
         fi
@@ -522,6 +525,7 @@ _productionize_image() {
     local create_qcow2="${6}"  # can be empty.
 
     local -n __new_image_path="${7}"
+    local -n __pkg_list="${8}"
 
     local versioned_image_path
     versioned_image_path=$(image_lib.image_path_with_release_version "${ref}" "${release_version}")
@@ -540,6 +544,15 @@ _productionize_image() {
         qcow2_image_name=$(basename "${qcow2_image_path}")
         qcow2_image_dir=$(dirname "${qcow2_image_path}")
     fi
+
+    # create package list file
+    local pkglist_path="${image_path}.packages.txt"
+    echo "Creating package list file: ${pkglist_path}"
+    echo > "${pkglist_path}"
+    for pkg in "${__pkg_list[@]}"
+    do
+        echo "${pkg}" >> "${pkglist_path}"
+    done
 
     if [ -n "${compressor}" ]; then
         echo "Compressing the image using: ${compressor}"
@@ -564,6 +577,7 @@ _productionize_image() {
                 sha256sum "${qcow2_image_name}" > "${qcow2_image_name}.sha256"
             fi
         )
+
         local mos_gpg_key="${MATRIXOS_OSTREE_GPG_KEY_PATH}"
         if [ -z "${gpg_enabled}" ]; then
             echo "WARNING: GPG signing of images not enabled in settings." >&2

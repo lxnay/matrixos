@@ -729,6 +729,35 @@ image_lib.generate_kernel_boot_args() {
     _boot_args=( "${boot_args[@]}" )
 }
 
+image_lib.package_list() {
+    local -n _pkg_list="${1}"
+    if [ -z "${1}" ]; then
+        echo "image_lib.package_list: missing _pkg_list parameter" >&2
+        return 1
+    fi
+    local rootfs="${2}"
+    if [ -z "${rootfs}" ]; then
+        echo "image_lib.package_list: missing rootfs parameter" >&2
+        return 1
+    fi
+
+    local vdb="${rootfs%/}${MATRIXOS_RO_VDB}"
+    if [ ! -d "${vdb}" ]; then
+        echo "image_lib.package_list: ${vdb} does not exist. cannot generate pkglist" >&2
+        return 0
+    fi
+
+    local d=
+    for d in "${vdb}"/*/*; do
+        d="${d#${vdb}/}"
+        _pkg_list+=( "${d}" )
+    done
+    echo "Generated package list:"
+    for pkg in "${_pkg_list[@]}"; do
+        echo ">> ${pkg}"
+    done
+}
+
 image_lib.finalize_filesystems() {
     local mount_rootfs="${1}"
     if [ -z "${mount_rootfs}" ]; then
