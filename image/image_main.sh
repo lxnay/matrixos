@@ -600,6 +600,14 @@ _productionize_image() {
                 ostree_lib.gpg_sign_file "${qcow2_image_path}"
                 __generated_artifacts+=( "$(ostree_lib.gpg_signed_file_path "${qcow2_image_path}")" )
             fi
+            
+            # Store the GPG pubkey for later mirroring to CDNs.
+            local gpg_pubkey=
+            gpg_pubkey=$(ostree_lib.get_gpg_pubkey_path)
+            local gpg_pubkey_image_path="${image_path}.pubkey.asc"
+            cp "${gpg_pubkey}" "${gpg_pubkey_image_path}"
+            __generated_artifacts+=( "${gpg_pubkey_image_path}" )
+
         else
             echo "WARNING: ${mos_gpg_key} not found. Cannot create GPG signatures of image." >&2
         fi

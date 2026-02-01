@@ -135,6 +135,10 @@ ostree_lib.collection_id_args() {
     echo "${args[@]}"
 }
 
+ostree_lib.get_gpg_pubkey_path() {
+    echo "${MATRIXOS_OSTREE_GPG_PUB_PATH}"
+}
+
 ostree_lib.ostree_gpg_args() {
     local gpg_enabled="${1}"
     if [ -z "${gpg_enabled}" ]; then
@@ -157,7 +161,7 @@ ostree_lib.ostree_client_side_gpg_args() {
     else
         gpg_args+=(
             --set=gpg-verify=true
-            --gpg-import="${MATRIXOS_OSTREE_GPG_PUB_PATH}"
+            --gpg-import="$(ostree_lib.get_gpg_pubkey_path)"
         )
     fi
     echo "${gpg_args[@]}"
@@ -302,7 +306,7 @@ ostree_lib.get_ostree_gpg_key_id() {
     gpg --homedir="$(ostree_lib.get_ostree_gpg_homedir)" \
         --batch --yes \
         --with-colons --show-keys --keyid-format LONG \
-        "${MATRIXOS_OSTREE_GPG_PUB_PATH}" | grep "^pub" | cut -d: -f5
+        "$(ostree_lib.get_gpg_pubkey_path)" | grep "^pub" | cut -d: -f5
 }
 
 ostree_lib.get_ostree_gpg_homedir() {
@@ -403,12 +407,15 @@ ostree_lib.maybe_initialize_gpg() {
         return 1
     fi
 
+    local signing_pubkey=
+    signing_pubkey=$(ostree_lib.get_gpg_pubkey_path)
+
     ostree_lib.import_gpg_key "${MATRIXOS_OSTREE_GPG_KEY_PATH}"
-    ostree_lib.import_gpg_key "${MATRIXOS_OSTREE_GPG_PUB_PATH}"
+    ostree_lib.import_gpg_key "${signing_pubkey}"
     ostree_lib.import_gpg_key "${MATRIXOS_OSTREE_OFFICIAL_GPG_PUB_PATH}"
     ostree_lib.run --repo="${repodir}" remote gpg-import "${remote}" \
         -k "${MATRIXOS_OSTREE_GPG_KEY_PATH}" \
-        -k "${MATRIXOS_OSTREE_GPG_PUB_PATH}" \
+        -k "${signing_pubkey}" \
         -k "${MATRIXOS_OSTREE_OFFICIAL_GPG_PUB_PATH}"
 }
 
