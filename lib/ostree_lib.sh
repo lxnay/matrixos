@@ -322,6 +322,15 @@ ostree_lib.import_gpg_key() {
         --import "${key_path}"
 }
 
+ostree_lib.gpg_signed_file_path() {
+    local file="${1}"
+    if [ -z "${file}" ]; then
+        echo "ostree_lib.gpg_signed_file_path: missing file parameter" >&2
+        return 1
+    fi
+    echo "${file}.asc"
+}
+
 ostree_lib.gpg_sign_file() {
     local file="${1}"
     if [ -z "${file}" ]; then
@@ -347,14 +356,16 @@ ostree_lib.gpg_sign_file() {
         return 1
     fi
 
+    local asc_file=$(ostree_lib.gpg_signed_file_path "${file}")
+
     gpg --homedir "${homedir}" \
         --batch --yes \
         --local-user "${key_id}" \
         --armor \
         --detach-sign \
-        --output "${file}.asc" \
+        --output "${asc_file}" \
         "${file}"
-    echo "GPG signature file ${file}.asc created."
+    echo "GPG signature file ${asc_file} created."
 }
 
 ostree_lib.patch_ostree_gpg_homedir() {

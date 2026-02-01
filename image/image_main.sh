@@ -483,17 +483,18 @@ setup_image() {
     sync
 
     if [ -n "${image_path}" ]; then
+        local generated_artifacts=()
         if [ -n "${productionize}" ]; then
             echo "Productionizing ${image_path} for release version: ${release_version} ..."
             local new_image_path=
             _productionize_image "${release_version}" "${image_path}" "${ref}" \
                 "${productionize}" "${gpg_enabled}" "${create_qcow2}" "new_image_path" \
-                "pkglist"
+                "pkglist" "generated_artifacts"
             echo "Final image path: ${new_image_path}"
             image_path="${new_image_path}"
         fi
 
-        image_lib.show_test_info "${image_path}"
+        image_lib.show_test_info "${generated_artifacts[@]}"
         echo "Image creation complete! > ${image_path}"
     else
         sync
@@ -526,6 +527,7 @@ _productionize_image() {
 
     local -n __new_image_path="${7}"
     local -n __pkg_list="${8}"
+    local -n __generated_artifacts="${9}"
 
     local versioned_image_path
     versioned_image_path=$(image_lib.image_path_with_release_version "${ref}" "${release_version}")
@@ -543,6 +545,7 @@ _productionize_image() {
         qcow2_image_path=$(image_lib.qcow2_image_path "${image_path}")
         qcow2_image_name=$(basename "${qcow2_image_path}")
         qcow2_image_dir=$(dirname "${qcow2_image_path}")
+        __generated_artifacts+=( "${qcow2_image_path}" )
     fi
 
     # create package list file
@@ -553,6 +556,7 @@ _productionize_image() {
     do
         echo "${pkg}" >> "${pkglist_path}"
     done
+    __generated_artifacts+=( "${pkglist_path}" )
 
     if [ -n "${compressor}" ]; then
         echo "Compressing the image using: ${compressor}"
@@ -560,6 +564,7 @@ _productionize_image() {
         image_path=$(image_lib.image_path_with_compressor_extension "${image_path}" "${compressor}")
         echo "Image compressed, new image path: ${image_path}"
     fi
+    __generated_artifacts+=( "${image_path}" )
 
     if [[ -n "${productionize}" ]]; then
         echo "Creating sha256sum of: ${image_path}"
@@ -567,16 +572,20 @@ _productionize_image() {
         image_dir=$(dirname "${image_path}")
         local image_name
         image_name=$(basename "${image_path}")
-        (
-            cd "${image_dir}"
-            sha256sum "${image_name}" > "${image_name}.sha256"
+        local sha256_path="${image_dir}/${image_name}.sha256"
+        local qcow2_sha256_path="${qcow2_image_dir}/${qcow2_image_name}.sha256"
 
-            if [ -n "${create_qcow2}" ]; then
-                echo "Creating sha256sum of: ${qcow2_image_path}"
-                cd "${qcow2_image_dir}"
-                sha256sum "${qcow2_image_name}" > "${qcow2_image_name}.sha256"
-            fi
-        )
+        pushd "${image_dir}" >/dev/null
+        sha256sum "${image_name}" > "${sha256_path}"
+        popd >/dev/null
+        if [ -n "${create_qcow2}" ]; then
+            echo "Creating sha256sum of: ${qcow2_image_path}"
+            pushd "${qcow2_image_dir}" >/dev/null
+            sha256sum "${qcow2_image_name}" > "${qcow2_sha256_path}"
+            popd >/dev/null
+            __generated_artifacts+=( "${qcow2_sha256_path}" )
+        fi
+        __generated_artifacts+=( "${sha256_path}" )
 
         local mos_gpg_key="${MATRIXOS_OSTREE_GPG_KEY_PATH}"
         if [ -z "${gpg_enabled}" ]; then
@@ -585,9 +594,11 @@ _productionize_image() {
             echo "${mos_gpg_key} exists, creating GPG signatures ..."
             release_lib.initialize_gpg "${gpg_enabled}"
             ostree_lib.gpg_sign_file "${image_path}"
+            __generated_artifacts+=( "$(ostree_lib.gpg_signed_file_path "${image_path}")" )
             if [ -n "${create_qcow2}" ]; then
                 echo "Creating GPG signatures of: ${qcow2_image_path}"
                 ostree_lib.gpg_sign_file "${qcow2_image_path}"
+                __generated_artifacts+=( "$(ostree_lib.gpg_signed_file_path "${qcow2_image_path}")" )
             fi
         else
             echo "WARNING: ${mos_gpg_key} not found. Cannot create GPG signatures of image." >&2

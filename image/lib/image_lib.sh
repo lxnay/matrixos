@@ -831,11 +831,15 @@ image_lib.show_final_filesystem_info() {
 }
 
 image_lib.show_test_info() {
-    local image_path="${1}"
-    if [ -z "${image_path}" ]; then
-        echo "show_test_info: missing image_path parameter" >&2
+    if [[ "${#@}" -eq 0 ]]; then
+        echo "show_test_info: missing artifacts array parameter" >&2
         return 1
     fi
+
+    echo "Generated artifacts:"
+    for artifact in "${@}"; do
+        echo ">> ${artifact}"
+    done
 
     echo
     echo "How to test (as user):"
@@ -843,13 +847,13 @@ image_lib.show_test_info() {
     echo "qemu-system-x86_64 -enable-kvm -m 8G \\
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/OVMF_CODE.fd \\
     -drive if=pflash,format=raw,file=./my_vars.fd \\
-    -drive file=${image_path},format=raw \\
+    -drive file=IMAGE_PATH,format=raw \\
     -device virtio-vga-gl,hostmem=512M,blob=true,venus=on -display gtk,gl=on -cpu host -smp 4 \\
     -nic user,model=virtio-net-pci,hostfwd=tcp::2222-:22 \\
     -audiodev pa,id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0"
     echo
     echo "To move to a USB stick:"
-    echo "    dd if=${image_path} of=/dev/sdX bs=4M conv=sparse status=progress"
+    echo "    dd if=IMAGE_PATH of=/dev/sdX bs=4M conv=sparse,sync status=progress"
     echo
 }
 
