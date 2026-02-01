@@ -56,7 +56,7 @@ Just `dd` the image file to a USB or SSD/NVME drive of your choice. If the image
 Example:
 
 ```shell
-xz -dc matrixos_amd64_gnome-DATE.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=fsync
+xz -dc matrixos_amd64_gnome-DATE.img.xz | sudo dd of=/dev/sdX bs=4M status=progress conv=sparse,sync
 ```
 
 There are two users created by default on first boot:
