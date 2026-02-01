@@ -1,14 +1,12 @@
-TODO towards v0 release:
-- ostree.matrixos.org (ostree), dists.matrixos.org (images)
-- publish to github
+# TODO for Milestone 3
 
-
-TODO for Milestone 3:
 - [Build & Releasing]
-    - set up a VPS with static http server for ostree and distfiles.
-    - Migrate to ini configs so that I can move code to Golang
+  - create and publish docker app that embeds image and allows install
+    via a simple docker run {installer args}.
+  - Migrate to ini configs so that I can move code to Golang.
+  - Rewrite codebase to Golang.
 - [Imaging]
-    - Test Hyprland.
-    - Test systemd-boot.
-    - Test bootc && migration to UKI.
-    - Support Cloud Init
+  - Test and integrate Hyprland.
+  - Test systemd-boot.
+  - Test bootc & migration to UKI.
+  - Support Cloud Init.
