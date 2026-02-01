@@ -732,20 +732,20 @@ main() {
     fi
 
     local gpg_enabled="${ARG_GPG_ENABLED}"
+    local remoted_ref
+    remoted_ref=$(ostree_lib.extract_remote_from_ref "${ref}")
+    # check if we have the remote inside the ref.
+    if [ -n "${remoted_ref}" ]; then
+        remote="${remoted_ref}"
+        ref=$(ostree_lib.clean_remote_from_ref "${ref}")
+        echo "WARNING: ${ref} contains the remote reference, using remote=${remoted_ref} and ref=${ref}" >&2
+    fi
 
     qa_lib.verify_imager_environment_setup "/" "${gpg_enabled}"
     if [ -n "${ARG_USE_LOCAL_OSTREE}" ]; then
         ostree_lib.show_local_refs "${repodir}"
         ostree_lib.maybe_initialize_gpg "${gpg_enabled}" "${remote}" "${repodir}"
     else
-        # check if we have the remote inside the ref.
-        local remoted_ref
-        remoted_ref=$(ostree_lib.extract_remote_from_ref "${ref}")
-        if [ -n "${remoted_ref}" ]; then
-            remote="${remoted_ref}"
-            ref=$(ostree_lib.clean_remote_from_ref "${ref}")
-            echo "WARNING: ${ref} contains the remote reference, using remote=${remoted_ref} and ref=${ref}" >&2
-        fi
         ostree_lib.maybe_initialize_remote "${remote}" "${remote_url}" "${gpg_enabled}" "${repodir}"
         ostree_lib.maybe_initialize_gpg "${gpg_enabled}" "${remote}" "${repodir}"
         ostree_lib.show_remote_refs "${remote}" "${repodir}"
