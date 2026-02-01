@@ -32,10 +32,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	fmt.Println("Initializing logs cleaner ...")
+	lcln := &cleaners.LogsCleaner{}
+	if err := lcln.Init(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing logs cleaner: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("Initializing all cleaners ...")
 	clnrs := []cleaners.ICleaner{
 		icln,
 		dcln,
+		lcln,
 	}
 
 	exitSt := 0

@@ -20,6 +20,11 @@ func (c *StaticConfig) Load() error {
 		devDir = "/matrixos"
 	}
 
+	logsDir := os.Getenv("MATRIXOS_LOGS_DIR")
+	if logsDir == "" {
+		logsDir = devDir + "/logs"
+	}
+
 	// Get MATRIXOS_OUT_DIR otherwise default to MATRIXOS_DEV_DIR + /out.
 	// Like in env.include.sh.
 	outDir := os.Getenv("MATRIXOS_OUT_DIR")
@@ -51,6 +56,9 @@ func (c *StaticConfig) Load() error {
 		"matrixOS.OutDir": {
 			outDir,
 		},
+		"matrixOS.LogsDir": {
+			logsDir,
+		},
 		"Imager.OutDir": {
 			imagesDir,
 		},
@@ -61,6 +69,9 @@ func (c *StaticConfig) Load() error {
 			downloadsDir,
 		},
 		"DownloadsCleaner.DryRun": {
+			"false",
+		},
+		"LogsCleaner.DryRun": {
 			"false",
 		},
 		"ImagesCleaner.DryRun": {
