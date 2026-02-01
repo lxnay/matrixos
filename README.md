@@ -461,6 +461,15 @@ rm -rf ~/.cache/gnome-software  # remove this directory for every user affected
 reboot  # just in case gnome-software has it's ETOOMUCHCACHING moments
 ```
 
+### GNOME aspect ratio is either 100% or 200%
+
+This is due to GNOME 48 not having this (to me) obvious feature of allowing you to select a finer grained
+aspect ratio. This is allegedly fixed in GNOME 49, but for now, just do:
+
+```shell
+gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
+```
+
 ## 🙏 Contributing
 
 There are many ways you can contribute, whether with [time](#time), [resources](#resources), or [donations](#donations).
