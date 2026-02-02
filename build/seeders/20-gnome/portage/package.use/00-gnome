@@ -1,7 +1,5 @@
 gnome-base/gvfs samba archive fuse google gphoto2 mtp nfs
-# Temporarily disable snap as gnome-software seems to get confused
-# and not wanting to use flatpak
-gnome-extra/gnome-software dkms -snap flatpak
+gnome-extra/gnome-software dkms snap
 gnome-base/gnome -extras
 # wpa_supplicant pulls in qt6
 net-wireless/wpa_supplicant -gui
