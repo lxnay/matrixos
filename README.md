@@ -84,6 +84,17 @@ See this [Wikipedia x86-64 microarchitecture levels page](https://en.wikipedia.o
 
 You need a USB/SSD/NVME device of at least `24GB`, better if `32GB`.
 
+## 🛠️ Available Images
+
+The easiest way to get you started with matrixOS is to download a fully automated weekly disk image file. Images are available in both `raw image format` (to flash to a USB, NVME, SSD, HDD; to use with QEMU) and in `qcow2` format (to use with QEMU or Proxmox & co.). Images are compressed using `xz`, have an associated `.sha256` file, a `.gpg` signature (and its pubkey) and a `.pkglist.txt` file to know which packages are inside each image version. All of them, contain the full block device partitions that can boot on any modern UEFI system, with or without SecureBoot enabled.
+
+The only trusted sources for the images are:
+- [Cloudflare](https://images.matrixos.org).
+
+### Public Keys
+- GPG, OSTree and images: `DC474F4CBD1D3260D9CC6D9275DD33E282BE47CE`
+- Fingerprint, SecureBoot: `sha256 Fingerprint=38:02:D7:FC:A7:6F:08:04:9C:7F:D5:D7:AF:9A:24:6C:9B:C2:28:F3:45:99:7B:DF:79:EE:F3:35:0A:81:87:1B`
+
 ## 💿 Installation
 
 Just `dd` the image file to a USB or SSD/NVME drive of your choice. If the image is compressed, use the appropriate decompressor (e.g. `xz`). That's it. Alternatively, you can install matrixOS from a booted matrixOS system.
