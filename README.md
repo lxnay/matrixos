@@ -505,6 +505,15 @@ aspect ratio. This is allegedly fixed in GNOME 49, but for now, just do:
 gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer']"
 ```
 
+### NVIDIA drivers and nouveau fight
+
+If somehow nouveau is being loaded and NVIDIA drivers are unable to, do this:
+
+```shell
+ostree admin kargs edit-in-place --append-if-missing=modprobe.blacklist=nouveau
+ostree admin kargs edit-in-place --append-if-missing=rd.driver.blacklist=nouveau
+```
+
 ## 🙏 Contributing
 
 There are many ways you can contribute, whether with [time](#time), [resources](#resources), or [donations](#donations).
