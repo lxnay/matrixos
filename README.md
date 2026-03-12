@@ -129,7 +129,7 @@ Download the image (compressed with `xz`) and its `.sha256` file, then flash it 
 ```shell
 sha256sum -c matrixos_amd64_gnome-DATE.img.xz.sha256
 xz -d matrixos_amd64_gnome-DATE.img.xz
-dd if=matrixos_amd64_gnome-DATE.img of=/dev/sdX bs=4M status=progress conv=sparse,sync
+dd if=matrixos_amd64_gnome-DATE.img of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
 There are two default users:
