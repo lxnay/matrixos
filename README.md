@@ -1,5 +1,8 @@
 # 👋 Welcome to matrixOS
 
+[![Test](https://github.com/lxnay/matrixos/actions/workflows/test.yml/badge.svg)](https://github.com/lxnay/matrixos/actions/workflows/test.yml)
+[![Licence](https://img.shields.io/badge/licence-BSD%202--Clause-blue.svg)](LICENSE)
+
 matrixOS is a Gentoo-based Linux distribution that blends the power and customizability of Gentoo with the reliability of OSTree atomic upgrades. It leverages OSTree to provide **Atomicity** and **Immutability** guarantees, ensuring that updates are applied entirely or not at all, and the base system remains read-only to prevent accidental damage.
 
 It comes with Flatpak, Snap, and Docker ready to go out of the box.
