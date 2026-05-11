@@ -36,4 +36,4 @@ Only the latest release of matrixOS is actively maintained. If you are running a
 
 ## Preferred Languages
 
-We accept reports in English and Italian.
+We accept reports in English.
