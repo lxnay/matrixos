@@ -30,7 +30,7 @@ go build ./...
 ./dev/test.sh
 ```
 
-This requires `go` and `bats` to be installed. Each tool skips gracefully if not found.
+`go` is required to build and test the vector CLI (steps 2 and 4). `bats` is needed for the shell tests but optional — `./dev/test.sh` skips them gracefully if `bats` is not installed.
 
 **4. Run Go checks:**
 
@@ -57,6 +57,8 @@ AI tools (such as Claude, Copilot, etc.) are welcome to use when preparing contr
 - Ensuring all contributions are submitted under the project's existing [BSD 2-Clause licence](LICENSE)
 
 The AI is a tool — the contributor is accountable for the quality of what is submitted.
+
+> **Warning:** Pull requests that appear to contain unreviewed AI-generated content will be deprioritised and may be closed without review.
 
 ## Licence
 
