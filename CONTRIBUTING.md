@@ -2,11 +2,11 @@
 
 Thank you for your interest in contributing! matrixOS is a hobby project — contributions are welcome, but please keep them focused and small.
 
-## What you can work on without a Gentoo host
+## What you can work on without a full Gentoo build environment
 
-The following areas do not require a full Gentoo build environment and are the most accessible for new contributors:
+The following areas do not require a Gentoo host with root, OSTree, or significant disk and RAM:
 
-- The `vector` CLI tool (`vector/` — Go)
+- The `vector` CLI tool (`vector/` — requires Go to be installed)
 - Shell build scripts and their BATS tests (`dev/`)
 - Documentation (`README.md`, `SECURITY.md`, etc.)
 - CI/CD workflows (`.github/workflows/`)
@@ -47,6 +47,7 @@ gofmt -l .      # no output means clean
 - Ensure `go vet ./...` and `gofmt -l .` produce no output before submitting.
 - Ensure `./dev/test.sh` passes before submitting.
 - Write a clear commit message explaining *why*, not just *what*.
+- **Reply to and resolve all review feedback** on your PR. PRs with unaddressed comments will not be merged.
 
 ## AI-assisted contributions
 
@@ -58,7 +59,7 @@ AI tools (such as Claude, Copilot, etc.) are welcome to use when preparing contr
 
 The AI is a tool — the contributor is accountable for the quality of what is submitted.
 
-> **Warning:** Pull requests that appear to contain unreviewed AI-generated content will be deprioritised and may be closed without review.
+> **Warning:** Do not open a PR without reviewing, understanding, and testing all the changes it contains — AI-generated or otherwise. Pull requests that appear to contain unreviewed AI-generated content will be deprioritised and may be closed without review. PR authors are responsible for actively responding to and resolving all review feedback on their own PRs.
 
 ## Licence
 
