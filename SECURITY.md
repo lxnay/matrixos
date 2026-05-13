@@ -34,6 +34,6 @@ matrixOS images ship with publicly documented default credentials (`matrix`/`mat
 
 Only the latest release of matrixOS is actively maintained. If you are running an older image, please update before reporting.
 
-## Preferred Languages
+## Preferred Language
 
-We accept reports in English.
+English only.
