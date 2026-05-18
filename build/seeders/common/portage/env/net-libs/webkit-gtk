@@ -1,0 +1,3 @@
+# /etc/portage/env/net-libs/webkit-gtk
+export MAKEOPTS="-j4"
+export NINJAOPTS="-j4"
