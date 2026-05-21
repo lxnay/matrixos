@@ -1,3 +1,4 @@
 # We need matrixos mesa w/ostree support patches
 media-libs/mesa::gentoo
-
+# We want our panel setup
+gnome-extra/gnome-shell-extension-dash-to-panel::gentoo
