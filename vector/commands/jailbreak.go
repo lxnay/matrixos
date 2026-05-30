@@ -552,17 +552,17 @@ func (c *JailbreakCommand) generateFstab(sysroot, bootRoot, efiRoot string) erro
 
 // bootloaderSetup orchestrates the full bootloader configuration.
 func (c *JailbreakCommand) bootloaderSetup(bootRoot string) error {
-	bootedKernel, kernelBootArgs, err := c.parseKernelBootArgs()
+	kernelBootArgs, err := c.parseKernelBootArgs()
 	if err != nil {
 		return err
 	}
 
-	bootedKernel, err = c.resolveKernelPath(bootedKernel)
+	release, err := c.kernelRelease()
 	if err != nil {
 		return err
 	}
 
-	bootKernelPath, initramfsBootPath, err := c.copyKernelAndInitramfs(bootedKernel)
+	bootKernelPath, initramfsBootPath, err := c.copyKernelAndInitramfs(release)
 	if err != nil {
 		return err
 	}
@@ -570,19 +570,19 @@ func (c *JailbreakCommand) bootloaderSetup(bootRoot string) error {
 	return c.writeBootloaderEntry(bootRoot, bootKernelPath, initramfsBootPath, kernelBootArgs)
 }
 
-// parseKernelBootArgs reads /proc/cmdline and extracts the booted kernel
-// image path and the filtered list of kernel boot arguments.
-func (c *JailbreakCommand) parseKernelBootArgs() (bootedKernel string, kernelBootArgs []string, err error) {
+// parseKernelBootArgs reads /proc/cmdline and returns the filtered list of
+// kernel boot arguments suitable for re-use in a fresh BLS entry.
+func (c *JailbreakCommand) parseKernelBootArgs() ([]string, error) {
 	cmdlineData, err := c.run.readFile("/proc/cmdline")
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to read /proc/cmdline: %w", err)
+		return nil, fmt.Errorf("failed to read /proc/cmdline: %w", err)
 	}
 
-	args := strings.Fields(strings.TrimSpace(string(cmdlineData)))
-	for _, arg := range args {
+	var kernelBootArgs []string
+	for _, arg := range strings.Fields(strings.TrimSpace(string(cmdlineData))) {
 		switch {
 		case strings.HasPrefix(arg, "BOOT_IMAGE="):
-			bootedKernel = strings.TrimPrefix(arg, "BOOT_IMAGE=")
+			continue
 		case arg == "rw":
 			continue
 		case strings.HasPrefix(arg, "ostree="):
@@ -593,57 +593,46 @@ func (c *JailbreakCommand) parseKernelBootArgs() (bootedKernel string, kernelBoo
 			kernelBootArgs = append(kernelBootArgs, arg)
 		}
 	}
-	return bootedKernel, kernelBootArgs, nil
+	return kernelBootArgs, nil
 }
 
-// resolveKernelPath locates and resolves the real path for the booted kernel.
-func (c *JailbreakCommand) resolveKernelPath(bootedKernel string) (string, error) {
-	if _, err := c.run.stat(bootedKernel); err != nil {
-		bootedKernel = "/boot" + bootedKernel
-	}
-	if _, err := c.run.stat(bootedKernel); err != nil {
-		return "", fmt.Errorf("unable to find booted kernel at %s (from BOOT_IMAGE in /proc/cmdline)", bootedKernel)
-	}
-	resolved, err := c.run.realpath(bootedKernel)
+// kernelRelease returns the running kernel release string (equivalent to
+// `uname -r`).
+func (c *JailbreakCommand) kernelRelease() (string, error) {
+	data, err := c.run.readFile("/proc/sys/kernel/osrelease")
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve kernel path: %w", err)
+		return "", fmt.Errorf("failed to read kernel release: %w", err)
 	}
-	return resolved, nil
+	release := strings.TrimSpace(string(data))
+	if release == "" {
+		return "", fmt.Errorf("kernel release is empty")
+	}
+	return release, nil
 }
 
-// copyKernelAndInitramfs copies the kernel and (if found) the matching
-// initramfs to /boot, returning the destination paths.
-func (c *JailbreakCommand) copyKernelAndInitramfs(bootedKernel string) (bootKernelPath, initramfsBootPath string, err error) {
+// copyKernelAndInitramfs copies the booted kernel (and, when present, the
+// matching initramfs) from the canonical, bootloader-independent location
+// /usr/lib/modules/<release>/ into /boot, returning the destination paths.
+func (c *JailbreakCommand) copyKernelAndInitramfs(release string) (bootKernelPath, initramfsBootPath string, err error) {
 	fmt.Fprintf(c.run.stdout, "%s%sCopying booted kernel ...%s\n",
 		c.cBold, c.iconGear, c.cReset)
 
-	kernelName := filepath.Base(bootedKernel)
-	newKernelName := strings.Replace(kernelName, "vmlinuz-", "kernel-", 1)
-	bootKernelPath = filepath.Join("/boot", newKernelName)
-	if err := c.run.copyFile(bootedKernel, bootKernelPath); err != nil {
-		return "", "", fmt.Errorf("failed to copy kernel: %w", err)
+	modDir := filepath.Join("/usr/lib/modules", release)
+	srcKernel := filepath.Join(modDir, "vmlinuz")
+	bootKernelPath = filepath.Join("/boot", "kernel-"+release)
+	if err := c.run.copyFile(srcKernel, bootKernelPath); err != nil {
+		return "", "", fmt.Errorf("failed to copy kernel from %s: %w", srcKernel, err)
 	}
 
-	// Handle initramfs.
-	initramfsName := strings.Replace(kernelName, "vmlinuz-", "initramfs-", 1)
-	kernelDir := filepath.Dir(bootedKernel)
-	initramfsPath := filepath.Join(kernelDir, initramfsName)
-	if _, err := c.run.stat(initramfsPath); err != nil {
-		initramfsPath = initramfsPath + ".img"
-	}
-
-	if _, err := c.run.stat(initramfsPath); err == nil {
-		resolved, err := c.run.realpath(initramfsPath)
-		if err != nil {
-			return "", "", fmt.Errorf("failed to resolve initramfs path: %w", err)
-		}
-		initramfsBootPath = filepath.Join("/boot", filepath.Base(resolved))
-		if err := c.run.copyFile(resolved, initramfsBootPath); err != nil {
-			return "", "", fmt.Errorf("failed to copy initramfs: %w", err)
+	srcInitramfs := filepath.Join(modDir, "initramfs")
+	if _, err := c.run.stat(srcInitramfs); err == nil {
+		initramfsBootPath = filepath.Join("/boot", "initramfs-"+release)
+		if err := c.run.copyFile(srcInitramfs, initramfsBootPath); err != nil {
+			return "", "", fmt.Errorf("failed to copy initramfs from %s: %w", srcInitramfs, err)
 		}
 	} else {
-		fmt.Fprintf(c.run.stderr, "%s%sInitramfs not found, ignoring ...%s\n",
-			c.cYellow, c.iconWarn, c.cReset)
+		fmt.Fprintf(c.run.stderr, "%s%sInitramfs not found at %s, ignoring ...%s\n",
+			c.cYellow, c.iconWarn, srcInitramfs, c.cReset)
 	}
 
 	return bootKernelPath, initramfsBootPath, nil
