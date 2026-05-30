@@ -14,8 +14,6 @@ const (
 	helpMessage = `matrixos' vector - Your OS handy tool.
 Usage:
 
-  PROTOTYPE! Some features are not fully tested yet!
-
   help        - this command.
   branch      - vector branch command. Operates on OS ostree branches.
     show            show the currently booted branch and its metadata.
