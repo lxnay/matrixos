@@ -46,6 +46,10 @@ _dump_logs() {
     echo "mount output:"
     mount &> /tmp/mount.log
     cat /tmp/mount.log
+
+    echo "/proc/self/mountinfo output:"
+    cat /proc/self/mountinfo &> /tmp/mountinfo.log
+    cat /tmp/mountinfo.log
 }
 
 test.start_sshd() {
