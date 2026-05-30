@@ -28,16 +28,24 @@ _is_cosmic() {
 
 _dump_logs() {
     echo "Collecting systemctl status for debugging:"
-    systemctl status --no-pager > /tmp/systemctl_status.log
+    systemctl status --no-pager &> /tmp/systemctl_status.log
     cat /tmp/systemctl_status.log
 
     echo "Listing failed units:"
-    systemctl --failed > /tmp/systemctl_failed.log
+    systemctl --failed &> /tmp/systemctl_failed.log
     cat /tmp/systemctl_failed.log
 
     echo "Journalctl -xb output:"
-    journalctl -xb > /tmp/journalctl.log
+    journalctl -xb &> /tmp/journalctl.log
     cat /tmp/journalctl.log
+
+    echo "blkid output:"
+    blkid &> /tmp/blkid.log
+    cat /tmp/blkid.log
+
+    echo "mount output:"
+    mount &> /tmp/mount.log
+    cat /tmp/mount.log
 }
 
 test.start_sshd() {
