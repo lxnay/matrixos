@@ -294,6 +294,9 @@ func TestJailbreakBootloaderSetup(t *testing.T) {
 		if path == "/proc/cmdline" {
 			return []byte("BOOT_IMAGE=/vmlinuz-6.12.0 root=UUID=abc rw ostree=/blah quiet splash"), nil
 		}
+		if path == "/proc/sys/kernel/osrelease" {
+			return []byte("6.12.0\n"), nil
+		}
 		return nil, fmt.Errorf("not mocked: %s", path)
 	}
 	runner.stat = statAllowAll
@@ -422,6 +425,9 @@ func TestJailbreakFullRun(t *testing.T) {
 	runner.readFile = func(path string) ([]byte, error) {
 		if path == "/proc/cmdline" {
 			return []byte("BOOT_IMAGE=/vmlinuz-6.12.0 root=UUID=abc rw quiet"), nil
+		}
+		if path == "/proc/sys/kernel/osrelease" {
+			return []byte("6.12.0\n"), nil
 		}
 		// repos.conf
 		reposConf := filepath.Join("/sysroot", "etc", "portage", "repos.conf", "eselect-repo.conf")
@@ -618,6 +624,9 @@ func TestJailbreakSkipDestroyConfirmationFlag(t *testing.T) {
 	runner.readFile = func(path string) ([]byte, error) {
 		if path == "/proc/cmdline" {
 			return []byte("BOOT_IMAGE=/vmlinuz-6.12.0 root=UUID=abc rw quiet"), nil
+		}
+		if path == "/proc/sys/kernel/osrelease" {
+			return []byte("6.12.0\n"), nil
 		}
 		return nil, fmt.Errorf("not mocked: %s", path)
 	}
