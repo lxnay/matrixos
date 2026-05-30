@@ -326,6 +326,66 @@ func TestFindMountContainingPath(t *testing.T) {
 	})
 }
 
+// setupMockTriggerAutomount replaces triggerAutomount with the given callback.
+func setupMockTriggerAutomount(t *testing.T, fn func(string)) {
+	t.Helper()
+	orig := triggerAutomount
+	triggerAutomount = fn
+	t.Cleanup(func() { triggerAutomount = orig })
+}
+
+func TestFindMountContainingPathAutofs(t *testing.T) {
+	// Initial mountinfo: only the systemd autofs stub is visible at /boot
+	// (as produced by systemd-gpt-auto-generator with bootloader=systemd-boot).
+	initial := []*MountInfoEntry{
+		{MountID: 1, Mountpoint: "/", Source: "/dev/sda1", FSType: "btrfs"},
+		{MountID: 85, Mountpoint: "/boot", Source: "systemd-1", FSType: "autofs"},
+	}
+	// After accessing /boot, the kernel triggers the real backing mount which
+	// appears at the same mountpoint as a child of the autofs entry.
+	triggered := []*MountInfoEntry{
+		{MountID: 1, Mountpoint: "/", Source: "/dev/sda1", FSType: "btrfs"},
+		{MountID: 85, Mountpoint: "/boot", Source: "systemd-1", FSType: "autofs"},
+		{MountID: 90, ParentID: 85, Mountpoint: "/boot", Source: "/dev/sda2", FSType: "vfat"},
+	}
+
+	t.Run("ResolvesRealMountAfterTrigger", func(t *testing.T) {
+		entries := initial
+		ReadMountInfo = func() ([]*MountInfoEntry, error) { return entries, nil }
+		t.Cleanup(func() { ReadMountInfo = defaultReadMountInfo })
+
+		var triggered_ string
+		setupMockTriggerAutomount(t, func(p string) {
+			triggered_ = p
+			entries = triggered
+		})
+
+		entry, err := findMountContainingPath("/boot")
+		if err != nil {
+			t.Fatalf("findMountContainingPath failed: %v", err)
+		}
+		if triggered_ != "/boot" {
+			t.Errorf("expected triggerAutomount called with /boot, got %q", triggered_)
+		}
+		if entry.FSType != "vfat" || entry.Source != "/dev/sda2" {
+			t.Errorf("expected real vfat mount, got FSType=%s Source=%s", entry.FSType, entry.Source)
+		}
+	})
+
+	t.Run("KeepsAutofsWhenTriggerYieldsNothing", func(t *testing.T) {
+		setupMockMountInfo(t, initial)
+		setupMockTriggerAutomount(t, func(string) {}) // no-op: no new mount appears.
+
+		entry, err := findMountContainingPath("/boot")
+		if err != nil {
+			t.Fatalf("findMountContainingPath failed: %v", err)
+		}
+		if entry.FSType != "autofs" {
+			t.Errorf("expected autofs fallback, got FSType=%s", entry.FSType)
+		}
+	})
+}
+
 func TestListMountsByPrefix(t *testing.T) {
 	entries := []*MountInfoEntry{
 		{Mountpoint: "/mnt/test"},

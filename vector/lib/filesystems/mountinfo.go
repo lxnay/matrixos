@@ -19,6 +19,10 @@ var (
 
 	// blkidLookup queries a device attribute via blkid. Replaceable for testing.
 	blkidLookup = defaultBlkidLookup
+
+	// triggerAutomount forces a kernel autofs mountpoint to resolve to its real
+	// backing filesystem by accessing the path. Replaceable for testing.
+	triggerAutomount = defaultTriggerAutomount
 )
 
 // MountInfoEntry represents a parsed line from /proc/self/mountinfo.
@@ -180,25 +184,61 @@ func findMountByTarget(mnt string) (*MountInfoEntry, error) {
 // findMountContainingPath returns the entry whose mountpoint is the longest
 // prefix of path (equivalent to findmnt -T <path>).
 // The path is resolved through symlinks before comparison.
+//
+// When the best match is a systemd autofs stub (FSType=autofs, Source=systemd-1),
+// as installed by systemd-gpt-auto-generator for /boot and /efi on systemd-boot
+// systems, the path is touched to trigger the automount and mountinfo is
+// re-scanned so the real backing filesystem entry is returned instead.
 func findMountContainingPath(path string) (*MountInfoEntry, error) {
 	entries, err := ReadMountInfo()
 	if err != nil {
 		return nil, err
 	}
 	resolved := resolvePath(path)
-	var best *MountInfoEntry
-	bestLen := -1
-	for i := range entries {
-		mp := entries[i].Mountpoint
-		if isPathUnderMount(resolved, mp) && len(mp) > bestLen {
-			bestLen = len(mp)
-			best = entries[i]
+	best := bestMountForPath(entries, resolved)
+	if best != nil && best.FSType == "autofs" {
+		triggerAutomount(resolved)
+		if refreshed, rErr := ReadMountInfo(); rErr == nil {
+			if b := bestMountForPath(refreshed, resolved); b != nil {
+				best = b
+			}
 		}
 	}
 	if best == nil {
 		return nil, fmt.Errorf("no mount found containing path %s", path)
 	}
 	return best, nil
+}
+
+// bestMountForPath returns the entry whose mountpoint is the longest prefix
+// of resolved. On ties (same mountpoint), a non-autofs entry is preferred
+// over an autofs stub so the real backing filesystem wins.
+func bestMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntry {
+	var best *MountInfoEntry
+	bestLen := -1
+	for i := range entries {
+		mp := entries[i].Mountpoint
+		if !isPathUnderMount(resolved, mp) {
+			continue
+		}
+		switch {
+		case len(mp) > bestLen:
+			bestLen = len(mp)
+			best = entries[i]
+		case len(mp) == bestLen && best != nil && best.FSType == "autofs" && entries[i].FSType != "autofs":
+			best = entries[i]
+		}
+	}
+	return best
+}
+
+// defaultTriggerAutomount opens the path so that the kernel resolves any
+// systemd autofs stub mounted there to its real backing filesystem. Failures
+// are ignored: the caller falls back to whatever mountinfo currently reports.
+func defaultTriggerAutomount(path string) {
+	if f, err := os.Open(path); err == nil {
+		_ = f.Close()
+	}
 }
 
 // listMountsByPrefix returns entries whose mountpoint starts with prefix.
