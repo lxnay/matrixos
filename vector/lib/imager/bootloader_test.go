@@ -480,6 +480,46 @@ func TestSystemdBootConfigureMemtest(t *testing.T) {
 	})
 }
 
+// TestSystemdBootBootArgs locks in the invariants required for the
+// Plymouth-splash + serial-console combo to coexist:
+//   - plymouth.ignore-serial-consoles must be present, otherwise Plymouth
+//     redirects the splash to ttyS0;
+//   - a serial console must be present so the VM test harness can capture
+//     kernel output;
+//   - tty0 must be the LAST console= argument, because the kernel uses the
+//     last one as /dev/console (and that's where Plymouth renders).
+func TestSystemdBootBootArgs(t *testing.T) {
+	im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+	s := NewSystemdBootBootloader(im)
+	args, err := s.BootArgs()
+	if err != nil {
+		t.Fatalf("BootArgs: %v", err)
+	}
+
+	var hasIgnore, hasSerial bool
+	lastConsole := ""
+	for _, a := range args {
+		if a == "plymouth.ignore-serial-consoles" {
+			hasIgnore = true
+		}
+		if strings.HasPrefix(a, "console=ttyS") {
+			hasSerial = true
+		}
+		if strings.HasPrefix(a, "console=") {
+			lastConsole = a
+		}
+	}
+	if !hasIgnore {
+		t.Errorf("missing plymouth.ignore-serial-consoles in %v", args)
+	}
+	if !hasSerial {
+		t.Errorf("missing serial console=ttyS* in %v", args)
+	}
+	if lastConsole != "console=tty0" {
+		t.Errorf("last console= must be tty0 (kernel uses it as /dev/console for Plymouth), got %q in %v", lastConsole, args)
+	}
+}
+
 // --- GenerateKernelBootArgs Tests ---
 
 func TestGenerateKernelBootArgs(t *testing.T) {

@@ -101,7 +101,9 @@ func (s *SystemdBootBootloader) Configure() error {
 
 func (s *SystemdBootBootloader) BootArgs() ([]string, error) {
 	return []string{
+		"plymouth.ignore-serial-consoles",
 		"console=ttyS0,115200",
+		"console=tty0",
 	}, nil
 }
 
