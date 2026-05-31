@@ -316,6 +316,31 @@ func TestFormatBootfs(t *testing.T) {
 		}
 	})
 
+	t.Run("Vfat", func(t *testing.T) {
+		r := runner.NewMockRunner()
+		cfg := baseImageConfig()
+		cfg.Items["Imager.BootFilesystemType"] = []string{"vfat"}
+		im := newTestImagerWithRunner(cfg, &ostree.MockOstree{}, r)
+		im.bootDevice = "/dev/loop0p2"
+		if err := im.FormatBootfs(); err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if r.Calls[0].Name != "mkfs.vfat" {
+			t.Errorf("expected mkfs.vfat, got %q", r.Calls[0].Name)
+		}
+	})
+
+	t.Run("InvalidFsType", func(t *testing.T) {
+		r := runner.NewMockRunner()
+		cfg := baseImageConfig()
+		cfg.Items["Imager.BootFilesystemType"] = []string{"ext4"}
+		im := newTestImagerWithRunner(cfg, &ostree.MockOstree{}, r)
+		im.bootDevice = "/dev/loop0p2"
+		if err := im.FormatBootfs(); err == nil {
+			t.Error("expected error for unsupported fs type")
+		}
+	})
+
 	t.Run("Empty", func(t *testing.T) {
 		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
 		if err := im.FormatBootfs(); err == nil {
@@ -340,6 +365,23 @@ func TestMountBootfs(t *testing.T) {
 		}
 		if len(runner.Calls) != 1 || runner.Calls[0].Name != "mount" {
 			t.Errorf("expected mount call, got %v", runner.Calls)
+		}
+	})
+
+	t.Run("VfatPassesTFlag", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mountPoint := filepath.Join(tmpDir, "boot")
+		r := runner.NewMockRunner()
+		cfg := baseImageConfig()
+		cfg.Items["Imager.BootFilesystemType"] = []string{"vfat"}
+		im := newTestImagerWithRunner(cfg, &ostree.MockOstree{}, r)
+		im.bootDevice = "/dev/loop0p2"
+		if err := im.MountBootfs(mountPoint); err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		args := r.Calls[0].Args
+		if len(args) < 2 || args[0] != "-t" || args[1] != "vfat" {
+			t.Errorf("expected -t vfat in mount args, got %v", args)
 		}
 	})
 

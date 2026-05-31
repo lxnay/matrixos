@@ -189,3 +189,19 @@ func (c *ImagerConfig) Parallelism() (int, error) {
 	}
 	return n, nil
 }
+
+// BootFilesystemType returns the filesystem type for the boot partition.
+// Valid values are "btrfs" and "vfat".
+func (c *ImagerConfig) BootFilesystemType() (string, error) {
+	return c.configItem("Imager.BootFilesystemType")
+}
+
+// Bootloader returns the bootloader to install in the generated image.
+// Valid values are "grub" and "systemd-boot".
+func (c *ImagerConfig) Bootloader() (string, error) {
+	v, err := c.cfg.GetItem("Imager.Bootloader")
+	if err != nil || v == "" {
+		return "grub", nil
+	}
+	return v, nil
+}

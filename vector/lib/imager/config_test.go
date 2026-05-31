@@ -46,6 +46,7 @@ func TestConfigAccessors(t *testing.T) {
 		{"LockWaitSeconds", im.LockWaitSeconds, "300"},
 		{"HooksDir", im.HooksDir, "/tmp/image/hooks"},
 		{"TestsDir", im.TestsDir, "/tmp/image/tests"},
+		{"BootFilesystemType", im.BootFilesystemType, "btrfs"},
 	}
 
 	for _, tt := range tests {

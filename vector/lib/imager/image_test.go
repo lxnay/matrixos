@@ -42,6 +42,8 @@ func baseImageConfig() *config.MockConfig {
 			"matrixOS.LogsDir":                      {"/tmp/logs"},
 			"Imager.HooksDir":                       {"/tmp/image/hooks"},
 			"Imager.TestsDir":                       {"/tmp/image/tests"},
+			"Imager.BootFilesystemType":             {"btrfs"},
+			"Imager.Bootloader":                     {"grub"},
 		},
 	}
 }

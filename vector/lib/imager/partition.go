@@ -258,18 +258,36 @@ func (im *Imager) FormatBootfs() error {
 	if im.bootDevice == "" {
 		return errors.New("missing bootDevice, not set in NewImagerOptions")
 	}
-
-	label := "MB" + im.DatedFsLabel()
-	im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
-	args := []string{
-		"mkfs.btrfs",
-		"-f",
-		"-L", label,
-		im.bootDevice,
+	fsType, err := im.BootFilesystemType()
+	if err != nil {
+		return fmt.Errorf("failed to get boot filesystem type: %w", err)
 	}
+	label := "MB" + im.DatedFsLabel()
+	switch fsType {
+	case "btrfs":
+		return im.formatBootfsBtrfs(label)
+	case "vfat":
+		return im.formatBootfsVfat(label)
+	default:
+		return fmt.Errorf("unsupported boot filesystem type %q: must be btrfs or vfat", fsType)
+	}
+}
+
+func (im *Imager) formatBootfsBtrfs(label string) error {
+	im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
 	return im.runner(&runner.Cmd{
-		Name:   args[0],
-		Args:   args[1:],
+		Name:   "mkfs.btrfs",
+		Args:   []string{"-f", "-L", label, im.bootDevice},
+		Stdout: im.stdout,
+		Stderr: im.stderr,
+	})
+}
+
+func (im *Imager) formatBootfsVfat(label string) error {
+	im.Print("Creating vfat on %s (boot)\n", im.bootDevice)
+	return im.runner(&runner.Cmd{
+		Name:   "mkfs.vfat",
+		Args:   []string{"-F", "32", "-n", label, im.bootDevice},
 		Stdout: im.stdout,
 		Stderr: im.stderr,
 	})
@@ -282,19 +300,28 @@ func (im *Imager) MountBootfs(mountBootfs string) error {
 	if mountBootfs == "" {
 		return errors.New("missing mountBootfs parameter")
 	}
-
+	fsType, err := im.BootFilesystemType()
+	if err != nil {
+		return fmt.Errorf("failed to get boot filesystem type: %w", err)
+	}
 	if !filesystems.DirectoryExists(mountBootfs) {
 		im.Print("Creating %s ...\n", mountBootfs)
 		if err := os.MkdirAll(mountBootfs, 0755); err != nil {
 			return fmt.Errorf("failed to create mount point %s: %w", mountBootfs, err)
 		}
 	}
-
 	im.Print("Mounting %s to %s\n", im.bootDevice, mountBootfs)
 	im.trackMount(mountBootfs)
+	var mountArgs []string
+	switch fsType {
+	case "vfat":
+		mountArgs = []string{"-t", "vfat", im.bootDevice, mountBootfs}
+	default:
+		mountArgs = []string{im.bootDevice, mountBootfs}
+	}
 	if err := im.runner(&runner.Cmd{
 		Name:   "mount",
-		Args:   []string{im.bootDevice, mountBootfs},
+		Args:   mountArgs,
 		Stdout: im.stdout,
 		Stderr: im.stderr,
 	}); err != nil {

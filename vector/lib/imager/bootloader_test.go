@@ -19,19 +19,50 @@ func TestGrubBootloaderImplementsBootloader(t *testing.T) {
 	var _ Bootloader = (*GrubBootloader)(nil)
 }
 
+func TestSystemdBootBootloaderImplementsBootloader(t *testing.T) {
+	var _ Bootloader = (*SystemdBootBootloader)(nil)
+}
+
 func TestMockBootloaderImplementsBootloader(t *testing.T) {
 	var _ Bootloader = (*MockBootloader)(nil)
 }
 
 func TestGetBootloader(t *testing.T) {
-	im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
-	bl := im.GetBootloader()
-	if bl == nil {
-		t.Fatal("GetBootloader() returned nil")
-	}
-	if _, ok := bl.(*GrubBootloader); !ok {
-		t.Fatalf("expected *GrubBootloader, got %T", bl)
-	}
+	t.Run("DefaultsToGrub", func(t *testing.T) {
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		bl := im.GetBootloader()
+		if bl == nil {
+			t.Fatal("GetBootloader() returned nil")
+		}
+		if _, ok := bl.(*GrubBootloader); !ok {
+			t.Fatalf("expected *GrubBootloader, got %T", bl)
+		}
+	})
+
+	t.Run("SystemdBoot", func(t *testing.T) {
+		cfg := baseImageConfig()
+		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
+		im := newTestImager(cfg, &ostree.MockOstree{})
+		bl := im.GetBootloader()
+		if bl == nil {
+			t.Fatal("GetBootloader() returned nil")
+		}
+		if _, ok := bl.(*SystemdBootBootloader); !ok {
+			t.Fatalf("expected *SystemdBootBootloader, got %T", bl)
+		}
+	})
+
+	t.Run("UnknownBootloaderErrors", func(t *testing.T) {
+		cfg := baseImageConfig()
+		cfg.Items["Imager.Bootloader"] = []string{"lilo"}
+		_, err := NewImager(cfg, &ostree.MockOstree{}, filesystems.DefaultMockFsenc(), nil)
+		if err == nil {
+			t.Fatal("expected error for unknown bootloader")
+		}
+		if !strings.Contains(err.Error(), "unknown bootloader") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }
 
 // --- InstallBootloader Tests ---
@@ -504,7 +535,7 @@ func TestInstallBootloaderAdditional(t *testing.T) {
 // --- InstallSecurebootCerts additional tests ---
 
 func TestInstallSecurebootCertsAdditional(t *testing.T) {
-	t.Run("NoCertsNoShim", func(t *testing.T) {
+	t.Run("NoCerts", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		efiMount := filepath.Join(tmpDir, "efimount")
 		efibootdir := filepath.Join(efiMount, "EFI/BOOT")
@@ -515,14 +546,9 @@ func TestInstallSecurebootCertsAdditional(t *testing.T) {
 		im := newTestImagerWithRunner(cfg, &ostree.MockOstree{}, mockRunner)
 		im.SetRootfs(tmpDir)
 		im.efifsMount = efiMount
-		// No certs exist in rootfs, no shim dir either.
-		// Function should print warnings and fail when trying to copy shim dir.
-		err := im.InstallSecurebootCerts()
-		if err != nil {
-			// Expected to error because shim dir doesn't exist.
-			if !strings.Contains(err.Error(), "") {
-				// Any error is acceptable here.
-			}
+		// No certs exist in rootfs: function should print warnings and succeed.
+		if err := im.InstallSecurebootCerts(); err != nil {
+			t.Fatalf("expected nil error when no certs are present, got: %v", err)
 		}
 	})
 }

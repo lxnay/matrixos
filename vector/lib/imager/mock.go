@@ -26,6 +26,10 @@ func (m *MockBootloader) Install() error {
 	return m.InstallErr
 }
 
+func (m *MockBootloader) BootArgs() ([]string, error) {
+	return []string{}, nil
+}
+
 func (m *MockBootloader) ConfigureVmtest() error {
 	m.ConfigureVmtestCalled = true
 	return m.ConfigureVmtestErr
@@ -76,8 +80,8 @@ func (m *MockImager) PrintError(format string, a ...any) {
 }
 
 func (m *MockImager) SetRef(ref string)              { m.Ref_ = ref }
-func (m *MockImager) Build(opts *BuildOptions) error  { m.BuildCalled = true; return m.BuildErr }
-func (m *MockImager) Cleanup()                        { m.CleanupCalled = true }
+func (m *MockImager) Build(opts *BuildOptions) error { m.BuildCalled = true; return m.BuildErr }
+func (m *MockImager) Cleanup()                       { m.CleanupCalled = true }
 
 // ExecuteWithImageLock either calls fn directly or returns the configured error.
 func (m *MockImager) ExecuteWithImageLock(fn func() error) error {

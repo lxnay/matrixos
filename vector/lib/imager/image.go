@@ -230,7 +230,18 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		stdout:       os.Stdout,
 		stderr:       os.Stderr,
 	}
-	im.bootloader = NewGrubBootloader(im)
+	bootloaderName, err := im.Bootloader()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read bootloader config: %w", err)
+	}
+	switch bootloaderName {
+	case "grub":
+		im.bootloader = NewGrubBootloader(im)
+	case "systemd-boot":
+		im.bootloader = NewSystemdBootBootloader(im)
+	default:
+		return nil, fmt.Errorf("unknown bootloader %q: must be \"grub\" or \"systemd-boot\"", bootloaderName)
+	}
 	if opts != nil {
 		im.efiDevice = opts.EfiDevice
 		im.bootDevice = opts.BootDevice

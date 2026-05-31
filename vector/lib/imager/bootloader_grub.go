@@ -166,6 +166,40 @@ func (g *GrubBootloader) Configure() error {
 	return nil
 }
 
+func (g *GrubBootloader) BootArgs() ([]string, error) {
+	im := g.im
+
+	if im.efiDevice == "" {
+		return nil, errors.New("missing efiDevice, not set in NewImagerOptions")
+	}
+	if im.bootDevice == "" {
+		return nil, errors.New("missing bootDevice, not set in NewImagerOptions")
+	}
+
+	// grub does not benefit from systemd-gpt-auto-generator the way systemd-boot
+	// does: instruct systemd explicitly to mount the ESP and boot partitions.
+	efiRoot, err := im.EfiRoot()
+	if err != nil {
+		return nil, err
+	}
+	efiPartUUID, err := filesystems.DevicePartUUID(im.efiDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get PARTUUID of EFI partition: %w", err)
+	}
+	bootRoot, err := im.BootRoot()
+	if err != nil {
+		return nil, err
+	}
+	bootPartUUID, err := filesystems.DevicePartUUID(im.bootDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get PARTUUID of boot partition: %w", err)
+	}
+	return []string{
+		fmt.Sprintf("systemd.mount-extra=PARTUUID=%s:%s:auto:defaults", efiPartUUID, efiRoot),
+		fmt.Sprintf("systemd.mount-extra=PARTUUID=%s:%s:auto:defaults", bootPartUUID, bootRoot),
+	}, nil
+}
+
 func (g *GrubBootloader) Install() error {
 	im := g.im
 
@@ -245,6 +279,16 @@ func (g *GrubBootloader) Install() error {
 	im.Print("Moving %s to %s\n", signedGrubx64efi, grubx64efi)
 	if err := filesystems.Move(signedGrubx64efi, grubx64efi); err != nil {
 		return fmt.Errorf("failed to move signed grub binary: %w", err)
+	}
+
+	// Copy the shim binaries onto the EFI BOOT dir. shim is grub-specific:
+	// it overrides BOOTX64.EFI so that, on SecureBoot, the firmware launches
+	// shim which in turn chain-loads grubx64.efi. Other bootloaders (e.g.
+	// systemd-boot) must NOT have shim copied over their own BOOTX64.EFI.
+	shimDir := filepath.Join(im.rootfs, "usr", "share", "shim")
+	im.Print("Copying shim for Secureboot from %s to %s ...\n", shimDir, efibootDir)
+	if err := filesystems.CopyDirPreserve(shimDir, efibootDir); err != nil {
+		return fmt.Errorf("failed to copy shim binaries from %s: %w", shimDir, err)
 	}
 
 	return nil

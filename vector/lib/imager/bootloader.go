@@ -19,6 +19,12 @@ type Bootloader interface {
 	// Configure sets up the bootloader configuration files
 	// (e.g., config files, themes, environment variables).
 	Configure() error
+
+	// BootArgs generates the kernel boot arguments needed for the image based on
+	// the imager configuration and image content. These boot args can be bootloader
+	// specific.
+	BootArgs() ([]string, error)
+
 	// Install installs the bootloader binaries into the image.
 	Install() error
 	// ConfigureVmtest sets up VM test boot configuration.
@@ -33,6 +39,11 @@ func (im *Imager) SetupBootloaderConfig() error {
 // InstallBootloader delegates to the configured Bootloader.Install().
 func (im *Imager) InstallBootloader() error {
 	return im.bootloader.Install()
+}
+
+// GenerateBootArgs delegates to the configured Bootloader.BootArgs().
+func (im *Imager) GenerateBootArgs() ([]string, error) {
+	return im.bootloader.BootArgs()
 }
 
 // SetupVmtestConfig delegates to the configured Bootloader.ConfigureVmtest().
@@ -51,10 +62,6 @@ func (im *Imager) InstallSecurebootCerts() error {
 	}
 	if im.efifsMount == "" {
 		return errors.New("missing efifsMount, call MountEfifs first")
-	}
-	efibootDir, err := im.EfiBootDir()
-	if err != nil {
-		return err
 	}
 
 	certFileName, err := im.EfiCertificateFileName()
@@ -127,10 +134,7 @@ func (im *Imager) InstallSecurebootCerts() error {
 		im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", sbKek)
 	}
 
-	// Copy the shim binaries.
-	shimDir := filepath.Join(im.rootfs, "usr", "share", "shim")
-	im.Print("Copying shim for Secureboot from %s to %s ...\n", shimDir, efibootDir)
-	return filesystems.CopyDirPreserve(shimDir, efibootDir)
+	return nil
 }
 
 func (im *Imager) InstallMemtest() error {
@@ -176,6 +180,12 @@ func (im *Imager) GenerateKernelBootArgs() ([]string, error) {
 
 	bootArgs := im.RootfsKernelArgs()
 
+	bootloaderBootArgs, err := im.GenerateBootArgs()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate bootloader boot args: %w", err)
+	}
+	bootArgs = append(bootArgs, bootloaderBootArgs...)
+
 	// Root device UUID for LUKS.
 	rootDeviceUUID, err := filesystems.DeviceUUID(rootDevice)
 	if err != nil {
@@ -184,28 +194,6 @@ func (im *Imager) GenerateKernelBootArgs() ([]string, error) {
 	if im.encrypted {
 		bootArgs = append(bootArgs, fmt.Sprintf("rd.luks.uuid=%s", rootDeviceUUID))
 	}
-
-	// EFI partition mount via systemd.
-	efiRoot, err := im.EfiRoot()
-	if err != nil {
-		return nil, err
-	}
-	efiPartUUID, err := filesystems.DevicePartUUID(im.efiDevice)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get PARTUUID of EFI partition: %w", err)
-	}
-	bootArgs = append(bootArgs, fmt.Sprintf("systemd.mount-extra=PARTUUID=%s:%s:auto:defaults", efiPartUUID, efiRoot))
-
-	// Boot partition mount via systemd.
-	bootRoot, err := im.BootRoot()
-	if err != nil {
-		return nil, err
-	}
-	bootPartUUID, err := filesystems.DevicePartUUID(im.bootDevice)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get PARTUUID of boot partition: %w", err)
-	}
-	bootArgs = append(bootArgs, fmt.Sprintf("systemd.mount-extra=PARTUUID=%s:%s:auto:defaults", bootPartUUID, bootRoot))
 
 	// Read additional kernel cmdline params from the image boot directory.
 	devDir, err := im.DevDir()
