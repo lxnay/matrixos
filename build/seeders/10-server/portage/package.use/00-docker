@@ -1,2 +1,4 @@
 # For headless servers, USE=pass is preferred over USE=keyring
 app-containers/docker-credential-helpers pass
+# This is required by pass, pulled in by docker-credential-helpers
+media-gfx/qrencode png
