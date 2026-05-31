@@ -191,6 +191,37 @@ func (s *SystemdBootBootloader) Install() error {
 	return nil
 }
 
+// ConfigureMemtest writes a systemd-boot Type-1 loader entry for the
+// memtest86+ EFI binary already installed by InstallMemtest at
+// <esp>/<RelativeEfiBootPath>/memtest86plus.efi.
+func (s *SystemdBootBootloader) ConfigureMemtest(memtestBin string) error {
+	im := s.im
+
+	if im.efifsMount == "" {
+		return errors.New("missing efifsMount, call MountEfifs first")
+	}
+
+	relEfiBootPath, err := im.RelativeEfiBootPath()
+	if err != nil {
+		return fmt.Errorf("failed to determine relative EFI boot path: %w", err)
+	}
+
+	entriesDir := filepath.Join(im.efifsMount, "loader", "entries")
+	if err := os.MkdirAll(entriesDir, 0755); err != nil {
+		return fmt.Errorf("failed to create loader entries dir %s: %w", entriesDir, err)
+	}
+
+	// systemd-boot wants forward-slash, ESP-relative paths starting with /.
+	efiPath := "/" + filepath.ToSlash(filepath.Join(relEfiBootPath, "memtest86plus.efi"))
+	entry := fmt.Sprintf("title    Memtest86+\nefi      %s\n", efiPath)
+	entryPath := filepath.Join(entriesDir, "memtest.conf")
+	if err := os.WriteFile(entryPath, []byte(entry), 0644); err != nil {
+		return fmt.Errorf("failed to write memtest loader entry: %w", err)
+	}
+	im.Print("Wrote systemd-boot memtest entry %s -> %s\n", entryPath, efiPath)
+	return nil
+}
+
 // ConfigureVmtest is a no-op for systemd-boot for now.
 // The GRUB implementation uses SMBIOS detection at runtime, which systemd-boot
 // cannot replicate. Systemd-boot works fine without any special configuration.

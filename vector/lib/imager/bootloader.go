@@ -27,6 +27,11 @@ type Bootloader interface {
 
 	// Install installs the bootloader binaries into the image.
 	Install() error
+
+	// ConfigureMemtest sets up the memtest86+ EFI binary in the image
+	// if available on the host.
+	ConfigureMemtest(memtestBin string) error
+
 	// ConfigureVmtest sets up VM test boot configuration.
 	ConfigureVmtest() error
 }
@@ -151,7 +156,11 @@ func (im *Imager) InstallMemtest() error {
 		im.PrintWarning("WARNING: %s not available, please install memtest86+\n", memtestBin)
 		return nil
 	}
-	return filesystems.CopyFile(memtestBin, filepath.Join(efibootDir, "memtest86plus.efi"))
+	if err := filesystems.CopyFile(memtestBin, filepath.Join(efibootDir, "memtest86plus.efi")); err != nil {
+		return fmt.Errorf("failed to copy memtest86+ EFI binary: %w", err)
+	}
+
+	return im.bootloader.ConfigureMemtest(memtestBin)
 }
 
 func (im *Imager) GenerateKernelBootArgs() ([]string, error) {

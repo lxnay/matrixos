@@ -367,6 +367,117 @@ func TestInstallMemtest(t *testing.T) {
 			t.Error("memtest86plus.efi should have been copied")
 		}
 	})
+
+	t.Run("DelegatesToBootloader", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		memtestDir := filepath.Join(tmpDir, "usr", "share", "memtest86+")
+		os.MkdirAll(memtestDir, 0755)
+		hostMemtest := filepath.Join(memtestDir, "memtest.efi64")
+		os.WriteFile(hostMemtest, []byte("EFI"), 0644)
+		efiMount := filepath.Join(tmpDir, "efimount")
+		os.MkdirAll(filepath.Join(efiMount, "EFI/BOOT"), 0755)
+
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		im.SetRootfs(tmpDir)
+		im.efifsMount = efiMount
+		mock := &MockBootloader{}
+		im.bootloader = mock
+
+		if err := im.InstallMemtest(); err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if !mock.ConfigureMemtestCalled {
+			t.Error("ConfigureMemtest should have been called on the bootloader")
+		}
+		if mock.ConfigureMemtestBin != hostMemtest {
+			t.Errorf("ConfigureMemtest bin = %q, want %q", mock.ConfigureMemtestBin, hostMemtest)
+		}
+	})
+
+	t.Run("SkippedWhenMemtestMissing", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		efiMount := filepath.Join(tmpDir, "efimount")
+		os.MkdirAll(filepath.Join(efiMount, "EFI/BOOT"), 0755)
+
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		im.SetRootfs(tmpDir)
+		im.efifsMount = efiMount
+		mock := &MockBootloader{}
+		im.bootloader = mock
+
+		if err := im.InstallMemtest(); err != nil {
+			t.Fatalf("error: %v", err)
+		}
+		if mock.ConfigureMemtestCalled {
+			t.Error("ConfigureMemtest must not be called when memtest is missing")
+		}
+	})
+}
+
+// --- ConfigureMemtest Tests ---
+
+func TestGrubConfigureMemtestIsNoop(t *testing.T) {
+	im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+	g := NewGrubBootloader(im)
+	if err := g.ConfigureMemtest("/anywhere/memtest.efi64"); err != nil {
+		t.Errorf("GRUB ConfigureMemtest should be a no-op, got: %v", err)
+	}
+}
+
+func TestSystemdBootConfigureMemtest(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		efiMount := filepath.Join(tmpDir, "efimount")
+		if err := os.MkdirAll(efiMount, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := baseImageConfig()
+		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
+		im := newTestImager(cfg, &ostree.MockOstree{})
+		im.efifsMount = efiMount
+		s := NewSystemdBootBootloader(im)
+
+		if err := s.ConfigureMemtest("/rootfs/usr/share/memtest86+/memtest.efi64"); err != nil {
+			t.Fatalf("ConfigureMemtest: %v", err)
+		}
+
+		entryPath := filepath.Join(efiMount, "loader/entries/memtest.conf")
+		data, err := os.ReadFile(entryPath)
+		if err != nil {
+			t.Fatalf("loader entry not written: %v", err)
+		}
+		got := string(data)
+		if !strings.Contains(got, "title    Memtest86+") {
+			t.Errorf("missing title line, got:\n%s", got)
+		}
+		if !strings.Contains(got, "efi      /EFI/BOOT/memtest86plus.efi") {
+			t.Errorf("missing or wrong efi line, got:\n%s", got)
+		}
+	})
+
+	t.Run("MissingEfifsMount", func(t *testing.T) {
+		cfg := baseImageConfig()
+		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
+		im := newTestImager(cfg, &ostree.MockOstree{})
+		s := NewSystemdBootBootloader(im)
+		if err := s.ConfigureMemtest("/x"); err == nil {
+			t.Error("should error when efifsMount is unset")
+		}
+	})
+
+	t.Run("MissingRelativeEfiBootPath", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfg := baseImageConfig()
+		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
+		delete(cfg.Items, "Imager.RelativeEfiBootPath")
+		im := newTestImager(cfg, &ostree.MockOstree{})
+		im.efifsMount = tmpDir
+		s := NewSystemdBootBootloader(im)
+		if err := s.ConfigureMemtest("/x"); err == nil {
+			t.Error("should error when RelativeEfiBootPath is unset")
+		}
+	})
 }
 
 // --- GenerateKernelBootArgs Tests ---
