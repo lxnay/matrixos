@@ -1,0 +1,2 @@
+# For headless servers, USE=pass is preferred over USE=keyring
+app-containers/docker-credential-helpers pass
