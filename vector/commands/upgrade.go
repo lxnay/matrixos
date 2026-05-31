@@ -18,9 +18,16 @@ import (
 var _ ICommand = (*UpgradeCommand)(nil)
 
 var (
-	grubEfiBinary = "GRUBX64.EFI"
-	bootloaders   = []string{
+	grubEfiBinary        = "GRUBX64.EFI"
+	systemdBootEfiBinary = "systemd-bootx64.efi"
+	// shimMOKManager is the file shim ships alongside its own BOOTX64.EFI.
+	// Its presence in an EFI directory is our signal that shim is actually
+	// deployed there (and therefore that the directory's BOOTX64.EFI is the
+	// shim binary, not e.g. systemd-boot's fallback).
+	shimMOKManager = "mmx64.efi"
+	bootloaders    = []string{
 		grubEfiBinary,
+		systemdBootEfiBinary,
 	}
 	// pagerBinary is the pager command to use for long output.
 	pagerBinary = "less"
@@ -214,20 +221,21 @@ func (c *UpgradeCommand) updateBootloader(commit string) error {
 	c.Printf("\n%s%sUpdating bootloader binaries...%s\n",
 		c.cBold, c.iconGear, c.cReset)
 
-	if err := c.updateGrub_x64(commit); err != nil {
-		return fmt.Errorf("failed to update GRUB: %w", err)
+	if err := c.updateEfiBinaries(commit); err != nil {
+		return fmt.Errorf("failed to update EFI binaries: %w", err)
 	}
 
-	// This is a placeholder for the actual bootloader update logic.
-	// In a real implementation, this would involve copying files from the new
-	// commit to /boot or /efi.
 	c.Printf("%s%sBootloader updated successfully for commit %s.%s\n",
 		c.cGreen, c.iconCheck, commit, c.cReset)
 	return nil
 }
 
-func (c *UpgradeCommand) updateGrub_x64(commit string) error {
-	// Search for GRUBX64.EFI files in /efi.
+// updateEfiBinaries discovers and refreshes every supported bootloader binary
+// already deployed under Imager.EfiRoot. GRUBX64.EFI and systemd-bootx64.efi
+// are each replaced from their canonical location inside the new ostree
+// deployment. Shim binaries are refreshed independently and only on EFI dirs
+// where shim is actually deployed (signalled by the presence of mmx64.efi).
+func (c *UpgradeCommand) updateEfiBinaries(commit string) error {
 	efiRoot, err := c.cfg.GetItem("Imager.EfiRoot")
 	if err != nil {
 		return fmt.Errorf("failed to get EfiRoot from config: %w", err)
@@ -258,8 +266,13 @@ func (c *UpgradeCommand) updateGrub_x64(commit string) error {
 		return fmt.Errorf("failed to stat SecureBoot certificate file: %w", err)
 	}
 
-	// use WalkDir to find all GRUBX64.EFI files, then use sbverify.
-	efis := []string{}
+	newRoot, err := c.deploymentRoot(commit)
+	if err != nil {
+		return err
+	}
+
+	type efiHit struct{ dir, name string }
+	var hits []efiHit
 	err = filepath.WalkDir(efiRoot, func(
 		path string, d os.DirEntry, err error,
 	) error {
@@ -269,121 +282,181 @@ func (c *UpgradeCommand) updateGrub_x64(commit string) error {
 		if d.IsDir() {
 			return nil
 		}
-		fname := d.Name()
-		if slices.Contains(bootloaders, fname) {
-			c.Printf("   Found EFI file: %s%s%s\n", c.cBlue, path, c.cReset)
-
-			cmd := execCommand("sbverify", "--cert", sbCertPath, path)
-			// cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-
-			if err := cmd.Run(); err != nil {
-				c.PrintErrf(
-					"   %s%sError verifying EFI file %s: %v%s\n",
-					c.cRed, c.iconError, path, err, c.cReset)
-				return nil
-			}
-			c.Printf("   %sVerified EFI file: %s%s%s\n",
-				c.iconCheck, c.cGreen, path, c.cReset)
-			efis = append(efis, path)
+		if !slices.Contains(bootloaders, d.Name()) {
+			return nil
 		}
+		c.Printf("   Found EFI file: %s%s%s\n", c.cBlue, path, c.cReset)
+
+		cmd := execCommand("sbverify", "--cert", sbCertPath, path)
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			c.PrintErrf(
+				"   %s%sError verifying EFI file %s: %v%s\n",
+				c.cRed, c.iconError, path, err, c.cReset)
+			return fmt.Errorf("sbverify failed for %s: %w", path, err)
+		}
+		c.Printf("   %sVerified EFI file: %s%s%s\n",
+			c.iconCheck, c.cGreen, path, c.cReset)
+		hits = append(hits, efiHit{dir: filepath.Dir(path), name: d.Name()})
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed to collect bootloaders: %w", err)
 	}
-	for _, efi := range efis {
-		efiDir := filepath.Dir(efi)
+
+	var haveGrub, haveSystemd bool
+	for _, h := range hits {
 		c.Printf("   %sUpdating bootloader binaries in %s...\n",
-			c.iconPackage, efiDir)
-		if err := c.updateGrubDir_x64(efiDir, commit); err != nil {
-			return fmt.Errorf("failed to update bootloader binaries: %w", err)
+			c.iconPackage, h.dir)
+		switch h.name {
+		case grubEfiBinary:
+			haveGrub = true
+			if err := c.updateGrubDir(newRoot, h.dir, commit); err != nil {
+				return fmt.Errorf("failed to update grub binaries: %w", err)
+			}
+		case systemdBootEfiBinary:
+			haveSystemd = true
+			if err := c.updateSystemdBootDir(newRoot, h.dir, commit); err != nil {
+				return fmt.Errorf("failed to update systemd-boot binaries: %w", err)
+			}
 		}
 		c.Printf("   %sBootloader binaries updated successfully in %s.\n",
-			c.iconCheck, efiDir)
+			c.iconCheck, h.dir)
+	}
+
+	if haveGrub && haveSystemd {
+		c.PrintErrf(
+			"%s%sBoth GRUB and systemd-boot detected in ESP; skipping shim refresh to avoid clobbering bootloaders.%s\n",
+			c.cYellow, c.iconWarn, c.cReset)
+		return nil
+	}
+
+	return c.updateShimIfDeployed(newRoot, efiRoot)
+}
+
+// deploymentRoot resolves the on-disk rootfs path of the given ostree commit.
+func (c *UpgradeCommand) deploymentRoot(commit string) (string, error) {
+	root, err := c.ot.Root()
+	if err != nil {
+		return "", fmt.Errorf("failed to get ostree root: %w", err)
+	}
+	deployments, err := c.ot.ListDeployments()
+	if err != nil {
+		return "", fmt.Errorf("failed to list deployments: %w", err)
+	}
+	for _, dep := range deployments {
+		if dep.Checksum == commit {
+			return ostree.BuildDeploymentRootfs(
+				root, dep.Stateroot, commit, dep.Index,
+			), nil
+		}
+	}
+	return "", fmt.Errorf("deployment not found for commit %s", commit)
+}
+
+func (c *UpgradeCommand) updateGrubDir(newRoot, efiDir, commit string) error {
+	c.Printf(
+		"   %sUpdating GRUB in %s%s%s for commit %s%s%s...\n",
+		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
+	)
+	src := filepath.Join(newRoot, "/usr/lib/grub/grub-x86_64.efi.signed")
+	dst := filepath.Join(efiDir, grubEfiBinary)
+	return c.copyRequiredEfiFile(src, dst)
+}
+
+func (c *UpgradeCommand) updateSystemdBootDir(newRoot, efiDir, commit string) error {
+	c.Printf(
+		"   %sUpdating systemd-boot in %s%s%s for commit %s%s%s...\n",
+		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
+	)
+	src := filepath.Join(newRoot, "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed")
+	dst := filepath.Join(efiDir, systemdBootEfiBinary)
+	return c.copyRequiredEfiFile(src, dst)
+}
+
+// updateShimIfDeployed refreshes shim binaries only on EFI dirs that already
+// host shim (detected via the mmx64.efi MOK manager). This avoids clobbering
+// systemd-boot's own BOOTX64.EFI on pure systemd-boot installs.
+func (c *UpgradeCommand) updateShimIfDeployed(newRoot, efiRoot string) error {
+	var targets []string
+	err := filepath.WalkDir(efiRoot, func(
+		path string, d os.DirEntry, err error,
+	) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Name() == shimMOKManager {
+			targets = append(targets, filepath.Dir(path))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to scan for deployed shim: %w", err)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	shimDir := filepath.Join(newRoot, "/usr/share/shim")
+	shimFiles, err := os.ReadDir(shimDir)
+	if err != nil {
+		c.PrintErrf(
+			"%s%sShim is deployed in ESP but %s is missing in the new commit; skipping shim refresh.%s\n",
+			c.cYellow, c.iconWarn, shimDir, c.cReset)
+		return nil
+	}
+
+	for _, target := range targets {
+		c.Printf("   %sUpdating shim binaries in %s%s%s...\n",
+			c.iconUpdate, c.cBlue, target, c.cReset)
+		for _, entry := range shimFiles {
+			if entry.IsDir() || !entry.Type().IsRegular() {
+				continue
+			}
+			src := filepath.Join(shimDir, entry.Name())
+			dst := filepath.Join(target, entry.Name())
+			if err := c.copyEfiFile(src, dst); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-func (c *UpgradeCommand) updateGrubDir_x64(efiDir, commit string) error {
-	c.Printf(
-		"   %sUpdating GRUB/Shim in %s%s%s for commit %s%s%s...\n",
-		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
-	)
-	root, err := c.ot.Root()
-	if err != nil {
-		return fmt.Errorf("failed to get ostree root: %w", err)
-	}
-
-	deployments, err := c.ot.ListDeployments()
-	if err != nil {
-		return fmt.Errorf("failed to list deployments: %w", err)
-	}
-
-	var foundDep *ostree.Deployment
-	for _, dep := range deployments {
-		if dep.Checksum == commit {
-			foundDep = &dep
-			break
-		}
-	}
-
-	if foundDep == nil {
-		return fmt.Errorf("deployment not found for commit %s", commit)
-	}
-
-	// we do not check other fields because we assume that the upgrade
-	// part went fine.
-
-	newRoot := ostree.BuildDeploymentRootfs(
-		root, foundDep.Stateroot, commit, foundDep.Index,
-	)
-
-	filesToCopy := [][2]string{
-		{
-			filepath.Join(newRoot, "/usr/lib/grub/grub-x86_64.efi.signed"),
-			filepath.Join(efiDir, grubEfiBinary),
-		},
-	}
-	// generate /usr/share/shim copy entries.
-	shimDir := filepath.Join(newRoot, "/usr/share/shim")
-	shimFiles, err := os.ReadDir(shimDir)
-	if err == nil {
-		for _, entry := range shimFiles {
-			if entry.IsDir() {
-				continue
-			}
-			if !entry.Type().IsRegular() {
-				continue
-			}
-			srcPath := filepath.Join(shimDir, entry.Name())
-			dstPath := filepath.Join(efiDir, entry.Name())
-			filesToCopy = append(filesToCopy, [2]string{srcPath, dstPath})
-		}
-	} else {
+func (c *UpgradeCommand) copyEfiFile(src, dst string) error {
+	if _, err := os.Stat(src); os.IsNotExist(err) {
 		c.PrintErrf(
-			"%s%sWarning: failed to read %s directory for new commit: %v%s\n",
-			c.cYellow, c.iconWarn, shimDir, err, c.cReset)
+			"%s%sExpected file was not found in new commit: %s%s\n",
+			c.cYellow, c.iconWarn, src, c.cReset)
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to stat expected file: %w", err)
 	}
-
-	for _, pair := range filesToCopy {
-		src, dst := pair[0], pair[1]
-		if _, err := os.Stat(src); os.IsNotExist(err) {
-			c.PrintErrf(
-				"%s%sExpected file was not found in new commit: %s%s\n",
-				c.cYellow, c.iconWarn, src, c.cReset)
-			return nil
-		} else if err != nil {
-			return fmt.Errorf("failed to stat expected file: %w", err)
-		}
-
-		c.Printf("   %sCopying %s to %s%s%s...\n",
-			c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
-		if err := filesystems.CopyFile(src, dst); err != nil {
-			return fmt.Errorf("failed to copy file: %w", err)
-		}
+	c.Printf("   %sCopying %s to %s%s%s...\n",
+		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
+	if err := filesystems.CopyFile(src, dst); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
 	}
+	return nil
+}
 
+// copyRequiredEfiFile is like copyEfiFile but treats a missing source as a
+// hard error. Used for bootloader binaries where a missing signed binary in
+// the new commit must abort the upgrade rather than leave a stale binary.
+func (c *UpgradeCommand) copyRequiredEfiFile(src, dst string) error {
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return fmt.Errorf("required bootloader binary missing in new commit: %s", src)
+	} else if err != nil {
+		return fmt.Errorf("failed to stat required bootloader binary: %w", err)
+	}
+	c.Printf("   %sCopying %s to %s%s%s...\n",
+		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
+	if err := filesystems.CopyFile(src, dst); err != nil {
+		return fmt.Errorf("failed to copy file: %w", err)
+	}
 	return nil
 }
 
