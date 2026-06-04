@@ -71,13 +71,13 @@ _seeder_name=$(basename "$(dirname "${0}")")
 bedrock.system_bootstrap() {
     locale-gen
     emerge-webrsync --quiet
-
-    # special bootstrapping command, skipping env-update.
-    NO_ENV_UPDATE=1 chroots_lib.generic_build "${BOOTSTRAP_PACKAGES[@]}"
 }
 
 bedrock.buildenv_bootstrap() {
     chroots_lib.default_buildenv_bootstrap "${_seeder_name}"
+
+    # special bootstrapping command, skipping env-update.
+    NO_ENV_UPDATE=1 chroots_lib.generic_build "${BOOTSTRAP_PACKAGES[@]}"
 
     if [ "${INITIAL_PORTAGE_COUNTER}" = "0" ]; then
         echo "Initial Portage Counter is 0, this is unexpected." >&2
