@@ -72,6 +72,9 @@ bedrock.system_bootstrap() {
     locale-gen
     emerge-webrsync --quiet
 
+    echo "Executing env-update (at this point it may return non-zero)" >&2
+    env-update || true
+
     # special bootstrapping command, skipping env-update.
     NO_ENV_UPDATE=1 chroots_lib.generic_build "${BOOTSTRAP_PACKAGES[@]}"
 }
