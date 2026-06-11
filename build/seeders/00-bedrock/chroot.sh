@@ -111,8 +111,9 @@ bedrock.build_resolve_conflicts() {
     chroots_lib.generic_build -1 dev-libs/glib
 
     # Starting 2026-02-08, Gentoo stage3 are erroneously shipped with
-    # too many Pythons.
-    mapfile -t python_extra_vers < <(qlist -ISe dev-lang/python | sort | tail -n +2)
+    # too many Pythons. Drop older Python, assuming this is 3.13,
+    # we now have 3.14 as stable.
+    mapfile -t python_extra_vers < <(qlist -ISe dev-lang/python | sort -r | tail -n +2)
     echo "Found extra Python versions: ${python_extra_vers[@]}"
     chroots_lib.generic_build --depclean "${python_extra_vers[@]}"
 }
