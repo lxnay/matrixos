@@ -1,5 +1,4 @@
-# Force only one Python, 3.13
+# Force only one Python, 3.14 (3.13 will be removed)
 =dev-lang/python-3.11*
 =dev-lang/python-3.12*
-=dev-lang/python-3.13*
 =dev-lang/python-3.15*
