@@ -102,6 +102,20 @@ bedrock.portage_bootstrap() {
     chroots_lib.default_portage_bootstrap "${UPSTREAM_PORTAGE_REPOS[@]}"
 }
 
+bedrock.rebuild_current_stage() {
+    echo "Initial portage counter was: ${INITIAL_PORTAGE_COUNTER}"
+    echo "Packages with a counter greater than this, were built with matrixOS setup."
+    echo "Packages with a counter lower than this need to be rebuilt. Rebuilds:"
+    chroots_lib.rebuild_before_portage_counter "${INITIAL_PORTAGE_COUNTER}"
+
+    # Starting 2026-02-08, Gentoo stage3 are erroneously shipped with
+    # too many Pythons. Drop older Python, assuming this is 3.13,
+    # we now have 3.14 as stable. Keep only one Python.
+    mapfile -t python_extra_vers < <(qlist -ISe dev-lang/python | sort -r | tail -n +2)
+    echo "Found extra Python versions: ${python_extra_vers[@]}"
+    chroots_lib.generic_build --depclean "${python_extra_vers[@]}"
+}
+
 bedrock.build_resolve_conflicts() {
     # Break circular dependencies
     USE="-gpm" chroots_lib.generic_build -1 sys-libs/ncurses:0
@@ -109,13 +123,6 @@ bedrock.build_resolve_conflicts() {
     chroots_lib.generic_build -1 --update --newuse virtual/libelf
     USE="-sysprof -avif -truetype" chroots_lib.generic_build -1 dev-libs/glib:2
     chroots_lib.generic_build -1 dev-libs/glib
-
-    # Starting 2026-02-08, Gentoo stage3 are erroneously shipped with
-    # too many Pythons. Drop older Python, assuming this is 3.13,
-    # we now have 3.14 as stable.
-    mapfile -t python_extra_vers < <(qlist -ISe dev-lang/python | sort -r | tail -n +2)
-    echo "Found extra Python versions: ${python_extra_vers[@]}"
-    chroots_lib.generic_build --depclean "${python_extra_vers[@]}"
 }
 
 bedrock.build_kernel() {
@@ -141,11 +148,6 @@ bedrock.build_everything() {
     # Trigger a rebuild of the initramfs so that we bundle the latest and
     # correct initramfs setup.
     chroots_lib.generic_forced_rebuild "${BUILD_KERNEL_INITRAMFS[@]}"
-
-    echo "Initial portage counter was: ${INITIAL_PORTAGE_COUNTER}"
-    echo "Packages with a counter greater than this, were built with matrixOS setup."
-    echo "Packages with a counter lower than this need to be rebuilt. Rebuilds:"
-    chroots_lib.rebuild_before_portage_counter "${INITIAL_PORTAGE_COUNTER}"
 }
 
 setup_portage_counter() {
@@ -184,6 +186,7 @@ main() {
         bedrock.buildenv_bootstrap
         bedrock.portage_bootstrap
         bedrock.build_resolve_conflicts
+        bedrock.rebuild_current_stage
         bedrock.build_kernel
         bedrock.build_system
         bedrock.build_everything
