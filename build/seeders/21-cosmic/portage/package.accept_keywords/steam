@@ -1,3 +1,7 @@
 */*::steam-overlay
 games-util/game-device-udev-rules
 sys-libs/libudev-compat
+
+# Run Steam Big Picture Mode
+gui-wm/gamescope ~amd64
+media-libs/vkroots ~amd64
