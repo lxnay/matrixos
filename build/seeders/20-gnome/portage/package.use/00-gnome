@@ -9,3 +9,6 @@ x11-wm/mutter video_cards_nvidia
 
 # Keep this around until spidermonkey-128 is gone
 =dev-lang/spidermonkey-128* llvm_slot_21
+
+# Required by simple-scan
+x11-misc/colord vala
