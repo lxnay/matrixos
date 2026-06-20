@@ -562,3 +562,31 @@ func TestLocalRefs(t *testing.T) {
 		t.Errorf("refs[1] = %q, want %q", refs[1], "ref2")
 	}
 }
+
+func TestInitRepo_Integration(t *testing.T) {
+	checkOstreeAvailable(t)
+
+	dir := t.TempDir()
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Ostree.RepoDir": {dir},
+		},
+	}
+	o, err := NewOstree(NewOstreeOptions{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewOstree failed: %v", err)
+	}
+
+	if err := o.InitRepo(); err != nil {
+		t.Fatalf("InitRepo failed: %v", err)
+	}
+
+	// Verify the repo config exists and contains lock-timeout-secs=-1.
+	data, err := os.ReadFile(filepath.Join(dir, "config"))
+	if err != nil {
+		t.Fatalf("reading ostree config: %v", err)
+	}
+	if !strings.Contains(string(data), "lock-timeout-secs=-1") {
+		t.Errorf("expected lock-timeout-secs=-1 in repo config, got:\n%s", data)
+	}
+}

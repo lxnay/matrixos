@@ -23,10 +23,16 @@ func (o *Ostree) InitRepo() error {
 		return err
 	}
 
-	args := []string{"--repo=" + repoDir, "init", "--mode=archive"}
+	if err := o.ostreeRun("--repo="+repoDir, "init", "--mode=archive"); err != nil {
+		return err
+	}
 
-	return o.ostreeRun(args...)
+	// Ensure concurrent writers block rather than fail-fast when the repo lock
+	// is held by another process (e.g. parallel branch releases).
+	// Use "--" to prevent "-1" from being parsed as an option flag.
+	return o.ostreeRun("--repo="+repoDir, "config", "set", "--", "core.lock-timeout-secs", "-1")
 }
+
 
 // LastCommit returns the commit hash of the latest commit in the given ref.
 func LastCommit(repoDir, ref string, verbose bool) (string, error) {
@@ -423,15 +429,11 @@ func (o *Ostree) RemoteRefs() ([]string, error) {
 	return o.listRemoteRefsFromRepo(repoDir, remote)
 }
 
+// MaybeInitializeRemote initializes an ostree remote.
 func (o *Ostree) MaybeInitializeRemote() error {
 	repoDir, err := o.RepoDir()
 	if err != nil {
 		return err
-	}
-	if !directoryExists(repoDir) {
-		if err := os.MkdirAll(repoDir, 0755); err != nil {
-			return err
-		}
 	}
 
 	remote, err := o.Remote()
@@ -441,6 +443,12 @@ func (o *Ostree) MaybeInitializeRemote() error {
 	remoteURL, err := o.RemoteURL()
 	if err != nil {
 		return err
+	}
+
+	if !directoryExists(repoDir) {
+		if err := os.MkdirAll(repoDir, 0755); err != nil {
+			return err
+		}
 	}
 
 	objectsDir := filepath.Join(repoDir, "objects")
