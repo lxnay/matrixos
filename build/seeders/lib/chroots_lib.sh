@@ -285,7 +285,7 @@ chroots_lib.rebuild_before_portage_counter() {
             atom="${cat}/${pf}"
             slot=$(portageq metadata / installed "${atom}" SLOT)
             pn=$(portageq metadata / installed "${atom}" PN)
-            pkg="${cat}/${pn}:${slot}::${repo}"
+            pkg="${cat}/${pn}:${slot}"
             echo ">> ${pkg}"
             rebuilds+=( "${pkg}" )
         fi
