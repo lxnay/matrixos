@@ -123,6 +123,10 @@ bedrock.build_resolve_conflicts() {
     chroots_lib.generic_build -1 --update --newuse virtual/libelf
     USE="-sysprof -avif -truetype" chroots_lib.generic_build -1 dev-libs/glib:2
     chroots_lib.generic_build -1 dev-libs/glib
+
+    # Fix the circular dependency between systemd, virtual/libudev and cryptsetup.
+    USE="-cryptsetup" chroots_lib.generic_build -1 sys-apps/systemd:0 sys-fs/cryptsetup:0
+    chroots_lib.generic_build -1 sys-apps/systemd:0
 }
 
 bedrock.build_kernel() {
