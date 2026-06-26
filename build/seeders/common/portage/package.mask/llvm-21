@@ -1,5 +1,0 @@
-# We want to limit the amount of llvms in the system
-=llvm-core/libclc-22*
-=llvm-core/llvm-22*
-=llvm-core/llvm-common-22*
-=llvm-core/llvmgold-22*
