@@ -95,8 +95,21 @@ func TestPrepareFilesystemHierarchy(t *testing.T) {
 
 	// Verifications
 	assertSymlink(t, filepath.Join(imageDir, "ostree"), "sysroot/ostree")
-	assertSymlink(t, filepath.Join(imageDir, "tmp"), "sysroot/tmp")
-	assertDir(t, filepath.Join(imageDir, "sysroot", "tmp"))
+
+	// /tmp must be an empty real directory with mode 1777 (sticky).
+	if tmpInfo, err := os.Lstat(filepath.Join(imageDir, "tmp")); err != nil {
+		t.Errorf("stat tmp failed: %v", err)
+	} else {
+		if tmpInfo.Mode()&os.ModeSymlink != 0 {
+			t.Error("tmp should not be a symlink")
+		}
+		if !tmpInfo.IsDir() {
+			t.Error("tmp should be a directory")
+		}
+		if tmpInfo.Mode().Perm() != 0o777 || tmpInfo.Mode()&os.ModeSticky == 0 {
+			t.Errorf("tmp mode = %04o, want 1777", tmpInfo.Mode())
+		}
+	}
 
 	assertDir(t, filepath.Join(imageDir, "usr", "etc"))
 	// Note: PrepareFilesystemHierarchy moves etc -> usr/etc but does NOT create the symlink back.
@@ -242,7 +255,7 @@ func TestValidateFilesystemHierarchy(t *testing.T) {
 			os.RemoveAll(filepath.Join(tempDir, entry.Name()))
 		}
 
-		dirs := []string{"/etc", "/home", "/opt", "/root", "/srv", "/tmp", "/usr/local"}
+		dirs := []string{"/etc", "/home", "/opt", "/root", "/srv", "/usr/local"}
 		for _, d := range dirs {
 			linkPath := filepath.Join(tempDir, d)
 			if d == "/usr/local" {
@@ -256,6 +269,15 @@ func TestValidateFilesystemHierarchy(t *testing.T) {
 			if err := os.Symlink(dummyTarget, linkPath); err != nil {
 				t.Fatalf("failed to create symlink %s: %v", linkPath, err)
 			}
+		}
+
+		// /tmp must be a real sticky directory, not a symlink.
+		tmpPath := filepath.Join(tempDir, "tmp")
+		if err := os.Mkdir(tmpPath, os.ModeSticky|0o777); err != nil {
+			t.Fatalf("failed to create tmp: %v", err)
+		}
+		if err := os.Chmod(tmpPath, os.ModeSticky|0o777); err != nil {
+			t.Fatalf("failed to chmod tmp: %v", err)
 		}
 
 		err := o.ValidateFilesystemHierarchy(tempDir)

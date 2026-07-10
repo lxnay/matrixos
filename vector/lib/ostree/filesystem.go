@@ -109,23 +109,19 @@ func prepareSysrootAndOstreeLink(imageDir string) error {
 	return nil
 }
 
-// prepareTmpDir moves /tmp into /sysroot/tmp and replaces it with a symlink.
+// prepareTmpDir ensures /tmp is an empty directory with mode 1777 (sticky).
 func prepareTmpDir(imageDir string) error {
 	tmpDir := filepath.Join(imageDir, "tmp")
-	sysrootTmp := filepath.Join(imageDir, "sysroot", "tmp")
 
-	// Move tmpDir only if it exists as a real directory (not a symlink).
-	if info, err := os.Lstat(tmpDir); err == nil && info.IsDir() && (info.Mode()&os.ModeSymlink == 0) {
-		if err := filesystems.Move(tmpDir, sysrootTmp); err != nil {
-			return fmt.Errorf("failed to move tmp to sysroot/tmp: %w", err)
-		}
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("failed to remove tmp: %w", err)
 	}
-
-	if _, err := os.Lstat(tmpDir); err == nil {
-		os.Remove(tmpDir)
+	if err := os.Mkdir(tmpDir, os.ModeSticky|0o777); err != nil {
+		return fmt.Errorf("failed to create tmp: %w", err)
 	}
-	if err := os.Symlink("sysroot/tmp", tmpDir); err != nil {
-		return fmt.Errorf("failed to symlink tmp: %w", err)
+	// Chmod explicitly to apply sticky bit regardless of umask.
+	if err := os.Chmod(tmpDir, os.ModeSticky|0o777); err != nil {
+		return fmt.Errorf("failed to chmod tmp: %w", err)
 	}
 	return nil
 }
@@ -307,7 +303,6 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 		"/opt",
 		"/root",
 		"/srv",
-		"/tmp",
 		"/usr/local",
 	}
 
@@ -333,6 +328,16 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 	if issues > 0 {
 		return fmt.Errorf("filesystem hierarchy validation failed: %d issues",
 			issues)
+	}
+
+	// /tmp must be a real (non-symlink) directory with mode 1777 (sticky).
+	tmpPath := filepath.Join(rootfs, "tmp")
+	fi, err := os.Lstat(tmpPath)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 ||
+		fi.Mode().Perm() != 0o777 || fi.Mode()&os.ModeSticky == 0 {
+		fmt.Fprintf(os.Stderr, "Expected %s to be a sticky directory with mode 1777.\n", tmpPath)
+		fmt.Fprintln(os.Stderr, "Please check the filesystem hierarchy.")
+		return fmt.Errorf("filesystem hierarchy validation failed: /tmp is not a sticky 1777 directory")
 	}
 
 	return nil
