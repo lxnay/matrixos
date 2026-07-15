@@ -6,6 +6,7 @@ net-wireless/wpa_supplicant -gui
 gnome-base/gdm plymouth
 # Make Wayland work on NVIDIA. Should be safe on amdgpu too.
 x11-wm/mutter video_cards_nvidia
+gnome-base/gdm video_cards_nvidia
 
 # Required by simple-scan
 x11-misc/colord vala
