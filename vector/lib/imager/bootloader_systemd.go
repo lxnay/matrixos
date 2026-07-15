@@ -74,7 +74,7 @@ func (s *SystemdBootBootloader) Configure() error {
 	if err := os.MkdirAll(loaderDir, 0755); err != nil {
 		return fmt.Errorf("failed to create loader dir %s: %w", loaderDir, err)
 	}
-	loaderConf := "default @saved\ntimeout 3\nconsole-mode keep\n"
+	loaderConf := "default 0\ntimeout 3\nconsole-mode keep\n"
 	loaderConfPath := filepath.Join(loaderDir, "loader.conf")
 	if err := os.WriteFile(loaderConfPath, []byte(loaderConf), 0644); err != nil {
 		return fmt.Errorf("failed to write loader.conf: %w", err)
