@@ -571,3 +571,60 @@ func TestConstants(t *testing.T) {
 		t.Errorf("rootPassword: got %q, want %q", rootPassword, "matrix")
 	}
 }
+
+// --- budgetRemaining ---
+
+func TestBudgetRemainingCappedByCap(t *testing.T) {
+	// Budget is large; result must be capped to cap.
+	start := time.Now()
+	got := budgetRemaining(start, 10*time.Second, 3*time.Second)
+	if got > 3*time.Second {
+		t.Errorf("expected result <= cap (3s), got %v", got)
+	}
+	if got <= 0 {
+		t.Errorf("expected positive result, got %v", got)
+	}
+}
+
+func TestBudgetRemainingDecrementsByElapsed(t *testing.T) {
+	// Start is 2s in the past; budget is 5s; cap is 5s.
+	// Remaining should be ~3s, not 5s.
+	start := time.Now().Add(-2 * time.Second)
+	got := budgetRemaining(start, 5*time.Second, 5*time.Second)
+	if got >= 4*time.Second {
+		t.Errorf("budget should be reduced by elapsed time; got %v, want < 4s", got)
+	}
+	if got <= 0 {
+		t.Errorf("expected positive result, got %v", got)
+	}
+}
+
+func TestBudgetRemainingExpired(t *testing.T) {
+	// Start is 10s in the past; budget is only 5s → already expired.
+	start := time.Now().Add(-10 * time.Second)
+	got := budgetRemaining(start, 5*time.Second, 5*time.Second)
+	if got > 0 {
+		t.Errorf("expected non-positive result for expired budget, got %v", got)
+	}
+}
+
+func TestBudgetRemainingCapWinsOverBudget(t *testing.T) {
+	// Both budget and cap are large; cap must still win.
+	start := time.Now()
+	got := budgetRemaining(start, 100*time.Second, 1*time.Second)
+	if got > 1*time.Second {
+		t.Errorf("cap should limit result to 1s, got %v", got)
+	}
+}
+
+func TestBudgetRemainingBudgetWinsOverCap(t *testing.T) {
+	// 4s elapsed out of 5s budget; remaining ≈1s, cap is 10s → budget wins.
+	start := time.Now().Add(-4 * time.Second)
+	got := budgetRemaining(start, 5*time.Second, 10*time.Second)
+	if got >= 2*time.Second {
+		t.Errorf("depleted budget should limit result, got %v", got)
+	}
+	if got <= 0 {
+		t.Errorf("expected positive result, got %v", got)
+	}
+}

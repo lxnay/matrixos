@@ -386,6 +386,12 @@ func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	return nil
 }
 
+// budgetRemaining returns how much time is left within budget given start,
+// capped to cap. The result may be negative (budget already expired).
+func budgetRemaining(start time.Time, budget, cap time.Duration) time.Duration {
+	return min(budget-time.Since(start), cap)
+}
+
 func (c *VMCommand) runTests(qemuArgs []string) error {
 	c.Println("Starting VM Test...")
 	// How long do we allow the whole test suite to run?
@@ -403,8 +409,15 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
 
-	c.Println("Waiting for login prompt...")
-	if err := vm.Expect("matrixos login:", c.waitBoot); err != nil {
+	startTime := time.Now()
+
+	loginRemainingTime := budgetRemaining(startTime, c.maxRunTime, c.waitBoot)
+	if loginRemainingTime <= 0 {
+		return fmt.Errorf("no time left to wait for VM boot: %v", loginRemainingTime)
+	}
+
+	c.Printf("Waiting for login prompt. Remaining budget: %v\n", loginRemainingTime)
+	if err := vm.Expect("matrixos login:", loginRemainingTime); err != nil {
 		return fmt.Errorf("boot failed: %w", err)
 	}
 
@@ -412,14 +425,25 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 	if err := vm.Send("root"); err != nil {
 		return err
 	}
-	if err := vm.Expect("Password:", 5*time.Second); err != nil {
+
+	remainingPasswordTime := budgetRemaining(startTime, c.maxRunTime, 5*time.Second)
+	if remainingPasswordTime <= 0 {
+		return fmt.Errorf("no time left to wait for password prompt: %v", remainingPasswordTime)
+	}
+
+	if err := vm.Expect("Password:", remainingPasswordTime); err != nil {
 		return fmt.Errorf("password prompt missing: %w", err)
 	}
 	if err := vm.Send(rootPassword); err != nil {
 		return err
 	}
 
-	if err := vm.Expect("#", 5*time.Second); err != nil {
+	remainingPromptTime := budgetRemaining(startTime, c.maxRunTime, 5*time.Second)
+	if remainingPromptTime <= 0 {
+		return fmt.Errorf("no time left to wait for shell prompt: %v", remainingPromptTime)
+	}
+
+	if err := vm.Expect("#", remainingPromptTime); err != nil {
 		return fmt.Errorf("login failed: %w", err)
 	}
 
@@ -434,34 +458,34 @@ echo "TEST_RESULT:${?}"
 		return err
 	}
 
-	startTestsTime := time.Now()
-
-	waitLeft := c.waitTests - time.Since(startTestsTime)
+	waitLeft := budgetRemaining(startTime, c.maxRunTime, c.waitTests)
 	if waitLeft <= 0 {
 		return fmt.Errorf("invalid wait time for tests: %v", waitLeft)
 	}
+
+	c.Printf("Waiting for test suite to complete. Remaining budget: %v\n", waitLeft)
 	if err := vm.Expect("TEST_RESULT:0", waitLeft); err != nil {
 		return fmt.Errorf("Test suite failed: %w", err)
 	}
 
-	waitLeft = c.waitTests - time.Since(startTestsTime)
+	waitLeft = budgetRemaining(startTime, c.maxRunTime, c.waitTests)
 	if waitLeft <= 0 {
 		return fmt.Errorf("no time left to wait for VM shutdown: %v", waitLeft)
 	}
 
-	c.Println("Test suite passed, shutting down VM...")
+	c.Printf("Test suite passed, shutting down VM. Remaining budget: %v\n", waitLeft)
 	if err := vm.Send("poweroff"); err != nil {
 		return err
 	}
 
-	waitLeft = c.waitTests - time.Since(startTestsTime)
+	waitLeft = budgetRemaining(startTime, c.maxRunTime, c.waitTests)
 	if waitLeft <= 0 {
 		return fmt.Errorf("no time left to wait for VM shutdown: %v", waitLeft)
 	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), waitLeft)
 	defer shutdownCancel()
-	c.Println("Waiting for VM to shutdown...")
+	c.Printf("Waiting for VM to shutdown. Remaining budget: %v\n", waitLeft)
 
 	done := make(chan error, 1)
 	go func() {
@@ -476,7 +500,10 @@ echo "TEST_RESULT:${?}"
 		}
 		// fall through to success.
 	case <-shutdownCtx.Done():
-		c.PrintErr("VM did not shutdown in time, killing process...")
+		c.Printf(
+			"VM did not shutdown in time, killing process... Remaining budget: %v\n",
+			waitLeft,
+		)
 		cancel()
 
 		err = <-done // wait for the kill to complete.
