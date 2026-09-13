@@ -152,6 +152,7 @@ bedrock.build_everything() {
     # Trigger a rebuild of the initramfs so that we bundle the latest and
     # correct initramfs setup.
     chroots_lib.generic_forced_rebuild "${BUILD_KERNEL_INITRAMFS[@]}"
+    chroots_lib.detect_broken_packages
 }
 
 setup_portage_counter() {

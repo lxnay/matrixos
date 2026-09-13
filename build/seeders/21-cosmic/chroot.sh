@@ -71,6 +71,7 @@ cosmic.build_everything() {
     # Trigger a rebuild of the kernel so that we bundle the latest and
     # correct initramfs setup.
     chroots_lib.generic_forced_rebuild "${BUILD_KERNEL_PACKAGES[@]}"
+    chroots_lib.detect_broken_packages
 }
 
 cosmic.clean_temporary_artifacts() {
