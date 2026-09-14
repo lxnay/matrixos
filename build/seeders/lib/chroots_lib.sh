@@ -516,11 +516,9 @@ chroots_lib.generic_forced_rebuild() {
 chroots_lib.detect_broken_packages() {
     env-update
     # There are some cases where emerging binary files back, while building other packages, may
-    # lead to undetected shared library breakages. For now, just print the results. In the future,
-    # we may want to proactively try to correct state by force rebuilding broken packages, which
-    # may be tricky to do as well.
-    echo ">> Running 'revdep-rebuild -i -p -v' (currently not blocking the build in case of errors)"
-    revdep-rebuild -i -p -v
+    # lead to undetected shared library breakages.
+    echo ">> Running 'revdep-rebuild -i -v'"
+    revdep-rebuild -i -v
 }
 
 chroots_lib.clean_old_distfiles() {
