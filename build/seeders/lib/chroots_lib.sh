@@ -502,7 +502,8 @@ chroots_lib.generic_build() {
 
 chroots_lib.generic_forced_rebuild() {
     env-update
-    local num_procs=$(chroots_lib._try_get_procs)
+    local num_procs
+    num_procs=$(chroots_lib._try_get_procs)
 
     local common_args
     read -ra common_args <<< "$(chroots_lib.emerge_common_rebuild_args "${num_procs}")"
@@ -515,10 +516,26 @@ chroots_lib.generic_forced_rebuild() {
 
 chroots_lib.detect_broken_packages() {
     env-update
+
+    local num_procs
+    num_procs=$(chroots_lib._try_get_procs)
+
+    local common_args
+    read -ra common_args <<< "$(chroots_lib.emerge_common_rebuild_args "${num_procs}")"
+
+    local args=(
+        --quiet-build=y
+        --verbose
+        --backtrack=100
+        --binpkg-respect-use=y
+        --buildpkg
+        --oneshot
+    )
+
     # There are some cases where emerging binary files back, while building other packages, may
     # lead to undetected shared library breakages.
-    echo ">> Running 'revdep-rebuild -i -v'"
-    revdep-rebuild -i -v
+    echo ">> Running revdep-rebuild -i -v -- ${args[*]} ${common_args[*]}"
+    revdep-rebuild -i -v -- "${args[@]}" "${common_args[@]}"
 }
 
 chroots_lib.clean_old_distfiles() {
