@@ -7,10 +7,9 @@ Features:
       - vector upgrade should be updated too.
     - Create matrixos-uki ebuild (like -initramfs, but that builds a UKI), add imager tests for such deployment.
     - [sd-boot] Closely watch https://github.com/ostreedev/ostree/pull/3359 (PR still open, but we have the patches)
-        This will be our trampoline to support bootc in the future.
-        Step 1: support sd-boot alongside grub2, start building new images with sd-boot.
-        Step 2: switch to UKI.
-        Step 3: add bootc support.
+        Unlocks bootc supportability.
+        Step 1 [done]: support sd-boot alongside grub2, start building new images with sd-boot.
+        Step 2 [tbd]: switch to UKI.
+        Step 3 [tbd]: add bootc support.
     - Add UKI building to kernel build (make USE flag optional).
-    - Investigate root-less builds using unshare.
     - Support Cloud Init (add VM tests).
