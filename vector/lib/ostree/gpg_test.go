@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"matrixos/vector/lib/config"
+	"matrixos/vector/lib/runner"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"matrixos/vector/lib/runner"
 )
 
 func TestGpgHelpers(t *testing.T) {
@@ -111,6 +111,32 @@ func TestPatchGpgHomeDir(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0700 {
 		t.Errorf("homeDir perm = %v, want 0700", info.Mode().Perm())
+	}
+}
+
+func TestWalkGpgHomeDirEntryDisappears(t *testing.T) {
+	homeDir := t.TempDir()
+	trigger := filepath.Join(homeDir, "a-trigger")
+	vanishing := filepath.Join(homeDir, "b-vanishing")
+	for _, path := range []string{trigger, vanishing} {
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	triggered := false
+	err := walkGpgHomeDir(homeDir, func(path string, _ os.FileInfo) error {
+		if path == trigger {
+			triggered = true
+			return os.Remove(vanishing)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walkGpgHomeDir failed for a concurrently removed entry: %v", err)
+	}
+	if !triggered {
+		t.Fatal("walkGpgHomeDir did not visit the trigger entry")
 	}
 }
 

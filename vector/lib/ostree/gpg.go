@@ -67,14 +67,9 @@ func PatchGpgHomeDir(homeDir string) error {
 		return err
 	}
 
-	err := filepath.Walk(homeDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
+	err := walkGpgHomeDir(homeDir, func(path string, info os.FileInfo) error {
 		if !info.IsDir() {
-			if err := os.Chmod(path, 0600); err != nil {
-				return err
-			}
+			return os.Chmod(path, 0600)
 		}
 		return nil
 	})
@@ -89,11 +84,26 @@ func PatchGpgHomeDir(homeDir string) error {
 	uid, _ := strconv.Atoi(curUser.Uid)
 	gid, _ := strconv.Atoi(curUser.Gid)
 
+	return walkGpgHomeDir(homeDir, func(path string, info os.FileInfo) error {
+		return os.Chown(path, uid, gid)
+	})
+}
+
+// walkGpgHomeDir tolerates entries disappearing while GPG updates its keyring.
+func walkGpgHomeDir(homeDir string, visit func(string, os.FileInfo) error) error {
 	return filepath.Walk(homeDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if path != homeDir && errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
-		return os.Chown(path, uid, gid)
+		if err := visit(path, info); err != nil &&
+			path != homeDir && errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else {
+			return err
+		}
 	})
 }
 
