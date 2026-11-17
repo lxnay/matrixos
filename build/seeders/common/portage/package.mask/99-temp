@@ -1,0 +1,3 @@
+# Nautilus 49 does not src_configure with this
+# See: https://bugs.gentoo.org/986562
+>=media-libs/gexiv2-0.16
