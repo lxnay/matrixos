@@ -10,3 +10,6 @@ gnome-base/gdm video_cards_nvidia
 
 # Required by simple-scan
 x11-misc/colord vala
+
+# Required by gnome-extra/gnome-contacts
+media-libs/glycin vala
