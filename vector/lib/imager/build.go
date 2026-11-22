@@ -28,6 +28,8 @@ type BuildOptions struct {
 // It partitions, formats, mounts, deploys ostree, installs the bootloader,
 // and performs post-processing (productionization, compression, signing).
 func (im *Imager) Build(opts *BuildOptions) error {
+	defer im.Cleanup()
+
 	mountRootfs, err := im.prepareRootfs()
 	if err != nil {
 		return err

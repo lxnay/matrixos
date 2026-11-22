@@ -165,6 +165,12 @@ func (im *Imager) Cleanup() {
 	}
 	filesystems.CleanupMounts(copts)
 
+	// Close LUKS mappers after unmounting filesystems and before detaching
+	// the underlying loop devices so dm-crypt releases the backing image file.
+	if im.fsenc != nil {
+		im.fsenc.Cleanup()
+	}
+
 	im.trackedLoopDevicesMu.Lock()
 	loops := slices.Clone(im.trackedLoopDevices)
 	im.trackedLoopDevices = nil
@@ -229,6 +235,7 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		chrootRunner: runner.ChrootRun,
 		stdout:       os.Stdout,
 		stderr:       os.Stderr,
+		encrypted:    encrypted,
 	}
 	bootloaderName, err := im.Bootloader()
 	if err != nil {
@@ -247,7 +254,6 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		im.bootDevice = opts.BootDevice
 		im.rootDevice = opts.RootDevice
 		im.devicePath = opts.DevicePath
-		im.encrypted = encrypted
 		im.mode = opts.Mode
 	}
 	return im, nil

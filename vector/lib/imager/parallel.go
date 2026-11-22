@@ -60,12 +60,18 @@ type ParallelImageOptions struct {
 // semaphore-based worker pool.  Unlike seed parallelism, image builds
 // have no inter-dependencies so all refs are immediately eligible.
 func ParallelImage(ctx context.Context, opts *ParallelImageOptions) error {
+	if opts.Parallelism < 1 {
+		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
+	}
 	return runImageWorkerPool(ctx, opts)
 }
 
 // runImageWorkerPool spawns a fixed pool of worker goroutines that
 // pull refs from a work channel.
 func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
+	poolCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var firstErr error
 	var errMu sync.Mutex
 
@@ -73,11 +79,12 @@ func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
 
 	setError := func(err error) {
 		errMu.Lock()
-		defer errMu.Unlock()
 		if firstErr == nil {
 			firstErr = err
 		}
 		fmt.Fprintf(poolStderr, "%v\n", err)
+		errMu.Unlock()
+		cancel()
 	}
 
 	work := make(chan string, len(opts.Refs))
@@ -91,7 +98,7 @@ func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
 		wg.Go(func() {
 			for {
 				select {
-				case <-ctx.Done():
+				case <-poolCtx.Done():
 					return
 				case ref, ok := <-work:
 					if !ok {
@@ -110,7 +117,7 @@ func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
 						return
 					}
 
-					err := imageWorker(ctx, opts, ref)
+					err := imageWorker(poolCtx, opts, ref)
 					if err != nil {
 						setError(fmt.Errorf(
 							"ref %s image failed: %w",
@@ -126,9 +133,11 @@ func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
 	wg.Wait()
 
 	// Drain any refs that were never picked up by a worker.
-	for ref := range work {
-		fmt.Fprintf(poolStderr,
-			"Skipping ref %s due to earlier failure.\n", ref)
+	if firstErr != nil {
+		for ref := range work {
+			fmt.Fprintf(poolStderr,
+				"Skipping ref %s due to earlier failure.\n", ref)
+		}
 	}
 
 	return firstErr
