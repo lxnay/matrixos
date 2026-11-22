@@ -14,6 +14,8 @@ import (
 
 var userRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+const maxLuksPasswordAttempts = 5
+
 // setupOSRunner abstracts OS-level operations so they can be replaced in tests.
 type setupOSRunner struct {
 	// execCommand wraps exec.Command for spawning processes.
@@ -26,6 +28,8 @@ type setupOSRunner struct {
 	appendFile func(path string, data []byte) error
 	// mkdirAll creates directories recursively.
 	mkdirAll func(path string, perm os.FileMode) error
+	// mkdirTemp creates a unique temporary directory.
+	mkdirTemp func(dir, pattern string) (string, error)
 	// stat returns file info for a path.
 	stat func(path string) (os.FileInfo, error)
 	// removeFile removes a file.
@@ -71,6 +75,7 @@ func defaultSetupOSRunner() *setupOSRunner {
 		writeFile:   os.WriteFile,
 		appendFile:  appendBytesToFile,
 		mkdirAll:    os.MkdirAll,
+		mkdirTemp:   os.MkdirTemp,
 		stat:        os.Stat,
 		removeFile:  os.Remove,
 		fileExists: func(path string) bool {
@@ -433,6 +438,7 @@ func (c *SetupOSCommand) changeUserPassword(targetUser string) error {
 
 	fmt.Fprintf(c.run.stdout, "   %s%sChanging password for user: %s%s\n",
 		c.cBold, c.iconGear, targetUser, c.cReset)
+	c.FlushPrinters()
 
 	passwdCmd := c.run.execCommand("passwd", targetUser)
 	passwdCmd.SetStdin(c.run.stdin)
@@ -485,17 +491,24 @@ func (c *SetupOSCommand) changeLuksPassword() error {
 	fmt.Fprintf(c.run.stdout, "   %sPlease pick a new password for the encrypted disk.%s\n",
 		c.iconQuestion, c.cReset)
 
-	for {
+	var lastErr error
+	for attempt := 1; attempt <= maxLuksPasswordAttempts; attempt++ {
+		c.FlushPrinters()
 		cryptsetupCmd := c.run.execCommand("cryptsetup", "luksChangeKey", luksDevice)
 		cryptsetupCmd.SetStdin(c.run.stdin)
 		cryptsetupCmd.SetStdout(c.run.stdout)
 		cryptsetupCmd.SetStderr(c.run.stderr)
-		if err := cryptsetupCmd.Run(); err != nil {
-			fmt.Fprintf(c.run.stderr, "   %s%sFailed to change LUKS password. Please try again.%s\n",
-				c.cRed, c.iconError, c.cReset)
-			continue
+		lastErr = cryptsetupCmd.Run()
+		if lastErr == nil {
+			break
 		}
-		break
+		if attempt < maxLuksPasswordAttempts {
+			fmt.Fprintf(c.run.stderr, "   %s%sFailed to change LUKS password (%d/%d). Please try again.%s\n",
+				c.cRed, c.iconError, attempt, maxLuksPasswordAttempts, c.cReset)
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to change LUKS password after %d attempts: %w", maxLuksPasswordAttempts, lastErr)
 	}
 
 	fmt.Fprintf(c.run.stdout, "   %s%sLUKS password changed successfully.%s\n",
@@ -524,6 +537,7 @@ func (c *SetupOSCommand) setupLocalization() error {
 	if c.localeFlag == "" || c.keymapFlag == "" || c.timezoneFlag == "" || c.hostnameFlag == "" {
 		firstbootArgs = append(firstbootArgs, "--prompt")
 	}
+	c.FlushPrinters()
 	firstbootCmd := c.run.execCommand("systemd-firstboot", firstbootArgs...)
 	firstbootCmd.SetStdin(c.run.stdin)
 	firstbootCmd.SetStdout(c.run.stdout)
@@ -745,17 +759,26 @@ func (c *SetupOSCommand) checkPartitionForWindows(part, grubCfg, msblPath string
 	if existingMount != "" {
 		mountPoint = existingMount
 	} else {
-		// Create temp mount point and mount.
-		tmpDir := fmt.Sprintf("/tmp/setupos-win-%s", filepath.Base(part))
-		c.run.mkdirAll(tmpDir, 0700)
+		// Create unique temp mount point and mount.
+		mkdirTemp := c.run.mkdirTemp
+		if mkdirTemp == nil {
+			mkdirTemp = os.MkdirTemp
+		}
+		tmpDir, err := mkdirTemp("", fmt.Sprintf("setupos-win-%s-*", filepath.Base(part)))
+		if err != nil {
+			return fmt.Errorf("unable to create temp mount dir for %s: %w", part, err)
+		}
 		mountCmd := c.run.execCommand("mount", "-o", "ro", part, tmpDir)
 		if err := mountCmd.Run(); err != nil {
+			_ = c.run.removeFile(tmpDir)
 			return fmt.Errorf("unable to mount %s: %w", part, err)
 		}
 		mountPoint = tmpDir
 		defer func() {
 			umountCmd := c.run.execCommand("umount", mountPoint)
-			umountCmd.Run()
+			if err := umountCmd.Run(); err == nil {
+				_ = c.run.removeFile(mountPoint)
+			}
 		}()
 	}
 

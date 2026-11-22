@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
@@ -14,10 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type QA struct {
-	cfg config.IConfig
+	cfg    config.IConfig
+	mu     sync.RWMutex
+	stderr io.Writer
 }
 
 // New creates a new QA instance.
@@ -26,8 +30,33 @@ func New(cfg config.IConfig) (*QA, error) {
 		return nil, errors.New("missing config parameter")
 	}
 	return &QA{
-		cfg: cfg,
+		cfg:    cfg,
+		stderr: os.Stderr,
 	}, nil
+}
+
+// SetStderr replaces the writer used for diagnostic output.
+func (q *QA) SetStderr(w io.Writer) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.stderr = w
+	q.mu.Unlock()
+}
+
+// Stderr returns the configured diagnostic writer, defaulting to os.Stderr.
+func (q *QA) Stderr() io.Writer {
+	if q == nil {
+		return os.Stderr
+	}
+	q.mu.RLock()
+	w := q.stderr
+	q.mu.RUnlock()
+	if w == nil {
+		return os.Stderr
+	}
+	return w
 }
 
 // CheckMatrixOSPrivate verifies PrivateGitRepoPath exists and is a directory.
@@ -53,18 +82,24 @@ func (q *QA) CheckMatrixOSPrivate() error {
 // matches the serial in the provided certificate file. It requires `openssl` or
 // can parse certificates directly.
 func (q *QA) CheckSecureBoot(imageDir, sbcertPath string) error {
+	imageDir = filepath.Clean(imageDir)
 	modulesdir := filepath.Join(imageDir, "lib/modules")
 	var usbMods []string
 	// Walk the modulesdir to find usb-storage.ko*
-	_ = filepath.WalkDir(modulesdir, func(p string, d fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(modulesdir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if !d.IsDir() && strings.HasPrefix(filepath.Base(p), "usb-storage.ko") {
 			usbMods = append(usbMods, p)
 		}
 		return nil
-	})
+	}); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("No usb-storage.ko found in %s: %w", modulesdir, err)
+		}
+		return fmt.Errorf("failed to walk %s: %w", modulesdir, err)
+	}
 	if len(usbMods) == 0 {
 		return fmt.Errorf("No usb-storage.ko found in %s", modulesdir)
 	}
@@ -105,12 +140,9 @@ func certSerialColon(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// try PEM decode
-	if bytes.HasPrefix(b, []byte("-----BEGIN")) {
-		blk, _ := pem.Decode(b)
-		if blk == nil {
-			return "", errors.New("failed to decode PEM")
-		}
+	// Try PEM decode directly (handles leading comments/whitespace before -----BEGIN).
+	// If no PEM block is found, fall back to raw DER parsing.
+	if blk, _ := pem.Decode(b); blk != nil {
 		b = blk.Bytes
 	}
 	cert, err := x509.ParseCertificate(b)
@@ -149,10 +181,10 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 			// check file inside root
 			target := exe
 			if imageDir != "/" {
-				target = imageDir + exe
+				target = filepath.Join(imageDir, exe)
 			}
 
-			if st, err := os.Stat(target); err != nil || st.Mode()&0111 == 0 {
+			if st, err := os.Stat(target); err != nil || st.IsDir() || st.Mode()&0111 == 0 {
 				retErrs = append(retErrs, fmt.Sprintf("%s not found", target))
 			}
 			continue
@@ -166,15 +198,17 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 			continue
 		}
 
-		// First, check common bin locations inside the image
+		// First, check common bin/sbin locations inside the image
 		tryPaths := []string{
-			imageDir + "/bin/" + exe,
-			imageDir + "/usr/bin/" + exe,
+			filepath.Join(imageDir, "bin", exe),
+			filepath.Join(imageDir, "usr", "bin", exe),
+			filepath.Join(imageDir, "sbin", exe),
+			filepath.Join(imageDir, "usr", "sbin", exe),
 		}
 
 		found := false
 		for _, p := range tryPaths {
-			if st, err := os.Stat(p); err == nil && st.Mode()&0111 != 0 {
+			if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
 				found = true
 				break
 			}
@@ -250,7 +284,7 @@ func (q *QA) verifyWithPrivateRepo(imageDir string, executables []string) error 
 		return err
 	}
 	if privatePath == "" {
-		return errors.New("matrixOS.PrivateGitRepoPath not set")
+		return fmt.Errorf("%s not set", key)
 	}
 	return verifyEnvironmentSetup(imageDir, executables, []string{privatePath})
 }
@@ -283,15 +317,18 @@ func (q *QA) CheckNumberOfKernels(imageDir string, expectedAmount int) error {
 	if fi, err := os.Stat(imageDir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("%s is not a directory", imageDir)
 	}
-	found := 0
-	matches, _ := filepath.Glob(filepath.Join(imageDir, "usr/lib/modules/*/vmlinuz"))
-	found = len(matches)
+	matches, err := filepath.Glob(filepath.Join(imageDir, "usr/lib/modules/*/vmlinuz"))
+	if err != nil {
+		return fmt.Errorf("failed to glob kernels in %s: %w", imageDir, err)
+	}
+	found := len(matches)
 	if found != expectedAmount {
-		fmt.Fprintf(os.Stderr, "Found %d kernels in /usr/lib/modules, expected %d\n", found, expectedAmount)
+		stderr := q.Stderr()
+		fmt.Fprintf(stderr, "Found %d kernels in /usr/lib/modules, expected %d\n", found, expectedAmount)
 		// list directory
 		entries, _ := os.ReadDir(filepath.Join(imageDir, "usr/lib/modules/"))
 		for _, e := range entries {
-			fmt.Fprintf(os.Stderr, "%s\n", e.Name())
+			fmt.Fprintf(stderr, "%s\n", e.Name())
 		}
 		return fmt.Errorf("found %d kernels, expected %d", found, expectedAmount)
 	}

@@ -29,6 +29,9 @@ func testSetupOSRunner() *setupOSRunner {
 		mkdirAll: func(path string, perm os.FileMode) error {
 			return nil
 		},
+		mkdirTemp: func(dir, pattern string) (string, error) {
+			return "/tmp/mock-setupos-win-test", nil
+		},
 		stat: func(path string) (os.FileInfo, error) {
 			return nil, fmt.Errorf("stat not mocked for %s", path)
 		},

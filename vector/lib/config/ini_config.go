@@ -214,13 +214,14 @@ func (c *IniConfig) Clone() IConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	var sp searchPath
+	var sp *searchPath
 	if c.sp != nil {
-		sp = *(c.sp) // copy.
+		copied := *c.sp
+		sp = &copied
 	}
 	clone := &IniConfig{
-		sp:  &sp,
-		cfg: make(map[string][]string),
+		sp:  sp,
+		cfg: make(map[string][]string, len(c.cfg)),
 	}
 	for k, v := range c.cfg {
 		clone.cfg[k] = slices.Clone(v)

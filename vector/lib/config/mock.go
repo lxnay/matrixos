@@ -69,6 +69,19 @@ func (m *MockConfig) AddOverlay(overlay map[string][]string) error {
 		} else {
 			m.Items[k] = slices.Clone(v)
 		}
+		if len(v) > 0 {
+			last := v[len(v)-1]
+			if last == "true" || last == "false" {
+				if m.Bools == nil {
+					m.Bools = make(map[string]bool)
+				}
+				m.Bools[k] = last == "true"
+			} else if m.Bools != nil {
+				if _, exists := m.Bools[k]; exists {
+					m.Bools[k] = false
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -115,8 +128,8 @@ func (e *ErrConfig) Load() error { return e.Err }
 // Clone returns a new ErrConfig with the same error.
 func (e *ErrConfig) Clone() IConfig { return &ErrConfig{Err: e.Err} }
 
-// AddOverlay is a no-op for the error config.
-func (e *ErrConfig) AddOverlay(map[string][]string) error { return nil }
+// AddOverlay returns the configured error.
+func (e *ErrConfig) AddOverlay(map[string][]string) error { return e.Err }
 
 // GetItem returns ("", Err).
 func (e *ErrConfig) GetItem(string) (string, error) { return "", e.Err }

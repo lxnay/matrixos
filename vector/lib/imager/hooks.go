@@ -77,6 +77,9 @@ func (im *Imager) SetupPasswords() error {
 		}
 		lines = append(lines, line)
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to scan shadow file: %w", err)
+	}
 
 	shadowEntry := func(user string) string {
 		return fmt.Sprintf("%s:%s:%s:0:99999:7:::", user, passHash, lastChange)

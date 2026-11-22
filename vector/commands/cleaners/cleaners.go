@@ -58,9 +58,13 @@ func cleanDirectoryBasedOnMtime(dir string, cutoffAge time.Duration, dryRun bool
 	// Here we are ok following symlinks, because the user could have just swapped
 	// out a normal dir for a dir symlink.
 	stat, err := os.Stat(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stderr, "Directory %s does not exist. Nothing to do.\n", dir)
-		return nil
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "Directory %s does not exist. Nothing to do.\n", dir)
+			return nil
+		}
+		fmt.Fprintf(stderr, "Failed to stat directory %s: %v\n", dir, err)
+		return err
 	}
 	if !stat.IsDir() {
 		fmt.Fprintf(stderr, "Directory %s is not a directory.\n", dir)

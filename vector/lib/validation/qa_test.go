@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -166,4 +167,139 @@ func TestVerifyWrappers(t *testing.T) {
 	if err := q.VerifySeederEnvironmentSetup(tmp); err == nil {
 		t.Fatalf("expected error for empty image dir, got nil")
 	}
+}
+
+func TestQA_BugsReproducers(t *testing.T) {
+	t.Run("VerifyEnvironmentSetupRejectsDirectoryAsExecutable", func(t *testing.T) {
+		tmp := t.TempDir()
+		// Create a directory named /usr/bin/fakeexe (mode 0755 has 0111 bits set!).
+		if err := os.MkdirAll(filepath.Join(tmp, "usr/bin/fakeexe"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// Prevent chroot fallback from falsely finding it.
+		orig := filesystems.ExecChrootOutput
+		filesystems.ExecChrootOutput = func(*runner.ChrootCmd) ([]byte, error) {
+			return nil, fmt.Errorf("not found")
+		}
+		t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+		if err := verifyEnvironmentSetup(tmp, []string{"/usr/bin/fakeexe"}, nil); err == nil {
+			t.Error("verifyEnvironmentSetup accepted directory as path-like executable")
+		}
+		if err := verifyEnvironmentSetup(tmp, []string{"fakeexe"}, nil); err == nil {
+			t.Error("verifyEnvironmentSetup accepted directory as command-name executable")
+		}
+	})
+
+	t.Run("VerifyEnvironmentSetupFindsSbinWithoutChroot", func(t *testing.T) {
+		tmp := t.TempDir()
+		sbinDir := filepath.Join(tmp, "usr", "sbin")
+		if err := os.MkdirAll(sbinDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sbinDir, "sgdisk"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		orig := filesystems.ExecChrootOutput
+		filesystems.ExecChrootOutput = func(*runner.ChrootCmd) ([]byte, error) {
+			return nil, fmt.Errorf("chroot fallback should not be needed for /usr/sbin")
+		}
+		t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+		if err := verifyEnvironmentSetup(tmp, []string{"sgdisk"}, nil); err != nil {
+			t.Errorf("verifyEnvironmentSetup did not find /usr/sbin/sgdisk: %v", err)
+		}
+	})
+
+	t.Run("CertSerialColonHandlesLeadingPEMComments", func(t *testing.T) {
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tmpl := x509.Certificate{SerialNumber: big.NewInt(0x1234)}
+		der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+		pemBytes := append([]byte("# Leading comment before PEM block\n\n"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+		p := filepath.Join(t.TempDir(), "commented.pem")
+		if err := os.WriteFile(p, pemBytes, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		serial, err := certSerialColon(p)
+		if err != nil {
+			t.Fatalf("certSerialColon failed on PEM with leading comment: %v", err)
+		}
+		if serial != "12:34" {
+			t.Errorf("serial = %q, want 12:34", serial)
+		}
+	})
+
+	t.Run("VerifyWithPrivateRepoReportsActualKey", func(t *testing.T) {
+		q, _ := New(&config.MockConfig{Items: map[string][]string{}})
+		err := q.verifyWithPrivateRepo("/tmp/some-image", nil)
+		if err == nil {
+			t.Fatal("expected error for unset DefaultPrivateGitRepoPath")
+		}
+		if !strings.Contains(err.Error(), "matrixOS.DefaultPrivateGitRepoPath") {
+			t.Errorf("error %q did not mention matrixOS.DefaultPrivateGitRepoPath", err.Error())
+		}
+	})
+
+	t.Run("CheckSecureBootCleansImageDirForRelativeModPath", func(t *testing.T) {
+		tmp := t.TempDir()
+		modDir := filepath.Join(tmp, "lib/modules/6.12.0")
+		if err := os.MkdirAll(modDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(modDir, "usb-storage.ko"), []byte("dummy"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tmpl := x509.Certificate{SerialNumber: big.NewInt(0xabcd)}
+		der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+		certPath := filepath.Join(tmp, "cert.pem")
+		if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var capturedModArg string
+		orig := filesystems.ExecChrootOutput
+		filesystems.ExecChrootOutput = func(c *runner.ChrootCmd) ([]byte, error) {
+			capturedModArg = c.Args[len(c.Args)-1]
+			return []byte("ab:cd\n"), nil
+		}
+		t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+		q, _ := New(&config.MockConfig{})
+		// Pass uncleaned imageDir with "/." suffix.
+		if err := q.CheckSecureBoot(tmp+"/.", certPath); err != nil {
+			t.Fatalf("CheckSecureBoot: %v", err)
+		}
+		if capturedModArg != "/lib/modules/6.12.0/usb-storage.ko" {
+			t.Errorf("modinfo received unstripped path %q, want /lib/modules/6.12.0/usb-storage.ko", capturedModArg)
+		}
+	})
+
+	t.Run("CheckNumberOfKernelsReturnsGlobError", func(t *testing.T) {
+		badDir := filepath.Join(t.TempDir(), "img[bad")
+		if err := os.MkdirAll(badDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		q, _ := New(&config.MockConfig{})
+		err := q.CheckNumberOfKernels(badDir, 0)
+		if err == nil {
+			t.Fatal("CheckNumberOfKernels ignored filepath.ErrBadPattern and returned nil when expectedAmount=0")
+		}
+	})
+
+	t.Run("CheckNumberOfKernelsRoutesDiagnosticsToStderrWriter", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmp, "usr/lib/modules/6.12.0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		q, _ := New(&config.MockConfig{})
+		var stderr bytes.Buffer
+		q.SetStderr(&stderr)
+		if err := q.CheckNumberOfKernels(tmp, 1); err == nil {
+			t.Fatal("expected error for 0 kernels")
+		}
+		if !strings.Contains(stderr.String(), "Found 0 kernels") || !strings.Contains(stderr.String(), "6.12.0") {
+			t.Errorf("expected kernel diagnostics in injected stderr, got %q", stderr.String())
+		}
+	})
 }

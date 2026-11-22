@@ -52,6 +52,9 @@ func (c *SeedsCleaner) MinAmountOfSeeds() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid SeedsCleaner.MinAmountOfSeeds %d: must be non-negative", amount)
+	}
 	return amount, nil
 }
 
@@ -170,6 +173,10 @@ func (c *SeedsCleaner) Run() error {
 			continue
 		}
 		if stat.Mode().IsRegular() {
+			if dryRun {
+				fmt.Fprintf(c.stdout, "Dry run mode enabled. Not removing %s ...\n", path)
+				continue
+			}
 			fmt.Fprintf(c.stderr, "Path %s is a regular file. Removing ...\n", path)
 			if err := os.Remove(path); err != nil {
 				errors = append(errors, err)
@@ -187,6 +194,12 @@ func (c *SeedsCleaner) Run() error {
 		if !filesystems.DirectoryExists(path) {
 			errors = append(errors, fmt.Errorf("directory %s does not exist", path))
 			fmt.Fprintf(c.stderr, "Directory %s does not exist. Skipping.\n", path)
+			continue
+		}
+
+		if err := filesystems.CheckDirIsRoot(path); err != nil {
+			errors = append(errors, err)
+			fmt.Fprintf(c.stderr, "%v\n", err)
 			continue
 		}
 

@@ -102,10 +102,13 @@ func (im *Imager) ExtractReleaseVersion() (string, error) {
 		}
 		im.Print("%s", string(data))
 
-		releaseVersion, err = im.extractSeedName(data)
+		extracted, err := im.extractSeedName(data)
 		if err != nil {
 			return "", fmt.Errorf(
 				"failed to extract release version from build metadata: %w", err)
+		}
+		if extracted != "" {
+			releaseVersion = extracted
 		}
 	} else {
 		im.PrintWarning(

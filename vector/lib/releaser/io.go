@@ -1,5 +1,16 @@
 package releaser
 
+import "io"
+
+// SetStderr replaces the writer used for warnings and errors and propagates
+// it to the embedded QA validator.
+func (r *Releaser) SetStderr(w io.Writer) {
+	r.IO.SetStderr(w)
+	if r.qa != nil {
+		r.qa.SetStderr(w)
+	}
+}
+
 func (r *Releaser) SetChrootDir(dir string) { r.chrootDir = dir }
 func (r *Releaser) ChrootDir() string       { return r.chrootDir }
 

@@ -362,6 +362,9 @@ func (im *Imager) GenerateKernelBootArgs() ([]string, error) {
 			}
 			bootArgs = append(bootArgs, line)
 		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("failed to scan cmdline file: %w", err)
+		}
 	} else {
 		im.PrintWarning("WARNING: no additional kernel cmdline params available, %s does not exist.\n", cmdlineFile)
 	}

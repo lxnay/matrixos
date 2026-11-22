@@ -131,3 +131,42 @@ func TestIniConfig_ReloadIsAtomicAndDoesNotDuplicate(t *testing.T) {
 		t.Errorf("failed reload mutated config state: Section.Key = %q, want %q", got, "v1")
 	}
 }
+
+func TestConfig_MockOverlayBoolsErrOverlayAndCloneNilSP(t *testing.T) {
+	t.Run("MockConfigAddOverlayUpdatesBools", func(t *testing.T) {
+		mc := &MockConfig{
+			Items: map[string][]string{"Section.Flag": {"false"}},
+			Bools: map[string]bool{"Section.Flag": false},
+		}
+		if err := mc.AddOverlay(map[string][]string{
+			"Section.Flag":    {"true"},
+			"Section.NewFlag": {"true"},
+		}); err != nil {
+			t.Fatalf("AddOverlay: %v", err)
+		}
+		if b, err := mc.GetBool("Section.Flag"); err != nil || !b {
+			t.Errorf("GetBool(Section.Flag) = (%v, %v), want (true, nil)", b, err)
+		}
+		if b, err := mc.GetBool("Section.NewFlag"); err != nil || !b {
+			t.Errorf("GetBool(Section.NewFlag) = (%v, %v), want (true, nil)", b, err)
+		}
+	})
+
+	t.Run("ErrConfigAddOverlayReturnsErr", func(t *testing.T) {
+		want := os.ErrPermission
+		ec := &ErrConfig{Err: want}
+		if err := ec.AddOverlay(map[string][]string{"K": {"V"}}); err != want {
+			t.Errorf("ErrConfig.AddOverlay() = %v, want %v", err, want)
+		}
+	})
+
+	t.Run("IniConfigClonePreservesNilSearchPath", func(t *testing.T) {
+		orig := &IniConfig{
+			cfg: map[string][]string{"A.B": {"1"}},
+		}
+		cloned := orig.Clone().(*IniConfig)
+		if cloned.sp != nil {
+			t.Errorf("Clone() turned nil sp into non-nil %+v", cloned.sp)
+		}
+	})
+}

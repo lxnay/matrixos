@@ -8,6 +8,7 @@ func (r *Releaser) PreCleanQAChecks() error {
 	if err := checkImageDir(r.imageDir); err != nil {
 		return err
 	}
+	r.qa.SetStderr(r.Stderr())
 	r.Print("Pre clean QA Checks ...\n")
 
 	sbCertPath, err := r.SecureBootCertPath()

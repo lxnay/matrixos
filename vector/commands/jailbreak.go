@@ -32,6 +32,8 @@ type jailbreakRunner struct {
 	mkdirAll func(path string, perm os.FileMode) error
 	// stat returns file info for a path.
 	stat func(path string) (os.FileInfo, error)
+	// lstat returns file info for a path without following symlinks.
+	lstat func(path string) (os.FileInfo, error)
 	// removeFile removes a file.
 	removeFile func(path string) error
 	// remove recursively removes a path.
@@ -60,6 +62,7 @@ func defaultRunner() *jailbreakRunner {
 		appendFile:   appendBytesToFile,
 		mkdirAll:     os.MkdirAll,
 		stat:         os.Stat,
+		lstat:        os.Lstat,
 		removeFile:   os.Remove,
 		removeAll:    os.RemoveAll,
 		rename:       filesystems.Move,
@@ -685,7 +688,11 @@ func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 		c.cBold, c.iconGear, c.cReset)
 	srv := filepath.Join(sysroot, "srv")
 
-	info, err := c.run.stat(srv)
+	lstatFn := c.run.lstat
+	if lstatFn == nil {
+		lstatFn = c.run.stat
+	}
+	info, err := lstatFn(srv)
 	if err != nil {
 		// Does not exist at all — create it.
 		if err := c.run.mkdirAll(srv, 0755); err != nil {
@@ -694,7 +701,7 @@ func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 		return c.run.writeFile(filepath.Join(srv, ".keep"), []byte{}, 0644)
 	}
 
-	// If it's a dangling symlink, replace it with a directory.
+	// If it's a symlink (including dangling) or non-directory, replace it with a directory.
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		if err := c.run.removeFile(srv); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", srv, err)

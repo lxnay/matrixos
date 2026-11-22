@@ -39,6 +39,9 @@ func (c *ImagesCleaner) MinAmountOfImages() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid ImagesCleaner.MinAmountOfImages %d: must be non-negative", amount)
+	}
 	return amount, nil
 }
 
@@ -123,9 +126,13 @@ func (c *ImagesCleaner) Run() error {
 	// Here we are ok following symlinks, because the user could have just swapped
 	// out a normal dir for a dir symlink.
 	stat, err := os.Stat(imgDir)
-	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(c.stderr, "Images directory %s does not exist. Nothing to do.\n", imgDir)
-		return nil
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(c.stderr, "Images directory %s does not exist. Nothing to do.\n", imgDir)
+			return nil
+		}
+		fmt.Fprintf(c.stderr, "Failed to stat images directory %s: %v\n", imgDir, err)
+		return err
 	}
 	if !stat.IsDir() {
 		fmt.Fprintf(c.stderr, "Images directory %s is not a directory.\n", imgDir)

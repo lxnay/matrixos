@@ -292,11 +292,12 @@ func (c *BaseCommand) resolveRefRemote(ref string, warnf func(format string, arg
 	}
 
 	if remoted := ostree.ExtractRemoteFromRef(ref); remoted != "" {
+		origRef := ref
 		remote = remoted
 		ref = ostree.CleanRemoteFromRef(ref)
 		warnf(
 			"WARNING: %s contains the remote reference, using remote=%s and ref=%s\n",
-			ref, remote, ref)
+			origRef, remote, ref)
 
 		overlay := map[string][]string{
 			"Ostree.Remote": {remote},
