@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // PoolOptions configures RunPool.
@@ -34,23 +35,27 @@ func RunPool[T any](ctx context.Context, opts PoolOptions[T]) error {
 	if opts.Run == nil {
 		return fmt.Errorf("worker pool Run function must not be nil")
 	}
+	if len(opts.Items) == 0 {
+		return nil
+	}
 
 	poolCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var firstErr error
 	var errMu sync.Mutex
+	var completed atomic.Int64
 
 	recordError := func(err error) {
 		errMu.Lock()
 		if firstErr == nil {
 			firstErr = err
 		}
+		cancel()
 		if opts.OnError != nil {
 			opts.OnError(err)
 		}
 		errMu.Unlock()
-		cancel()
 	}
 
 	work := make(chan T, len(opts.Items))
@@ -63,6 +68,11 @@ func RunPool[T any](ctx context.Context, opts PoolOptions[T]) error {
 	for i := 0; i < opts.Parallelism; i++ {
 		wg.Go(func() {
 			for {
+				// Avoid Go's random select choice starting another item
+				// when poolCtx is already cancelled.
+				if poolCtx.Err() != nil {
+					return
+				}
 				select {
 				case <-poolCtx.Done():
 					return
@@ -72,7 +82,7 @@ func RunPool[T any](ctx context.Context, opts PoolOptions[T]) error {
 					}
 
 					errMu.Lock()
-					failed := firstErr != nil
+					failed := firstErr != nil || poolCtx.Err() != nil
 					if failed && opts.OnSkip != nil {
 						opts.OnSkip(item)
 					}
@@ -85,12 +95,19 @@ func RunPool[T any](ctx context.Context, opts PoolOptions[T]) error {
 						recordError(err)
 						return
 					}
+					completed.Add(1)
 				}
 			}
 		})
 	}
 
 	wg.Wait()
+
+	// If the parent context was cancelled before all items finished and no
+	// worker returned an error first, surface the cancellation error.
+	if firstErr == nil && ctx.Err() != nil && int(completed.Load()) < len(opts.Items) {
+		firstErr = ctx.Err()
+	}
 
 	// Drain any items that were never picked up by a worker.
 	if firstErr != nil && opts.OnSkip != nil {

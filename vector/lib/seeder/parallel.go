@@ -78,6 +78,9 @@ func ParallelSeed(ctx context.Context, opts *ParallelSeedOptions) error {
 
 	infoByName := make(map[string]SeederInfo, len(opts.Seeders))
 	for _, info := range opts.Seeders {
+		if _, dup := infoByName[info.Name]; dup {
+			return fmt.Errorf("duplicate seeder %q", info.Name)
+		}
 		infoByName[info.Name] = info
 	}
 
@@ -267,6 +270,11 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 		workerIdx := i
 		wg.Go(func() {
 			for {
+				// Avoid Go's random select choice starting a seed when
+				// poolCtx is already cancelled.
+				if poolCtx.Err() != nil {
+					return
+				}
 				var seederName string
 				select {
 				case <-poolCtx.Done():
@@ -277,134 +285,168 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 					}
 					seederName = name
 				}
-
-				// Check whether this seed was tagged for boost at
-				// dispatch time.  The tag is set when the seed's
-				// transitive dependents + itself cover all remaining
-				// seeds, meaning nothing else can run concurrently.
-				wantBoost := false
-				gotBoost := false
-				wp.graph.mu.Lock()
-				if wp.graph.boostSeed[seederName] {
-					delete(wp.graph.boostSeed, seederName)
-					if wp.opts.BoostWorker != nil {
-						wantBoost = true
-					}
-				}
-				wp.graph.mu.Unlock()
-				if wantBoost {
-					if err := wp.opts.BoostWorker(workerIdx); err != nil {
-						setError(fmt.Errorf("[%s] failed to boost worker: %w", seederName, err))
-						return
-					}
-					gotBoost = true
-				}
-
-				info := wp.infoByName[seederName]
-
-				// Create an isolated ISeeder for this worker.
-				sopts := &NewSeederOptions{
-					Stdout: wp.opts.NewStdoutWriter(fmt.Sprintf("seeds:%s", seederName)),
-					Stderr: wp.opts.NewStderrWriter(fmt.Sprintf("seeds:%s", seederName)),
-				}
-				flushWriters := func() {
-					worker.FlushWriters(sopts.Stdout, sopts.Stderr)
-				}
-				workerSD, err := wp.opts.NewSeeder(sopts)
-				if err != nil {
-					if gotBoost && wp.opts.UnboostWorker != nil {
-						ubErr := wp.opts.UnboostWorker(workerIdx)
-						if ubErr != nil && sopts.Stderr != nil {
-							fmt.Fprintf(
-								sopts.Stderr,
-								"[%s] failed to unboost worker after NewSeeder error: %v\n",
-								seederName,
-								ubErr,
-							)
-						}
-					}
-					flushWriters()
-					setError(fmt.Errorf("[%s] failed to create seeder: %w", seederName, err))
+				if poolCtx.Err() != nil {
 					return
 				}
 
-				wp.opts.PushCleanup(func() {
-					workerSD.Cleanup()
-					flushWriters()
-				})
-				if gotBoost {
-					workerSD.Print(
-						"[%s] Worker boosted to max resources. Woohoo.\n",
-						seederName,
-					)
-				}
-
-				// Run the worker under its file lock.
-				workerStart := time.Now()
-				workerSD.Print(
-					"[%s] Worker started at %s\n",
-					seederName, workerStart.Format(time.RFC3339),
-				)
-				err = workerSD.ExecuteWithSeederLock(seederName, func() error {
-					return seedWorker(poolCtx, &seedWorkerOpts{
-						sd:             workerSD,
-						info:           info,
-						params:         wp.paramsByName[seederName],
-						workerIdx:      workerIdx,
-						opts:           wp.opts,
-						onSeederDoneMu: &wp.onSeederDoneMu,
-					})
-				})
-				workerSD.Cleanup()
-				workerEnd := time.Now()
-				workerSD.Print(
-					"[%s] Worker finished at %s (elapsed: %s)\n",
-					seederName, workerEnd.Format(time.RFC3339), workerEnd.Sub(workerStart),
-				)
-				flushWriters()
-
-				if err != nil {
-					if gotBoost && wp.opts.UnboostWorker != nil {
-						_ = wp.opts.UnboostWorker(workerIdx)
-					}
-					setError(fmt.Errorf("seeder %s failed: %w", seederName, err))
+				if !runOneSeed(poolCtx, wp, workerIdx, seederName, setError) {
 					return
 				}
-
-				// Unboost before releasing dependents so new workers
-				// see the original resource limits.
-				if gotBoost && wp.opts.UnboostWorker != nil {
-					if err := wp.opts.UnboostWorker(workerIdx); err != nil {
-						setError(fmt.Errorf("[%s] failed to unboost worker: %w", seederName, err))
-						return
-					}
-				}
-
-				// Notify dependents and possibly close ready.
-				wp.graph.mu.Lock()
-				if !wp.graph.stopped {
-					wp.graph.remaining--
-					for _, dep := range wp.graph.dependents[seederName] {
-						wp.graph.depCount[dep]--
-						if wp.graph.depCount[dep] == 0 {
-							if wp.graph.descCount[dep]+1 == wp.graph.remaining {
-								wp.graph.boostSeed[dep] = true
-							}
-							wp.graph.ready <- dep
-						}
-					}
-					if wp.graph.remaining == 0 {
-						wp.graph.stopped = true
-						close(wp.graph.ready)
-					}
-				}
-				wp.graph.mu.Unlock()
 			}
 		})
 	}
 
 	wg.Wait()
+	if firstErr == nil && ctx.Err() != nil {
+		wp.graph.mu.Lock()
+		unfinished := wp.graph.remaining > 0
+		wp.graph.mu.Unlock()
+		if unfinished {
+			return ctx.Err()
+		}
+	}
 	return firstErr
+}
+
+// runOneSeed executes a single ready seeder on workerIdx, ensuring boost state
+// is always restored (even on error or panic) and writers are flushed.
+// Returns true if the worker should continue pulling from the ready queue.
+func runOneSeed(
+	poolCtx context.Context,
+	wp *workerPoolOpts,
+	workerIdx int,
+	seederName string,
+	setError func(error),
+) bool {
+	// Check whether this seed was tagged for boost at
+	// dispatch time.  The tag is set when the seed's
+	// transitive dependents + itself cover all remaining
+	// seeds, meaning nothing else can run concurrently.
+	wantBoost := false
+	gotBoost := false
+	wp.graph.mu.Lock()
+	if wp.graph.boostSeed[seederName] {
+		delete(wp.graph.boostSeed, seederName)
+		if wp.opts.BoostWorker != nil {
+			wantBoost = true
+		}
+	}
+	wp.graph.mu.Unlock()
+	if wantBoost {
+		if err := wp.opts.BoostWorker(workerIdx); err != nil {
+			setError(fmt.Errorf("[%s] failed to boost worker: %w", seederName, err))
+			return false
+		}
+		gotBoost = true
+	}
+
+	// Ensure unboost always runs on error or panic if not already unboosted
+	// before releasing dependents on the normal success path.
+	defer func() {
+		if gotBoost && wp.opts.UnboostWorker != nil {
+			_ = wp.opts.UnboostWorker(workerIdx)
+		}
+	}()
+
+	info := wp.infoByName[seederName]
+
+	// Create an isolated ISeeder for this worker.
+	sopts := &NewSeederOptions{
+		Stdout: wp.opts.NewStdoutWriter(fmt.Sprintf("seeds:%s", seederName)),
+		Stderr: wp.opts.NewStderrWriter(fmt.Sprintf("seeds:%s", seederName)),
+	}
+	flushWriters := func() {
+		worker.FlushWriters(sopts.Stdout, sopts.Stderr)
+	}
+	defer flushWriters()
+
+	workerSD, err := wp.opts.NewSeeder(sopts)
+	if err != nil {
+		if gotBoost && wp.opts.UnboostWorker != nil {
+			gotBoost = false
+			ubErr := wp.opts.UnboostWorker(workerIdx)
+			if ubErr != nil && sopts.Stderr != nil {
+				fmt.Fprintf(
+					sopts.Stderr,
+					"[%s] failed to unboost worker after NewSeeder error: %v\n",
+					seederName,
+					ubErr,
+				)
+			}
+		}
+		setError(fmt.Errorf("[%s] failed to create seeder: %w", seederName, err))
+		return false
+	}
+
+	wp.opts.PushCleanup(func() {
+		workerSD.Cleanup()
+		flushWriters()
+	})
+	if gotBoost {
+		workerSD.Print(
+			"[%s] Worker boosted to max resources. Woohoo.\n",
+			seederName,
+		)
+	}
+
+	// Run the worker under its file lock.
+	workerStart := time.Now()
+	workerSD.Print(
+		"[%s] Worker started at %s\n",
+		seederName, workerStart.Format(time.RFC3339),
+	)
+	err = workerSD.ExecuteWithSeederLock(seederName, func() error {
+		return seedWorker(poolCtx, &seedWorkerOpts{
+			sd:             workerSD,
+			info:           info,
+			params:         wp.paramsByName[seederName],
+			workerIdx:      workerIdx,
+			opts:           wp.opts,
+			onSeederDoneMu: &wp.onSeederDoneMu,
+		})
+	})
+	workerSD.Cleanup()
+	workerEnd := time.Now()
+	workerSD.Print(
+		"[%s] Worker finished at %s (elapsed: %s)\n",
+		seederName, workerEnd.Format(time.RFC3339), workerEnd.Sub(workerStart),
+	)
+
+	if err != nil {
+		setError(fmt.Errorf("seeder %s failed: %w", seederName, err))
+		return false
+	}
+
+	// Unboost before releasing dependents so new workers
+	// see the original resource limits.
+	if gotBoost && wp.opts.UnboostWorker != nil {
+		gotBoost = false
+		if err := wp.opts.UnboostWorker(workerIdx); err != nil {
+			setError(fmt.Errorf("[%s] failed to unboost worker: %w", seederName, err))
+			return false
+		}
+	}
+
+	// Notify dependents and possibly close ready.
+	wp.graph.mu.Lock()
+	if !wp.graph.stopped {
+		wp.graph.remaining--
+		for _, dep := range wp.graph.dependents[seederName] {
+			wp.graph.depCount[dep]--
+			if wp.graph.depCount[dep] == 0 {
+				if wp.graph.descCount[dep]+1 == wp.graph.remaining {
+					wp.graph.boostSeed[dep] = true
+				}
+				wp.graph.ready <- dep
+			}
+		}
+		if wp.graph.remaining == 0 {
+			wp.graph.stopped = true
+			close(wp.graph.ready)
+		}
+	}
+	wp.graph.mu.Unlock()
+	return true
 }
 
 type seedWorkerOpts struct {

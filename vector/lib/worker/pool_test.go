@@ -131,3 +131,34 @@ func TestRunPool_EmptyItemsAndCancelledContext(t *testing.T) {
 		t.Fatalf("expected nil error for empty items, got: %v", err)
 	}
 }
+
+func TestRunPool_CancelledContextWithItemsReturnsContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for range 50 {
+		var ran atomic.Bool
+		var skipped []string
+		err := RunPool(ctx, PoolOptions[string]{
+			Items:       []string{"a", "b", "c"},
+			Parallelism: 2,
+			Run: func(context.Context, string) error {
+				ran.Store(true)
+				return nil
+			},
+			OnSkip: func(item string) {
+				skipped = append(skipped, item)
+			},
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled for non-empty items with cancelled ctx, got: %v", err)
+		}
+		if ran.Load() {
+			t.Fatal("Run was called despite context already being cancelled")
+		}
+		slices.Sort(skipped)
+		if !slices.Equal(skipped, []string{"a", "b", "c"}) {
+			t.Fatalf("skipped = %v, want [a b c]", skipped)
+		}
+	}
+}

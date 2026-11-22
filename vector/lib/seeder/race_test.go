@@ -244,3 +244,59 @@ func TestParallelSeed_FlushesWorkerWriters(t *testing.T) {
 		t.Error("expected worker stderr writer to be flushed")
 	}
 }
+
+func TestParallelSeed_CancelledContextWithSeedersReturnsContextCanceled(t *testing.T) {
+	infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+	paramsMap := map[string]*SeederParams{
+		"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for range 50 {
+		var called atomic.Bool
+		err := ParallelSeed(ctx, &ParallelSeedOptions{
+			Seeders:      infos,
+			ParamsByName: paramsMap,
+			Parallelism:  2,
+			NewSeeder: func(_ *NewSeederOptions) (ISeeder, error) {
+				called.Store(true)
+				return DefaultMockSeeder(), nil
+			},
+			NewStdoutWriter: noopWriter,
+			NewStderrWriter: noopWriter,
+			PushCleanup:     noopCleanup,
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled for unfinished seeds with cancelled ctx, got: %v", err)
+		}
+		if called.Load() {
+			t.Fatal("NewSeeder was called despite context already being cancelled")
+		}
+	}
+}
+
+func TestParallelSeed_DuplicateSeederNamesReturnsError(t *testing.T) {
+	infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+	dupInfos := []SeederInfo{infos[0], infos[0]}
+	paramsMap := map[string]*SeederParams{
+		"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := ParallelSeed(ctx, &ParallelSeedOptions{
+		Seeders:         dupInfos,
+		ParamsByName:    paramsMap,
+		Parallelism:     2,
+		NewSeeder:       func(_ *NewSeederOptions) (ISeeder, error) { return DefaultMockSeeder(), nil },
+		NewStdoutWriter: noopWriter,
+		NewStderrWriter: noopWriter,
+		PushCleanup:     noopCleanup,
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+		t.Fatalf("expected duplicate seeder error, got: %v", err)
+	}
+}
