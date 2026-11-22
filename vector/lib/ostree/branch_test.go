@@ -1,8 +1,10 @@
 package ostree
 
 import (
-	"matrixos/vector/lib/config"
+	"errors"
 	"testing"
+
+	"matrixos/vector/lib/config"
 )
 
 func TestBranchHelpers(t *testing.T) {
@@ -145,5 +147,24 @@ func TestOstreeBranchMethodsErrors(t *testing.T) {
 	}
 	if _, err := o.RemoveFullFromBranch(); err == nil {
 		t.Error("RemoveFullFromBranch should fail empty ref")
+	}
+}
+
+func TestCleanAndStripRef(t *testing.T) {
+	if _, err := CleanAndStripRef(nil); err == nil {
+		t.Error("expected error for nil IOstree")
+	}
+	got, err := CleanAndStripRef(&MockOstree{Ref_: "origin:matrixos/amd64/gnome-full"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "matrixos/amd64/gnome" {
+		t.Errorf("got %q, want %q", got, "matrixos/amd64/gnome")
+	}
+	if _, err := CleanAndStripRef(&MockOstree{RemoveFullErr: errors.New("boom")}); err == nil {
+		t.Error("expected propagated RemoveFullFromBranch error")
+	}
+	if _, err := CleanAndStripRef(&MockOstree{RemoveFullResult: "origin:", RemoveFullResultSet: true}); err == nil {
+		t.Error("expected error when cleaned ref is empty")
 	}
 }

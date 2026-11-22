@@ -5,9 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
-	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 )
 
 const (
@@ -115,42 +114,21 @@ func (r *Releaser) CleanRootfs() error {
 
 // chroot executes a command inside the image directory via chroot and unshare.
 func (r *Releaser) chroot(env []string, name string, args []string) error {
-
 	devDir, err := r.DevDir()
 	if err != nil {
 		return fmt.Errorf("failed to get dev dir: %w", err)
 	}
-
-	initScript := filepath.Join(devDir, "build", "init", "init.sh")
-	if _, err := os.Stat(initScript); os.IsNotExist(err) {
-		return fmt.Errorf("init script not found at %s", initScript)
-	}
-
-	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
-	env = config.FilterEnvKey(env, "RUNNER_TYPE")
-	env = append(env,
-		"MATRIXOS_DEV_DIR="+devDir,
-		"RUNNER_TYPE=releaser",
-	)
-
-	cmd := runner.ChrootCmd{
-		Cmd: runner.Cmd{
-			Name:   name,
-			Args:   args,
-			Env:    env,
-			Stdout: r.Stdout(),
-			Stderr: r.Stderr(),
-		},
-		ChrootExec: initScript,
+	return worker.RunInitChroot(worker.InitChrootOptions{
+		DevDir:     devDir,
 		ChrootDir:  r.imageDir,
-	}
-
-	err = r.chrootRunner(&cmd)
-	if err != nil {
-		return fmt.Errorf("chrooted %s %s failed: %w", name, args, err)
-	}
-
-	return nil
+		RunnerType: "releaser",
+		Name:       name,
+		Args:       args,
+		Env:        env,
+		Stdout:     r.Stdout(),
+		Stderr:     r.Stderr(),
+		ChrootRun:  r.chrootRunner,
+	})
 }
 
 func (r *Releaser) PostCleanShrink() error {

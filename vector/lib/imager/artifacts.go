@@ -31,16 +31,7 @@ func (im *Imager) cleanAndStripRef() (string, error) {
 	if im.ref == "" {
 		return "", errors.New("missing ref, set Ref in NewImagerOptions")
 	}
-	stripped, err := im.ostree.RemoveFullFromBranch()
-	if err != nil {
-		return "", err
-	}
-
-	stripped = ostree.CleanRemoteFromRef(stripped)
-	if stripped == "" {
-		return "", errors.New("invalid ref parameter after cleaning")
-	}
-	return stripped, nil
+	return ostree.CleanAndStripRef(im.ostree)
 }
 
 // refToSuffix converts slashes in a ref to underscores for use in file names.

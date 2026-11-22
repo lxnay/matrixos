@@ -35,6 +35,24 @@ func CleanRemoteFromRef(ref string) string {
 	return ref
 }
 
+// CleanAndStripRef strips the full-branch suffix from ot's current ref and
+// removes any leading remote prefix (e.g. "origin:matrixos/amd64/gnome-full"
+// -> "matrixos/amd64/gnome").
+func CleanAndStripRef(ot IOstree) (string, error) {
+	if ot == nil {
+		return "", errors.New("missing ostree parameter")
+	}
+	stripped, err := ot.RemoveFullFromBranch()
+	if err != nil {
+		return "", err
+	}
+	stripped = CleanRemoteFromRef(stripped)
+	if stripped == "" {
+		return "", errors.New("invalid ref parameter after cleaning")
+	}
+	return stripped, nil
+}
+
 // IsBranchShortName returns true if the branch is a short name.
 // E.g. "gnome" -> true, "matrixos/dev/gnome" -> false.
 func IsBranchShortName(branch string) bool {

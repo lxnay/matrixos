@@ -39,16 +39,7 @@ func (r *Releaser) cleanAndStripRef() (string, error) {
 	if r.ref == "" {
 		return "", errors.New("missing ref, set Ref in Releaser")
 	}
-	stripped, err := r.ostree.RemoveFullFromBranch()
-	if err != nil {
-		return "", err
-	}
-
-	stripped = ostree.CleanRemoteFromRef(stripped)
-	if stripped == "" {
-		return "", errors.New("invalid ref parameter after cleaning")
-	}
-	return stripped, nil
+	return ostree.CleanAndStripRef(r.ostree)
 }
 
 // serviceAction represents a parsed line from a services configuration file.
