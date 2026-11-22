@@ -1,6 +1,7 @@
 package filesystems
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+const loopAttachMaxRetries = 16
 
 // Mockable variables for loop-device operations.
 var (
@@ -33,8 +36,8 @@ var (
 // All methods are safe for concurrent use.
 type Loop struct {
 	mu       sync.Mutex
-	Path     string // image file path, set at construction
-	Device   string // loop device path (e.g. /dev/loop3), set by Attach
+	Path     string // image file path, immutable after construction
+	device   string // loop device path (e.g. /dev/loop3), set by Attach, cleared by Detach
 	attached bool   // true after a successful Attach, false after Detach
 }
 
@@ -47,7 +50,18 @@ func NewLoop(imagePath string) (*Loop, error) {
 // NewLoopFromDevice returns a Loop for an already-attached loop device.
 // Use BackingFile() / Detach() to query or release it.
 func NewLoopFromDevice(device string) *Loop {
-	return &Loop{Device: device, attached: true}
+	return &Loop{device: device, attached: true}
+}
+
+// DevicePath returns the currently attached loop device path (e.g. /dev/loop3),
+// or an empty string if the loop is not attached.
+func (l *Loop) DevicePath() string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.device
 }
 
 // BackingFile returns the kernel-reported backing file for the loop device
@@ -55,7 +69,7 @@ func NewLoopFromDevice(device string) *Loop {
 // Returns an empty string when the device has no backing file.
 func (l *Loop) BackingFile() string {
 	l.mu.Lock()
-	dev := l.Device
+	dev := l.device
 	l.mu.Unlock()
 
 	if dev == "" {
@@ -86,16 +100,17 @@ func (l *Loop) Detach() error {
 		return fmt.Errorf("loop detach: device not attached")
 	}
 
-	f, err := openFile(l.Device, os.O_RDONLY, 0)
+	f, err := openFile(l.device, os.O_RDONLY, 0)
 	if err != nil {
-		return fmt.Errorf("loop detach: open %s: %w", l.Device, err)
+		return fmt.Errorf("loop detach: open %s: %w", l.device, err)
 	}
 	defer closeFile(f)
 
 	if err := ioctlSetInt(int(f.Fd()), unix.LOOP_CLR_FD, 0); err != nil {
-		return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.Device, err)
+		return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.device, err)
 	}
 
+	l.device = ""
 	l.attached = false
 	return nil
 }
@@ -103,7 +118,9 @@ func (l *Loop) Detach() error {
 // Attach associates the image at l.Path with the next free loop device
 // (with partition scanning enabled), equivalent to
 // `losetup --show -fP <imagePath>`.
-// On success l.Device is set to the allocated device path.
+// On success DevicePath() returns the allocated device path.
+// Retries on EBUSY from LOOP_SET_FD to tolerate cross-process races
+// between LOOP_CTL_GET_FREE and LOOP_SET_FD.
 // Returns an error if already attached.
 func (l *Loop) Attach() error {
 	l.mu.Lock()
@@ -113,62 +130,81 @@ func (l *Loop) Attach() error {
 	defer attachMu.Unlock()
 
 	if l.attached {
-		return fmt.Errorf("loop attach: already attached to %s", l.Device)
+		return fmt.Errorf("loop attach: already attached to %s", l.device)
 	}
 
-	// 1. Get a free loop device number from /dev/loop-control.
-	ctl, err := openFile(loopControlPath, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("loop attach: open %s: %w", loopControlPath, err)
-	}
-	devNr, err := ioctlRetInt(int(ctl.Fd()), unix.LOOP_CTL_GET_FREE)
-	closeFile(ctl)
-	if err != nil {
-		return fmt.Errorf("loop attach: LOOP_CTL_GET_FREE: %w", err)
-	}
-
-	loopPath := fmt.Sprintf("%s/loop%d", devPrefix, devNr)
-
-	// 2. Open the backing image file.
-	imgFile, err := openFile(l.Path, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("loop attach: open image %s: %w", l.Path, err)
-	}
-	defer closeFile(imgFile)
-
-	// 3. Open the loop device and associate the image fd with LOOP_SET_FD.
-	loopFile, err := openFile(loopPath, os.O_RDWR, 0)
-	if err != nil {
-		return fmt.Errorf("loop attach: open %s: %w", loopPath, err)
-	}
-	defer closeFile(loopFile)
-
-	loopFd := int(loopFile.Fd())
-	imgFileFd := int(imgFile.Fd())
-
-	if err := ioctlSetInt(loopFd, unix.LOOP_SET_FD, imgFileFd); err != nil {
-		return fmt.Errorf("loop attach: LOOP_SET_FD on %s: %w", loopPath, err)
-	}
-
-	// 4. Enable partition scanning via LOOP_SET_STATUS64.
-	info := unix.LoopInfo64{
-		Flags: unix.LO_FLAGS_PARTSCAN,
-	}
-	if err := ioctlLoopInfo(loopFd, &info); err != nil {
-		// Best-effort detach on failure.
-		beErr := ioctlSetInt(loopFd, unix.LOOP_CLR_FD, 0)
-		if beErr != nil {
-			return fmt.Errorf(
-				"loop attach: LOOP_SET_STATUS64 on %s: %v (also failed to detach: %v)",
-				loopPath,
-				err,
-				beErr,
-			)
+	var imgFile *os.File
+	defer func() {
+		if imgFile != nil {
+			closeFile(imgFile)
 		}
-		return fmt.Errorf("loop attach: LOOP_SET_STATUS64 on %s: %w", loopPath, err)
+	}()
+
+	var lastErr error
+	for range loopAttachMaxRetries {
+		// 1. Get a free loop device number from /dev/loop-control.
+		ctl, err := openFile(loopControlPath, os.O_RDWR, 0)
+		if err != nil {
+			return fmt.Errorf("loop attach: open %s: %w", loopControlPath, err)
+		}
+		devNr, err := ioctlRetInt(int(ctl.Fd()), unix.LOOP_CTL_GET_FREE)
+		closeFile(ctl)
+		if err != nil {
+			return fmt.Errorf("loop attach: LOOP_CTL_GET_FREE: %w", err)
+		}
+
+		loopPath := fmt.Sprintf("%s/loop%d", devPrefix, devNr)
+
+		// 2. Open the backing image file once and reuse across EBUSY retries.
+		if imgFile == nil {
+			imgFile, err = openFile(l.Path, os.O_RDWR, 0)
+			if err != nil {
+				return fmt.Errorf("loop attach: open image %s: %w", l.Path, err)
+			}
+		}
+
+		// 3. Open the loop device and associate the image fd with LOOP_SET_FD.
+		loopFile, err := openFile(loopPath, os.O_RDWR, 0)
+		if err != nil {
+			return fmt.Errorf("loop attach: open %s: %w", loopPath, err)
+		}
+
+		loopFd := int(loopFile.Fd())
+		imgFileFd := int(imgFile.Fd())
+
+		if err := ioctlSetInt(loopFd, unix.LOOP_SET_FD, imgFileFd); err != nil {
+			closeFile(loopFile)
+			if errors.Is(err, unix.EBUSY) {
+				lastErr = fmt.Errorf("loop attach: LOOP_SET_FD on %s: %w", loopPath, err)
+				continue
+			}
+			return fmt.Errorf("loop attach: LOOP_SET_FD on %s: %w", loopPath, err)
+		}
+
+		// 4. Enable partition scanning via LOOP_SET_STATUS64.
+		info := unix.LoopInfo64{
+			Flags: unix.LO_FLAGS_PARTSCAN,
+		}
+		if err := ioctlLoopInfo(loopFd, &info); err != nil {
+			// Best-effort detach on failure.
+			beErr := ioctlSetInt(loopFd, unix.LOOP_CLR_FD, 0)
+			closeFile(loopFile)
+			if beErr != nil {
+				return fmt.Errorf(
+					"loop attach: LOOP_SET_STATUS64 on %s: %v (also failed to detach: %v)",
+					loopPath,
+					err,
+					beErr,
+				)
+			}
+			return fmt.Errorf("loop attach: LOOP_SET_STATUS64 on %s: %w", loopPath, err)
+		}
+
+		closeFile(loopFile)
+		l.device = loopPath
+		l.attached = true
+		return nil
 	}
 
-	l.Device = loopPath
-	l.attached = true
-	return nil
+	return lastErr
 }

@@ -268,8 +268,8 @@ func TestLoopAttach(t *testing.T) {
 		if err := l.Attach(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if l.Device != "/dev/loop3" {
-			t.Errorf("expected /dev/loop3, got %q", l.Device)
+		if l.DevicePath() != "/dev/loop3" {
+			t.Errorf("expected /dev/loop3, got %q", l.DevicePath())
 		}
 		if l.Path != "/tmp/disk.img" {
 			t.Errorf("expected /tmp/disk.img, got %q", l.Path)
@@ -450,8 +450,8 @@ func TestLoopAttach(t *testing.T) {
 		if !detachCalled {
 			t.Error("LOOP_CLR_FD should be called on status64 failure")
 		}
-		if l.Device != "" {
-			t.Errorf("Device should remain empty on failure, got %q", l.Device)
+		if l.DevicePath() != "" {
+			t.Errorf("Device should remain empty on failure, got %q", l.DevicePath())
 		}
 	})
 }
@@ -468,15 +468,15 @@ func TestNewLoop(t *testing.T) {
 	if l.Path != "/tmp/test.img" {
 		t.Errorf("expected /tmp/test.img, got %q", l.Path)
 	}
-	if l.Device != "" {
-		t.Errorf("expected empty Device, got %q", l.Device)
+	if l.DevicePath() != "" {
+		t.Errorf("expected empty Device, got %q", l.DevicePath())
 	}
 }
 
 func TestNewLoopFromDevice(t *testing.T) {
 	l := NewLoopFromDevice("/dev/loop4")
-	if l.Device != "/dev/loop4" {
-		t.Errorf("expected /dev/loop4, got %q", l.Device)
+	if l.DevicePath() != "/dev/loop4" {
+		t.Errorf("expected /dev/loop4, got %q", l.DevicePath())
 	}
 	if l.Path != "" {
 		t.Errorf("expected empty Path, got %q", l.Path)
@@ -518,15 +518,16 @@ func TestLoopIntegration(t *testing.T) {
 	if err := l.Attach(); err != nil {
 		t.Fatalf("Attach() failed: %v", err)
 	}
-	t.Logf("attached %s -> %s", absImg, l.Device)
+	dev := l.DevicePath()
+	t.Logf("attached %s -> %s", absImg, dev)
 
-	if l.Device == "" {
+	if dev == "" {
 		t.Fatal("Device is empty after Attach")
 	}
 
 	// The device node must exist.
-	if _, err := os.Stat(l.Device); err != nil {
-		t.Fatalf("device %s does not exist: %v", l.Device, err)
+	if _, err := os.Stat(dev); err != nil {
+		t.Fatalf("device %s does not exist: %v", dev, err)
 	}
 
 	// --- BackingFile ---
@@ -545,7 +546,7 @@ func TestLoopIntegration(t *testing.T) {
 		t.Fatalf("Detach() failed: %v", err)
 	}
 	DevicesSettle()
-	t.Logf("detached %s", l.Device)
+	t.Logf("detached %s", dev)
 
 	// After detach, backing file should be gone.
 	if bf2 := l.BackingFile(); bf2 != "" {

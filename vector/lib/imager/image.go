@@ -171,11 +171,12 @@ func (im *Imager) Cleanup() {
 	im.trackedLoopDevicesMu.Unlock()
 
 	for _, loop := range loops {
+		dev := loop.DevicePath()
 		if err := loop.Detach(); err != nil {
 			fmt.Fprintf(
 				im.stderr,
 				"warning: failed to detach loop device %s (path: %s): %v\n",
-				loop.Device,
+				dev,
 				loop.Path,
 				err,
 			)

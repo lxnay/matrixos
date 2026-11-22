@@ -200,7 +200,7 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 		return fmt.Errorf("failed to attach image %s as loop device: %w",
 			imagePath, err)
 	}
-	blockDevice := loop.Device
+	blockDevice := loop.DevicePath()
 	im.SetDevicePath(blockDevice)
 	filesystems.DevicesSettle()
 
