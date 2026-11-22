@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -149,11 +148,8 @@ func (c *ReleasesCommand) updateStdWriters(name string) {
 
 // runReleases implements the multi-seeder release workflow.
 func (c *ReleasesCommand) runReleases() error {
-	writerSetup := func() {
-		c.updateStdWriters("main")
-		c.PushCleanup(c.FlushPrinters)
-	}
-	writerSetup()
+	c.updateStdWriters("main")
+	c.PushCleanup(c.FlushPrinters)
 
 	c.PushCleanup(c.killGpg)
 
@@ -246,11 +242,9 @@ func (c *ReleasesCommand) runReleases() error {
 	}
 
 	if err := releaser.ParallelRelease(ctx, prOpts); err != nil {
-		writerSetup()
 		return err
 	}
 
-	writerSetup()
 	c.sd.Print("SUCCESS: All builds released.\n")
 	for _, b := range c.BuiltReleases {
 		c.sd.Print("  %s\n", b)
@@ -308,15 +302,7 @@ func (c *ReleasesCommand) initBuiltReleasesFile() error {
 		"Marking freshly built releases into %s ...\n",
 		c.builtReleasesFile,
 	)
-	if err := os.WriteFile(
-		c.builtReleasesFile, []byte{}, 0644,
-	); err != nil {
-		return fmt.Errorf(
-			"failed to init %s: %w",
-			c.builtReleasesFile, err,
-		)
-	}
-	return nil
+	return truncateOutputFile(c.builtReleasesFile)
 }
 
 // recordBuiltRelease appends the given branch to the built-releases
@@ -327,18 +313,5 @@ func (c *ReleasesCommand) recordBuiltRelease(branch string) error {
 	defer c.mu.Unlock()
 
 	c.BuiltReleases = append(c.BuiltReleases, branch)
-
-	if c.builtReleasesFile == "" {
-		return nil
-	}
-	f, err := os.OpenFile(
-		c.builtReleasesFile,
-		os.O_APPEND|os.O_WRONLY, 0644,
-	)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, branch)
-	return err
+	return appendLineToFile(c.builtReleasesFile, branch)
 }

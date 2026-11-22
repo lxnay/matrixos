@@ -41,7 +41,7 @@ func (c *EnterCommand) Name() string {
 // SeedersParams maps seeder names to their parsed params.
 type SeedersParams map[string]*seeder.SeederParams
 
-func (c *EnterCommand) makeSeederParams(sd seeder.ISeeder) (SeedersParams, error) {
+func (c *EnterCommand) makeSeederParams(sd seeder.ISeeder) SeedersParams {
 	paramsMap := make(SeedersParams)
 	for _, info := range c.detected {
 		params, err := sd.ParseSeederParams(info)
@@ -51,7 +51,7 @@ func (c *EnterCommand) makeSeederParams(sd seeder.ISeeder) (SeedersParams, error
 		}
 		paramsMap[info.Name] = params
 	}
-	return paramsMap, nil
+	return paramsMap
 }
 
 func (c *EnterCommand) Init(args []string) error {
@@ -138,10 +138,7 @@ func (c *EnterCommand) run() error {
 	var chrootDirs []string
 	var chrootNames []string
 
-	seedersParams, err := c.makeSeederParams(sd)
-	if err != nil {
-		return fmt.Errorf("failed to make params map: %w", err)
-	}
+	seedersParams := c.makeSeederParams(sd)
 
 	completeChrootDirs := make(map[string]bool)
 	for _, params := range seedersParams {
@@ -223,7 +220,7 @@ func (c *EnterCommand) run() error {
 
 	// Enter each chroot.
 	for _, chrootDir := range chrootDirs {
-		if err := c.enter(sd, chrootDir); err != nil {
+		if err := c.enter(sd, seedersParams, chrootDir); err != nil {
 			return fmt.Errorf("error entering chroot %s: %w", chrootDir, err)
 		}
 	}
@@ -271,7 +268,7 @@ func (c *EnterCommand) resolveNames(sps SeedersParams, names []string) ([]string
 }
 
 // enter runs an interactive shell inside the chroot, and tears down mounts afterwards.
-func (c *EnterCommand) enter(sd seeder.ISeeder, chrootDir string) error {
+func (c *EnterCommand) enter(sd seeder.ISeeder, seedersParams SeedersParams, chrootDir string) error {
 	name := filepath.Base(chrootDir)
 	c.SetupPrinters(name)
 	defer c.FlushPrinters()
@@ -283,17 +280,16 @@ func (c *EnterCommand) enter(sd seeder.ISeeder, chrootDir string) error {
 		c.cBold, c.iconRocket, name, chrootDir, c.cReset)
 	c.Println(c.separator)
 
-	return c.chrootWorker(sd, chrootDir)
+	return c.chrootWorker(sd, seedersParams, chrootDir)
 }
 
-func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, chrootDir string) error {
+func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, seedersParams SeedersParams, chrootDir string) error {
 	// Find the corresponding seeder chroot dir matching it with chrootDir.
 	var si seeder.SeederInfo
 	var found bool
 	for _, info := range c.detected {
-		params, err := sd.ParseSeederParams(info)
-		if err != nil {
-			// Skip seeders whose params cannot be parsed.
+		params, ok := seedersParams[info.Name]
+		if !ok || params == nil {
 			continue
 		}
 		if slices.Contains(params.CompleteChrootDirs, chrootDir) {

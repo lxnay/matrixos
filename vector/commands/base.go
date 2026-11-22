@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"matrixos/vector/lib/config"
-	"matrixos/vector/lib/ostree"
+	"os"
 	"regexp"
 	"strings"
+
+	"matrixos/vector/lib/config"
+	"matrixos/vector/lib/ostree"
 )
 
 // Prompter provides interactive input prompting with validation.
@@ -338,4 +340,27 @@ func (c *BaseCommand) killGpg() {
 	if c.ot != nil {
 		c.ot.KillGpgDaemons()
 	}
+}
+
+// truncateOutputFile creates or truncates an output tracking file to empty.
+func truncateOutputFile(path string) error {
+	if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+		return fmt.Errorf("failed to init %s: %w", path, err)
+	}
+	return nil
+}
+
+// appendLineToFile appends line followed by a newline to an existing output
+// tracking file. It is a no-op when path is empty.
+func appendLineToFile(path, line string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, line)
+	return err
 }

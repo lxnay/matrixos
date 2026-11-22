@@ -144,10 +144,7 @@ func (c *ImagesCommand) onlyFilter() releaser.RefFilterFunc {
 
 // runImages implements the main images building logic.
 func (c *ImagesCommand) runImages() error {
-	writerSetup := func() {
-		c.SetupPrinters("images:all")
-	}
-	writerSetup()
+	c.SetupPrinters("images:all")
 	defer c.FlushPrinters()
 
 	c.ot.SetStdout(c.StdoutWriter())
@@ -302,11 +299,9 @@ func (c *ImagesCommand) runImages() error {
 	}
 
 	if err := imager.ParallelImage(ctx, piOpts); err != nil {
-		writerSetup()
 		return err
 	}
 
-	writerSetup()
 	c.Printf("Successfully built images for %d releases:\n",
 		len(released))
 	for _, r := range released {

@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"runtime"
 	"sync"
 	"syscall"
@@ -164,11 +163,8 @@ func (c *SeedsCommand) runSeeds() error {
 		return fmt.Errorf("failed to initialize seeder: %w", err)
 	}
 
-	writerSetup := func(tsd seeder.ISeeder) {
-		c.updateStdWriters(tsd, "main")
-		c.PushCleanup(c.FlushPrinters)
-	}
-	writerSetup(sd)
+	c.updateStdWriters(sd, "main")
+	c.PushCleanup(c.FlushPrinters)
 
 	// Ensure private repo is initialized.
 	if err := sd.MaybeInitializePrivateRepo(); err != nil {
@@ -247,7 +243,7 @@ func (c *SeedsCommand) runSeeds() error {
 	}
 
 	// Parse params for every seeder to extract dependencies.
-	paramsByName, err := c.parseSeedersParams(seeders)
+	paramsByName, err := c.parseSeedersParams(sd, seeders)
 	if err != nil {
 		return err
 	}
@@ -306,17 +302,13 @@ func (c *SeedsCommand) runSeeds() error {
 	}()
 
 	if err := seeder.ParallelSeed(ctx, psOpts); err != nil {
-		writerSetup(sd)
 		return err
 	}
 
 	// Run post-build hooks sequentially.
 	if err := c.runPostBuild(seeders, paramsByName); err != nil {
-		writerSetup(sd)
 		return err
 	}
-
-	writerSetup(sd)
 
 	c.Printf("All done:\n")
 	for _, info := range seeders {
@@ -426,17 +418,11 @@ func (c *SeedsCommand) runPostBuild(seeders []seeder.SeederInfo, paramsByName ma
 	return nil
 }
 
-// parseSeedersParams parses the params file for each seeder and returns
-// a map of seeder name to parsed params.
-func (c *SeedsCommand) parseSeedersParams(seeders []seeder.SeederInfo) (map[string]*seeder.SeederParams, error) {
+// parseSeedersParams parses the params file for each seeder using sd and
+// returns a map of seeder name to parsed params.
+func (c *SeedsCommand) parseSeedersParams(sd seeder.ISeeder, seeders []seeder.SeederInfo) (map[string]*seeder.SeederParams, error) {
 	paramsByName := make(map[string]*seeder.SeederParams, len(seeders))
 	for _, info := range seeders {
-		opts := &seeder.NewSeederOptions{}
-		sd, err := newSeeder(c.cfg, opts)
-		if err != nil {
-			return nil, fmt.Errorf("[%s] failed to create seeder: %w", info.Name, err)
-		}
-
 		params, err := sd.ParseSeederParams(info)
 		if err != nil {
 			return nil, fmt.Errorf("[%s] failed to parse params: %w", info.Name, err)
@@ -465,31 +451,15 @@ func (c *SeedsCommand) onlyFilter() seeder.SeederFilterFunc {
 // files if the corresponding flags were provided.
 func (c *SeedsCommand) initOutputFiles() error {
 	if c.builtRootfsFile != "" {
-		c.Printf(
-			"Writing built chroots to %s ...\n",
-			c.builtRootfsFile,
-		)
-		if err := os.WriteFile(
-			c.builtRootfsFile, []byte{}, 0644,
-		); err != nil {
-			return fmt.Errorf(
-				"failed to init %s: %w",
-				c.builtRootfsFile, err,
-			)
+		c.Printf("Writing built chroots to %s ...\n", c.builtRootfsFile)
+		if err := truncateOutputFile(c.builtRootfsFile); err != nil {
+			return err
 		}
 	}
 	if c.builtSeedersFile != "" {
-		c.Printf(
-			"Writing built seeders to %s ...\n",
-			c.builtSeedersFile,
-		)
-		if err := os.WriteFile(
-			c.builtSeedersFile, []byte{}, 0644,
-		); err != nil {
-			return fmt.Errorf(
-				"failed to init %s: %w",
-				c.builtSeedersFile, err,
-			)
+		c.Printf("Writing built seeders to %s ...\n", c.builtSeedersFile)
+		if err := truncateOutputFile(c.builtSeedersFile); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -498,41 +468,12 @@ func (c *SeedsCommand) initOutputFiles() error {
 // recordBuiltRootfsFile appends the given chrootDir to the built-rootfs
 // output file if the corresponding flag was provided.
 func (c *SeedsCommand) recordBuiltRootfsFile(chrootDir string) error {
-	if c.builtRootfsFile == "" {
-		return nil
-	}
-
-	f, err := os.OpenFile(
-		c.builtRootfsFile,
-		os.O_APPEND|os.O_WRONLY, 0644,
-	)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = fmt.Fprintln(f, chrootDir)
-	return err
+	return appendLineToFile(c.builtRootfsFile, chrootDir)
 }
 
 func (c *SeedsCommand) recordBuiltSeedersFile(seederName string) error {
 	c.BuiltSeeders = append(c.BuiltSeeders, seederName)
-
-	if c.builtSeedersFile == "" {
-		return nil
-	}
-
-	f, err := os.OpenFile(
-		c.builtSeedersFile,
-		os.O_APPEND|os.O_WRONLY, 0644,
-	)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	_, err = fmt.Fprintln(f, seederName)
-	return err
+	return appendLineToFile(c.builtSeedersFile, seederName)
 }
 
 // recordResults appends the seeder name and chroot dir to the output
