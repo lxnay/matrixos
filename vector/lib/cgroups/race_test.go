@@ -1,8 +1,12 @@
 package cgroups
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestWorkerPool_ConcurrentCloseAndOperations(t *testing.T) {
@@ -70,5 +74,104 @@ func TestWorkerPool_MultiplePoolsInSameProcessDoNotCollide(t *testing.T) {
 
 	if pool1.parentDir == pool2.parentDir {
 		t.Errorf("both pools share the same parentDir %q", pool1.parentDir)
+	}
+}
+
+func TestWorkerPool_CgroupFDHasCloseOnExec(t *testing.T) {
+	root := fakeCgroupRoot(t)
+	pool, err := NewWorkerPool(&WorkerPoolOptions{
+		Parallelism:       1,
+		NumCPUs:           2,
+		MemPerWorkerBytes: 1 << 30,
+		TotalMemBytes:     1 << 30,
+		CgroupRoot:        root,
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+	defer pool.Close()
+
+	attr := pool.SysProcAttr(0)
+	if attr == nil {
+		t.Fatal("expected non-nil SysProcAttr")
+	}
+	flags, err := unix.FcntlInt(uintptr(attr.CgroupFD), unix.F_GETFD, 0)
+	if err != nil {
+		t.Fatalf("F_GETFD: %v", err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		t.Fatalf("worker cgroup fd %d is missing FD_CLOEXEC (flags=0x%x)", attr.CgroupFD, flags)
+	}
+}
+
+func TestNewWorkerPool_NilOptsAndZeroMemPerWorker(t *testing.T) {
+	t.Run("NilOpts", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("NewWorkerPool(nil) panicked: %v", r)
+			}
+		}()
+		if _, err := NewWorkerPool(nil); err == nil {
+			t.Fatal("expected error for nil options")
+		}
+	})
+
+	t.Run("ZeroMemPerWorker", func(t *testing.T) {
+		root := fakeCgroupRoot(t)
+		pool, err := NewWorkerPool(&WorkerPoolOptions{
+			Parallelism:       1,
+			NumCPUs:           2,
+			MemPerWorkerBytes: 0,
+			TotalMemBytes:     1 << 30,
+			CgroupRoot:        root,
+		})
+		if pool != nil {
+			pool.Close()
+		}
+		if err == nil {
+			t.Fatal("expected error for MemPerWorkerBytes=0")
+		}
+	})
+}
+
+func TestWorkerPool_CloseRetriesStaleDirs(t *testing.T) {
+	root := fakeCgroupRoot(t)
+	pool, err := NewWorkerPool(&WorkerPoolOptions{
+		Parallelism:       1,
+		NumCPUs:           2,
+		MemPerWorkerBytes: 1 << 30,
+		TotalMemBytes:     1 << 30,
+		CgroupRoot:        root,
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+
+	workerDir := pool.workers[0].dir
+	parentDir := pool.parentDir
+
+	// On a regular filesystem fake cgroup root, files inside workerDir prevent
+	// os.Remove(workerDir) from succeeding on the first Close(), simulating EBUSY.
+	pool.Close()
+	if _, err := os.Stat(workerDir); err != nil {
+		t.Fatalf("expected workerDir to remain after first failed remove: %v", err)
+	}
+
+	// Simulate the kernel releasing/emptying the cgroup before the second Close().
+	entries, err := os.ReadDir(workerDir)
+	if err != nil {
+		t.Fatalf("ReadDir(workerDir): %v", err)
+	}
+	for _, e := range entries {
+		_ = os.Remove(filepath.Join(workerDir, e.Name()))
+	}
+	_ = os.Remove(filepath.Join(parentDir, "cgroup.subtree_control"))
+
+	pool.Close()
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Fatalf("workerDir %s still exists after second Close() retry", workerDir)
+	}
+	if _, err := os.Stat(parentDir); !os.IsNotExist(err) {
+		t.Fatalf("parentDir %s still exists after second Close() retry", parentDir)
 	}
 }

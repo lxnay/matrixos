@@ -31,6 +31,7 @@ type WorkerPool struct {
 	mu        sync.RWMutex
 	parentDir string
 	workers   []*workerCgroup
+	staleDirs []string
 	opts      *WorkerPoolOptions
 	useCpuset bool
 }
@@ -65,6 +66,9 @@ func (o *WorkerPoolOptions) cgroupRoot() string {
 // NewWorkerPool creates a cgroup v2 hierarchy for parallel workers,
 // each limited to the specified memory and CPU slice.
 func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("cgroups: options must not be nil")
+	}
 	if opts.Parallelism < 1 {
 		return nil, fmt.Errorf("cgroups: parallelism must be >= 1, got %d", opts.Parallelism)
 	}
@@ -73,6 +77,9 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 	}
 	if opts.TotalMemBytes == 0 {
 		return nil, fmt.Errorf("cgroups: TotalMemBytes must be set")
+	}
+	if opts.MemPerWorkerBytes == 0 {
+		return nil, fmt.Errorf("cgroups: MemPerWorkerBytes must be > 0")
 	}
 
 	root := opts.cgroupRoot()
@@ -168,6 +175,12 @@ func createWorkerCgroup(parentDir string, index int, opts *WorkerPoolOptions, us
 	if err := os.Mkdir(dir, 0755); err != nil {
 		return nil, fmt.Errorf("cgroups: failed to create worker-%d dir: %w", index, err)
 	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(dir)
+		}
+	}()
 
 	if err := writeMemoryLimit(dir, index, opts.MemPerWorkerBytes); err != nil {
 		return nil, err
@@ -185,10 +198,11 @@ func createWorkerCgroup(parentDir string, index int, opts *WorkerPoolOptions, us
 		}
 	}
 
-	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("cgroups: failed to open worker-%d cgroup fd: %w", index, err)
 	}
+	ok = true
 	return &workerCgroup{dir: dir, fd: fd}, nil
 }
 
@@ -326,6 +340,8 @@ func (p *WorkerPool) SysProcAttr(workerIndex int) *syscall.SysProcAttr {
 }
 
 // Close releases all file descriptors and removes the cgroup hierarchy.
+// Calling Close multiple times is safe and retries removal of any cgroup
+// directories that were still busy (EBUSY) on an earlier call.
 func (p *WorkerPool) Close() {
 	if p == nil {
 		return
@@ -337,8 +353,27 @@ func (p *WorkerPool) Close() {
 			syscall.Close(w.fd)
 			w.fd = -1
 		}
-		os.Remove(w.dir)
+		p.staleDirs = append(p.staleDirs, w.dir)
 	}
 	p.workers = nil
-	os.Remove(p.parentDir)
+
+	var remaining []string
+	for _, dir := range p.staleDirs {
+		// Best-effort kill any lingering processes in this worker cgroup
+		// (cgroup v2 cgroup.kill, Linux 5.14+) if the kernel interface exists.
+		killPath := filepath.Join(dir, "cgroup.kill")
+		if _, err := os.Stat(killPath); err == nil {
+			_ = os.WriteFile(killPath, []byte("1"), 0644)
+		}
+		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+			remaining = append(remaining, dir)
+		}
+	}
+	p.staleDirs = remaining
+
+	if p.parentDir != "" {
+		if err := os.Remove(p.parentDir); err == nil || os.IsNotExist(err) {
+			p.parentDir = ""
+		}
+	}
 }

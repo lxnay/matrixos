@@ -47,7 +47,7 @@ func TestNewWorkerPool_InvalidTotalMemBytes(t *testing.T) {
 func TestNewWorkerPool_NoCgroupV2(t *testing.T) {
 	root := t.TempDir() // no cgroup.subtree_control file
 	_, err := NewWorkerPool(&WorkerPoolOptions{
-		Parallelism: 2, NumCPUs: 4, TotalMemBytes: 8 * 1024 * 1024 * 1024, CgroupRoot: root,
+		Parallelism: 2, NumCPUs: 4, MemPerWorkerBytes: 4 * 1024 * 1024 * 1024, TotalMemBytes: 8 * 1024 * 1024 * 1024, CgroupRoot: root,
 	})
 	if err == nil {
 		t.Fatal("expected error when cgroup v2 not available")

@@ -264,10 +264,6 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 	for i := 0; i < wp.parallelism; i++ {
 		workerIdx := i
 		wg.Go(func() {
-			var sysProcAttr *syscall.SysProcAttr
-			if wp.opts.SysProcAttr != nil {
-				sysProcAttr = wp.opts.SysProcAttr(workerIdx)
-			}
 			for {
 				var seederName string
 				select {
@@ -345,7 +341,7 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 						sd:             workerSD,
 						info:           info,
 						params:         wp.paramsByName[seederName],
-						sysProcAttr:    sysProcAttr,
+						workerIdx:      workerIdx,
 						opts:           wp.opts,
 						onSeederDoneMu: &wp.onSeederDoneMu,
 					})
@@ -405,7 +401,7 @@ type seedWorkerOpts struct {
 	sd             ISeeder
 	info           SeederInfo
 	params         *SeederParams
-	sysProcAttr    *syscall.SysProcAttr
+	workerIdx      int
 	opts           *ParallelSeedOptions
 	onSeederDoneMu *sync.Mutex
 }
@@ -513,6 +509,12 @@ func seedWorker(ctx context.Context, sw *seedWorkerOpts) error {
 	}
 
 	// Execute seeder inside chroot.
+	// Fetch SysProcAttr freshly right before Seed so we never reuse a
+	// cached CgroupFD that may have been closed during shutdown.
+	var sysProcAttr *syscall.SysProcAttr
+	if opts.SysProcAttr != nil {
+		sysProcAttr = opts.SysProcAttr(sw.workerIdx)
+	}
 	sd.Print(
 		"[%s] Running seeder inside %s ...\n",
 		info.Name, chrootDir,
@@ -520,7 +522,7 @@ func seedWorker(ctx context.Context, sw *seedWorkerOpts) error {
 	seedOpts := &SeedOptions{
 		ChrootDir:   chrootDir,
 		Info:        info,
-		SysProcAttr: sw.sysProcAttr,
+		SysProcAttr: sysProcAttr,
 	}
 	if err := sd.Seed(seedOpts); err != nil {
 		return fmt.Errorf(
