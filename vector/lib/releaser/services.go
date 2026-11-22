@@ -104,18 +104,13 @@ func (r *Releaser) SetupServices() error {
 
 	servicesFile := filepath.Join(hooksDir, ref+".conf")
 	if !filesystems.FileExists(servicesFile) {
-		// Try looking up by joining with the release/services structure.
-		servicesDir, err := r.cfg.GetItem("Releaser.HooksDir")
-		if err != nil {
-			return err
-		}
 		r.PrintWarning(
 			"Services setup file %s does not exist. Trying to look harder ...\n",
 			servicesFile,
 		)
 
 		// Fallback: check in the services dir relative to the same parent.
-		parent := filepath.Dir(servicesDir)
+		parent := filepath.Dir(hooksDir)
 		altPath := filepath.Join(parent, "services", ref+".conf")
 		if !filesystems.FileExists(altPath) {
 			r.PrintError(

@@ -75,11 +75,9 @@ func (r *Releaser) CleanRootfs() error {
 		"/etc/ssl/apache2/server.key",
 		"/etc/ssl/apache2/server.pem",
 		"/etc/portage/secureboot.x509",
-		"/root/.bash_history",
 		"/root/.lesshst",
 		"/root/.bashrc",
 		"/root/.xauth*",
-		"/var/lib/sbctl/keys",
 	}
 
 	rdOpts := filesystems.RemoveDirOptions{

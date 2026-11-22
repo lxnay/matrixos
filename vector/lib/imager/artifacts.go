@@ -165,26 +165,15 @@ func (im *Imager) CompressedImagePath() (string, error) {
 }
 
 func (im *Imager) CompressImage() error {
-	if err := im.validateImageModeForCreation(); err != nil {
+	imagePathWithExt, err := im.CompressedImagePath()
+	if err != nil {
 		return err
 	}
 	compressor, err := im.Compressor()
 	if err != nil {
 		return fmt.Errorf("failed to get compressor: %w", err)
 	}
-	if compressor == "" {
-		return errors.New("missing compressor parameter")
-	}
-
-	imagePathWithExt, err := im.CompressedImagePath()
-	if err != nil {
-		return err
-	}
-
 	parts := strings.Fields(compressor)
-	if len(parts) == 0 {
-		return errors.New("invalid compressor parameters: empty command")
-	}
 
 	args := append(parts[1:], im.imagePath)
 	cmd := &runner.Cmd{

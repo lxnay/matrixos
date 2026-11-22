@@ -208,24 +208,3 @@ func TestParallelRelease_OnReleaseDoneError(t *testing.T) {
 	// insufficient), or about record failure — either demonstrates
 	// error propagation from the worker.
 }
-
-func TestCreateDirIfMissing(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "new", "nested")
-	if err := createDirIfMissing(dir); err != nil {
-		t.Fatalf("createDirIfMissing: %v", err)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if !info.IsDir() {
-		t.Error("expected directory")
-	}
-}
-
-func TestCreateDirIfMissing_ExistingDir(t *testing.T) {
-	dir := t.TempDir()
-	if err := createDirIfMissing(dir); err != nil {
-		t.Fatalf("createDirIfMissing on existing dir: %v", err)
-	}
-}

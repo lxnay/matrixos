@@ -86,57 +86,56 @@ func (im *Imager) InstallSecurebootCerts() error {
 		return err
 	}
 
-	// SecureBoot certificate (db).
-	sbCert := filepath.Join(im.rootfs, "etc", "portage", "secureboot.pem")
-	if filesystems.FileExists(sbCert) {
-		im.Print("Copying SecureBoot cert to EFI partition ...\n")
-		if err := filesystems.CopyFile(sbCert, filepath.Join(im.efifsMount, certFileName)); err != nil {
-			return fmt.Errorf("failed to copy SecureBoot cert: %w", err)
-		}
-
-		im.Print("Generating SecureBoot MOK ...\n")
-		cmd := &runner.Cmd{
-			Name: "openssl",
-			Args: []string{
-				"x509",
-				"-in", sbCert,
-				"-outform", "DER",
-				"-out", filepath.Join(im.efifsMount, certDerFileName),
-			},
-			Stdout: im.stdout,
-			Stderr: im.stderr,
-		}
-		if err := im.runner(cmd); err != nil {
-			return fmt.Errorf("openssl DER conversion failed: %w", err)
-		}
-	} else {
-		im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", sbCert)
+	certs := []struct {
+		srcName  string
+		dstName  string
+		derName  string
+		copyMsg  string
+		derMsg   string
+		errLabel string
+	}{
+		{
+			srcName:  "secureboot.pem",
+			dstName:  certFileName,
+			derName:  certDerFileName,
+			copyMsg:  "Copying SecureBoot cert to EFI partition ...\n",
+			derMsg:   "Generating SecureBoot MOK ...\n",
+			errLabel: "SecureBoot cert",
+		},
+		{
+			srcName:  "secureboot-kek.pem",
+			dstName:  kekFileName,
+			derName:  kekDerFileName,
+			copyMsg:  "Copying SecureBoot KEK cert to EFI partition ...\n",
+			derMsg:   "Generating SecureBoot KEK DER for convenience ...\n",
+			errLabel: "SecureBoot KEK cert",
+		},
 	}
 
-	// SecureBoot KEK certificate.
-	sbKek := filepath.Join(im.rootfs, "etc", "portage", "secureboot-kek.pem")
-	if filesystems.FileExists(sbKek) {
-		im.Print("Copying SecureBoot KEK cert to EFI partition ...\n")
-		if err := filesystems.CopyFile(sbKek, filepath.Join(im.efifsMount, kekFileName)); err != nil {
-			return fmt.Errorf("failed to copy SecureBoot KEK cert: %w", err)
+	for _, c := range certs {
+		src := filepath.Join(im.rootfs, "etc", "portage", c.srcName)
+		if !filesystems.FileExists(src) {
+			im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", src)
+			continue
 		}
-
-		im.Print("Generating SecureBoot KEK DER for convenience ...\n")
+		im.Print("%s", c.copyMsg)
+		if err := filesystems.CopyFile(src, filepath.Join(im.efifsMount, c.dstName)); err != nil {
+			return fmt.Errorf("failed to copy %s: %w", c.errLabel, err)
+		}
+		im.Print("%s", c.derMsg)
 		if err := im.runner(&runner.Cmd{
 			Name: "openssl",
 			Args: []string{
 				"x509",
-				"-in", sbKek,
+				"-in", src,
 				"-outform", "DER",
-				"-out", filepath.Join(im.efifsMount, kekDerFileName),
+				"-out", filepath.Join(im.efifsMount, c.derName),
 			},
 			Stdout: im.stdout,
 			Stderr: im.stderr,
 		}); err != nil {
-			return fmt.Errorf("openssl KEK DER conversion failed: %w", err)
+			return fmt.Errorf("openssl DER conversion failed for %s: %w", c.errLabel, err)
 		}
-	} else {
-		im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", sbKek)
 	}
 
 	return nil

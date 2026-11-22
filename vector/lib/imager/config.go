@@ -1,10 +1,7 @@
 package imager
 
 import (
-	"errors"
-	"fmt"
 	"path/filepath"
-	"strconv"
 
 	"matrixos/vector/lib/config"
 )
@@ -32,14 +29,7 @@ func NewImagerConfig(cfg config.IConfig) *ImagerConfig {
 
 // configItem retrieves a non-empty config string or returns an error.
 func (c *ImagerConfig) configItem(key string) (string, error) {
-	v, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "", fmt.Errorf("invalid %s", key)
-	}
-	return v, nil
+	return config.GetRequiredItem(c.cfg, key)
 }
 
 func (c *ImagerConfig) ImagesDir() (string, error) {
@@ -139,19 +129,13 @@ func (c *ImagerConfig) LockWaitSeconds() (string, error) {
 }
 
 func (c *ImagerConfig) BuildMetadataFile() (string, error) {
-	metadataDir, err := c.cfg.GetItem("Seeder.ChrootMetadataDir")
+	metadataDir, err := c.configItem("Seeder.ChrootMetadataDir")
 	if err != nil {
 		return "", err
 	}
-	if metadataDir == "" {
-		return "", errors.New("invalid Seeder.ChrootMetadataDir")
-	}
-	buildFileName, err := c.cfg.GetItem("Seeder.ChrootMetadataDirBuildFileName")
+	buildFileName, err := c.configItem("Seeder.ChrootMetadataDirBuildFileName")
 	if err != nil {
 		return "", err
-	}
-	if buildFileName == "" {
-		return "", errors.New("invalid Seeder.ChrootMetadataDirBuildFileName")
 	}
 	return filepath.Join(metadataDir, buildFileName), nil
 }
@@ -171,23 +155,7 @@ func (c *ImagerConfig) ImageTests() (bool, error) {
 // Parallelism returns the maximum number of images to build
 // in parallel.  Defaults to 1 (sequential) if not set or invalid.
 func (c *ImagerConfig) Parallelism() (int, error) {
-	v, err := c.cfg.GetItem("Imager.Parallelism")
-	if err != nil {
-		return 1, nil
-	}
-	if v == "" {
-		return 1, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"invalid Imager.Parallelism %q: %w", v, err,
-		)
-	}
-	if n < 1 {
-		return 1, nil
-	}
-	return n, nil
+	return config.GetParallelism(c.cfg, "Imager.Parallelism")
 }
 
 // BootFilesystemType returns the filesystem type for the boot partition.

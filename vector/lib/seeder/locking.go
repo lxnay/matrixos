@@ -3,10 +3,6 @@ package seeder
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"time"
 
 	"matrixos/vector/lib/filesystems"
 )
@@ -16,10 +12,7 @@ func (s *Seeder) SeederLockDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create lock directory %s: %w", lockDir, err)
-	}
-	return lockDir, nil
+	return filesystems.EnsureLockDir(lockDir)
 }
 
 func (s *Seeder) SeederLockPath(name string) (string, error) {
@@ -30,13 +23,7 @@ func (s *Seeder) SeederLockPath(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	lockFile := filepath.Join(lockDir, name+".lock")
-
-	lockFileDir := filepath.Dir(lockFile)
-	if err := os.MkdirAll(lockFileDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create lock file directory %s: %w", lockFileDir, err)
-	}
-	return lockFile, nil
+	return filesystems.EnsureLockPath(lockDir, name)
 }
 
 func (s *Seeder) ExecuteWithSeederLock(name string, fn func() error) error {
@@ -50,18 +37,7 @@ func (s *Seeder) ExecuteWithSeederLock(name string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("failed to get lock wait seconds: %w", err)
 	}
-	timeoutSecs, err := strconv.Atoi(timeoutStr)
-	if err != nil {
-		return fmt.Errorf("invalid lock wait seconds %q: %w", timeoutStr, err)
-	}
-
-	unlock, err := filesystems.AcquireFileLock(lockPath, time.Duration(timeoutSecs)*time.Second)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	s.Print("Lock for seeder %s, %s acquired!\n", name, lockPath)
-
-	return fn()
+	return filesystems.ExecuteWithLock(lockPath, timeoutStr, fn, func() {
+		s.Print("Lock for seeder %s, %s acquired!\n", name, lockPath)
+	})
 }

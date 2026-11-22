@@ -246,7 +246,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 
 		// Compute image directory.
 		imageDir := ChrootDirForImageDir(chrootDir)
-		if err := createDirIfMissing(imageDir); err != nil {
+		if err := mkdirAll(imageDir, 0755); err != nil {
 			return fmt.Errorf(
 				"failed to create image dir %s: %w",
 				imageDir, err,
@@ -289,10 +289,4 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 // directory, mirroring the bash chroot_dir_for_image_dir function.
 func ChrootDirForImageDir(chrootDir string) string {
 	return chrootDir + ".ostree_rootfs"
-}
-
-// createDirIfMissing creates a directory and all parents if it does
-// not already exist.
-func createDirIfMissing(dir string) error {
-	return mkdirAll(dir, 0755)
 }

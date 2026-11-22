@@ -1,11 +1,6 @@
 package releaser
 
-import (
-	"fmt"
-	"strconv"
-
-	"matrixos/vector/lib/config"
-)
+import "matrixos/vector/lib/config"
 
 // ReleaserConfig provides releaser configuration accessors. It wraps a
 // config.IConfig and exposes the parsed, validated values that callers
@@ -29,14 +24,7 @@ func NewReleaserConfig(cfg config.IConfig) *ReleaserConfig {
 
 // configItem retrieves a non-empty config string or returns an error.
 func (c *ReleaserConfig) configItem(key string) (string, error) {
-	v, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "", fmt.Errorf("invalid %s", key)
-	}
-	return v, nil
+	return config.GetRequiredItem(c.cfg, key)
 }
 
 func (c *ReleaserConfig) Hostname() (string, error) {
@@ -87,28 +75,8 @@ func (c *ReleaserConfig) BuildMetadataFile() (string, error) {
 	return c.configItem("Seeder.ChrootMetadataDir")
 }
 
-func (c *ReleaserConfig) ServicesDir() (string, error) {
-	return c.configItem("Releaser.HooksDir")
-}
-
 // Parallelism returns the maximum number of releases to build
 // in parallel.  Defaults to 1 (sequential) if not set or invalid.
 func (c *ReleaserConfig) Parallelism() (int, error) {
-	v, err := c.cfg.GetItem("Releaser.Parallelism")
-	if err != nil {
-		return 1, nil
-	}
-	if v == "" {
-		return 1, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"invalid Releaser.Parallelism %q: %w", v, err,
-		)
-	}
-	if n < 1 {
-		return 1, nil
-	}
-	return n, nil
+	return config.GetParallelism(c.cfg, "Releaser.Parallelism")
 }

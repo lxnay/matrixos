@@ -167,22 +167,11 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 		}
 	}
 
-	var completeChrootDirs []string
-	for _, line := range lines[5:6] {
-		for field := range strings.FieldsSeq(line) {
-			if field != "" {
-				completeChrootDirs = append(completeChrootDirs, field)
-			}
-		}
-	}
+	completeChrootDirs := strings.Fields(lines[5])
 
 	var partialChrootDirs []string
 	for _, line := range lines[6:] {
-		for field := range strings.FieldsSeq(line) {
-			if field != "" {
-				partialChrootDirs = append(partialChrootDirs, field)
-			}
-		}
+		partialChrootDirs = append(partialChrootDirs, strings.Fields(line)...)
 	}
 
 	params := &SeederParams{
@@ -619,13 +608,9 @@ func (s *Seeder) generateSeederEnvVars(env []string) ([]string, error) {
 
 // --- Chroot execution ---
 
-// Seed runs the seeder's chroot script inside the chroot
-// using unshare for namespace isolation.
-func (s *Seeder) Seed(opts *SeedOptions) error {
-	if opts == nil {
-		return fmt.Errorf("opts cannot be nil")
-	}
-
+// runInChroot executes execName (with optional args) inside opts.ChrootDir
+// with the standard seeder environment and init.sh wrapper.
+func (s *Seeder) runInChroot(opts *SeedOptions, execName string, args []string) error {
 	// Start with a pristine environment.
 	env, err := s.generateSharedEnvVars(opts.Env)
 	if err != nil {
@@ -662,8 +647,8 @@ func (s *Seeder) Seed(opts *SeedOptions) error {
 
 	return s.chrootRunner(&runner.ChrootCmd{
 		Cmd: runner.Cmd{
-			Name:        opts.Info.ChrootChrootExec,
-			Args:        opts.Info.ChrootChrootArgs,
+			Name:        execName,
+			Args:        args,
 			Env:         env,
 			Dir:         dir,
 			Stdin:       stdin,
@@ -676,6 +661,15 @@ func (s *Seeder) Seed(opts *SeedOptions) error {
 	})
 }
 
+// Seed runs the seeder's chroot script inside the chroot
+// using unshare for namespace isolation.
+func (s *Seeder) Seed(opts *SeedOptions) error {
+	if opts == nil {
+		return fmt.Errorf("opts cannot be nil")
+	}
+	return s.runInChroot(opts, opts.Info.ChrootChrootExec, opts.Info.ChrootChrootArgs)
+}
+
 // PostBuild runs the post-build script inside the chroot.
 // It follows the same pattern as Seed but uses the PostBuildChrootExec path.
 func (s *Seeder) PostBuild(opts *SeedOptions) error {
@@ -685,52 +679,5 @@ func (s *Seeder) PostBuild(opts *SeedOptions) error {
 	if opts.Info.PostBuildChrootExec == "" {
 		return nil // No post-build script configured.
 	}
-
-	// Start with a pristine environment.
-	env, err := s.generateSharedEnvVars(opts.Env)
-	if err != nil {
-		return err
-	}
-	env, err = s.generateSeederEnvVars(env)
-	if err != nil {
-		return err
-	}
-
-	devDir, err := s.DevDir()
-	if err != nil {
-		return err
-	}
-
-	initScript := filepath.Join(devDir, "build", "init", "init.sh")
-
-	stdin := opts.Stdin
-	if stdin == nil {
-		stdin = s.stdin
-	}
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = s.stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = s.stderr
-	}
-	dir := opts.Dir
-	if dir == "" {
-		dir = "/"
-	}
-
-	return s.chrootRunner(&runner.ChrootCmd{
-		Cmd: runner.Cmd{
-			Name:        opts.Info.PostBuildChrootExec,
-			Env:         env,
-			Dir:         dir,
-			Stdin:       stdin,
-			Stdout:      stdout,
-			Stderr:      stderr,
-			SysProcAttr: opts.SysProcAttr,
-		},
-		ChrootExec: initScript,
-		ChrootDir:  opts.ChrootDir,
-	})
+	return s.runInChroot(opts, opts.Info.PostBuildChrootExec, nil)
 }

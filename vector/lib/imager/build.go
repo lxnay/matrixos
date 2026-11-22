@@ -261,7 +261,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", fmt.Errorf("unable to get UUID for %s: %w", im.RootDevice(), err)
 	}
 
-	im.trackMount(mountRootfs)
 	if err := im.MountRootfs(mountRootfs); err != nil {
 		return "", fmt.Errorf("failed to mount rootfs: %w", err)
 	}
@@ -271,7 +270,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", err
 	}
 	mountEfifs := filepath.Join(mountRootfs, efiRoot)
-	im.trackMount(mountEfifs)
 	if err := im.MountEfifs(mountEfifs); err != nil {
 		return "", fmt.Errorf("failed to mount EFI: %w", err)
 	}
@@ -281,7 +279,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", err
 	}
 	mountBootfs := filepath.Join(mountRootfs, bootRoot)
-	im.trackMount(mountBootfs)
 	if err := im.MountBootfs(mountBootfs); err != nil {
 		return "", fmt.Errorf("failed to mount boot: %w", err)
 	}
@@ -472,11 +469,6 @@ func (im *Imager) postImageCreation(releaseVersion string, pkgList []string) err
 func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([]string, error) {
 	var artifacts []string
 
-	productionize, err := im.Productionize()
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine if productionization is enabled: %w", err)
-	}
-
 	// Rename image with release version.
 	versionedImagePath, err := im.BuildImagePathWithReleaseVersion(releaseVersion)
 	if err != nil {
@@ -529,8 +521,7 @@ func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([
 	if compressor != "" {
 		im.Print("Compressing image with %s ...\n", compressor)
 		if err := im.CompressImage(); err != nil {
-			return artifacts, fmt.Errorf(
-				"failed to determine if compression is enabled: %w", err)
+			return artifacts, fmt.Errorf("failed to compress image: %w", err)
 		}
 		compressedImageCreated = true
 
@@ -543,19 +534,17 @@ func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([
 		artifacts = append(artifacts, im.ImagePath())
 	}
 
-	if productionize {
-		sha256Paths, err := im.buildSha256sums(compressedImageCreated, qcow2Created)
-		if err != nil {
-			return artifacts, fmt.Errorf("failed to create sha256sums: %w", err)
-		}
-		artifacts = append(artifacts, sha256Paths...)
-
-		gpgArtifacts, err := im.maybeGenerateGpgSignatures(compressedImageCreated, qcow2Created)
-		if err != nil {
-			return artifacts, fmt.Errorf("failed to generate GPG signatures: %w", err)
-		}
-		artifacts = append(artifacts, gpgArtifacts...)
+	sha256Paths, err := im.buildSha256sums(compressedImageCreated, qcow2Created)
+	if err != nil {
+		return artifacts, fmt.Errorf("failed to create sha256sums: %w", err)
 	}
+	artifacts = append(artifacts, sha256Paths...)
+
+	gpgArtifacts, err := im.maybeGenerateGpgSignatures(compressedImageCreated, qcow2Created)
+	if err != nil {
+		return artifacts, fmt.Errorf("failed to generate GPG signatures: %w", err)
+	}
+	artifacts = append(artifacts, gpgArtifacts...)
 
 	return artifacts, nil
 }

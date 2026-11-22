@@ -150,10 +150,6 @@ func (m *MockSeeder) PostBuild(*SeedOptions) error {
 	return m.PostBuildErr
 }
 
-func (m *MockSeeder) EnsureSeedUser() (uid, gid uint32, err error) {
-	return 0, 0, nil
-}
-
 func (m *MockSeeder) ExecuteWithSeederLock(name string, fn func() error) error {
 	m.ExecuteWithSeederLockCalled = true
 	m.ExecuteWithSeederLockName = name

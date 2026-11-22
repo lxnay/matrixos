@@ -56,14 +56,7 @@ func (d *SeederDetector) Stderr() io.Writer { return d.stderr }
 
 // configItem retrieves a non-empty config string or returns an error.
 func (d *SeederDetector) configItem(key string) (string, error) {
-	v, err := d.cfg.GetItem(key)
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "", fmt.Errorf("invalid %s", key)
-	}
-	return v, nil
+	return config.GetRequiredItem(d.cfg, key)
 }
 
 // Detect scans the seeders directory and returns all valid seeders

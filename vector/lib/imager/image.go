@@ -81,7 +81,6 @@ type Imager struct {
 	realRootDevice      string // if encrypted, devicePath is replaced.
 	devicePath          string
 	imagePath           string
-	compressedImagePath string
 	mode                ImageMode
 	rootfs              string
 	ref                 string

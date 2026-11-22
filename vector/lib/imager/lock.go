@@ -3,10 +3,6 @@ package imager
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
-	"time"
 
 	"matrixos/vector/lib/filesystems"
 )
@@ -16,10 +12,7 @@ func (im *Imager) ImageLockDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(lockDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create lock directory %s: %w", lockDir, err)
-	}
-	return lockDir, nil
+	return filesystems.EnsureLockDir(lockDir)
 }
 
 func (im *Imager) ImageLockPath() (string, error) {
@@ -36,13 +29,7 @@ func (im *Imager) ImageLockPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	lockFile := filepath.Join(lockDir, ref+".lock")
-
-	lockFileDir := filepath.Dir(lockFile)
-	if err := os.MkdirAll(lockFileDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create lock file directory %s: %w", lockFileDir, err)
-	}
-	return lockFile, nil
+	return filesystems.EnsureLockPath(lockDir, ref)
 }
 
 func (im *Imager) ExecuteWithImageLock(fn func() error) error {
@@ -56,18 +43,7 @@ func (im *Imager) ExecuteWithImageLock(fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("failed to get lock wait seconds: %w", err)
 	}
-	timeoutSecs, err := strconv.Atoi(timeoutStr)
-	if err != nil {
-		return fmt.Errorf("invalid lock wait seconds %q: %w", timeoutStr, err)
-	}
-
-	unlock, err := filesystems.AcquireFileLock(lockPath, time.Duration(timeoutSecs)*time.Second)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	im.Print("Lock for imager %s, %s acquired!\n", im.ref, lockPath)
-
-	return fn()
+	return filesystems.ExecuteWithLock(lockPath, timeoutStr, fn, func() {
+		im.Print("Lock for imager %s, %s acquired!\n", im.ref, lockPath)
+	})
 }
