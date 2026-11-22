@@ -97,9 +97,8 @@ func (c *UpgradeCommand) Run() error {
 
 	c.prompt = NewPrompter(os.Stdin, c.StdoutWriter(), c.StderrWriter(), &c.UI)
 
-	// Check if we are running as root. If running as user, exit with error.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	oldCommit, ref, err := c.getCurrentState()
@@ -311,12 +310,16 @@ func (c *UpgradeCommand) updateEfiBinaries(commit string) error {
 		switch h.name {
 		case grubEfiBinary:
 			haveGrub = true
-			if err := c.updateGrubDir(newRoot, h.dir, commit); err != nil {
+			if err := c.updateBootloaderBinary(
+				"GRUB", newRoot, "/usr/lib/grub/grub-x86_64.efi.signed", h.dir, grubEfiBinary, commit,
+			); err != nil {
 				return fmt.Errorf("failed to update grub binaries: %w", err)
 			}
 		case systemdBootEfiBinary:
 			haveSystemd = true
-			if err := c.updateSystemdBootDir(newRoot, h.dir, commit); err != nil {
+			if err := c.updateBootloaderBinary(
+				"systemd-boot", newRoot, "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed", h.dir, systemdBootEfiBinary, commit,
+			); err != nil {
 				return fmt.Errorf("failed to update systemd-boot binaries: %w", err)
 			}
 		}
@@ -354,24 +357,14 @@ func (c *UpgradeCommand) deploymentRoot(commit string) (string, error) {
 	return "", fmt.Errorf("deployment not found for commit %s", commit)
 }
 
-func (c *UpgradeCommand) updateGrubDir(newRoot, efiDir, commit string) error {
+func (c *UpgradeCommand) updateBootloaderBinary(label, newRoot, relSrc, efiDir, dstName, commit string) error {
 	c.Printf(
-		"   %sUpdating GRUB in %s%s%s for commit %s%s%s...\n",
-		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
+		"   %sUpdating %s in %s%s%s for commit %s%s%s...\n",
+		c.iconUpdate, label, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
 	)
-	src := filepath.Join(newRoot, "/usr/lib/grub/grub-x86_64.efi.signed")
-	dst := filepath.Join(efiDir, grubEfiBinary)
-	return c.copyRequiredEfiFile(src, dst)
-}
-
-func (c *UpgradeCommand) updateSystemdBootDir(newRoot, efiDir, commit string) error {
-	c.Printf(
-		"   %sUpdating systemd-boot in %s%s%s for commit %s%s%s...\n",
-		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
-	)
-	src := filepath.Join(newRoot, "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed")
-	dst := filepath.Join(efiDir, systemdBootEfiBinary)
-	return c.copyRequiredEfiFile(src, dst)
+	src := filepath.Join(newRoot, relSrc)
+	dst := filepath.Join(efiDir, dstName)
+	return c.copyEfiFile(src, dst, true)
 }
 
 // updateShimIfDeployed refreshes shim binaries only on EFI dirs that already
@@ -418,7 +411,7 @@ func (c *UpgradeCommand) updateShimIfDeployed(newRoot, efiRoot string) error {
 			}
 			src := filepath.Join(shimDir, entry.Name())
 			dst := filepath.Join(target, entry.Name())
-			if err := c.copyEfiFile(src, dst); err != nil {
+			if err := c.copyEfiFile(src, dst, false); err != nil {
 				return err
 			}
 		}
@@ -426,31 +419,23 @@ func (c *UpgradeCommand) updateShimIfDeployed(newRoot, efiRoot string) error {
 	return nil
 }
 
-func (c *UpgradeCommand) copyEfiFile(src, dst string) error {
+// copyEfiFile copies src to dst inside the ESP. When required is true, a
+// missing source is returned as an error (used for signed bootloader binaries);
+// otherwise it logs a warning and returns nil.
+func (c *UpgradeCommand) copyEfiFile(src, dst string, required bool) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
+		if required {
+			return fmt.Errorf("required bootloader binary missing in new commit: %s", src)
+		}
 		c.PrintErrf(
 			"%s%sExpected file was not found in new commit: %s%s\n",
 			c.cYellow, c.iconWarn, src, c.cReset)
 		return nil
 	} else if err != nil {
+		if required {
+			return fmt.Errorf("failed to stat required bootloader binary: %w", err)
+		}
 		return fmt.Errorf("failed to stat expected file: %w", err)
-	}
-	c.Printf("   %sCopying %s to %s%s%s...\n",
-		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
-	if err := filesystems.CopyFile(src, dst); err != nil {
-		return fmt.Errorf("failed to copy file: %w", err)
-	}
-	return nil
-}
-
-// copyRequiredEfiFile is like copyEfiFile but treats a missing source as a
-// hard error. Used for bootloader binaries where a missing signed binary in
-// the new commit must abort the upgrade rather than leave a stale binary.
-func (c *UpgradeCommand) copyRequiredEfiFile(src, dst string) error {
-	if _, err := os.Stat(src); os.IsNotExist(err) {
-		return fmt.Errorf("required bootloader binary missing in new commit: %s", src)
-	} else if err != nil {
-		return fmt.Errorf("failed to stat required bootloader binary: %w", err)
 	}
 	c.Printf("   %sCopying %s to %s%s%s...\n",
 		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)

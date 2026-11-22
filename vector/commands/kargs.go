@@ -116,8 +116,8 @@ func (c *KargsCommand) updateEntries(op string, fn func(string, []string) error)
 		return fmt.Errorf("%s requires at least one kernel argument", op)
 	}
 
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRootFn(c.run.getEuid); err != nil {
+		return err
 	}
 
 	entries, err := c.listBLSEntries()

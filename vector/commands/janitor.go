@@ -37,9 +37,8 @@ func (c *JanitorCommand) Run() error {
 	c.SetupPrinters(c.Name())
 	defer c.FlushPrinters()
 
-	// Check if we are running as root. If running as user, exit with error.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	// Load the matrixOS config.

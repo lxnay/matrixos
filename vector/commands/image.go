@@ -90,9 +90,8 @@ func (c *ImageCommand) parseArgs(args []string) error {
 	if c.ref == "" {
 		return fmt.Errorf("--ref is required")
 	}
-	// Must be root.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	return nil

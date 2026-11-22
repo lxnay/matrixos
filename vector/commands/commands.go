@@ -403,3 +403,16 @@ func (ui *UI) StartUI() {
 
 var execCommand = exec.Command
 var getEuid = os.Geteuid
+
+// requireRoot returns an error if the current effective user ID is not root.
+func requireRoot() error {
+	return requireRootFn(getEuid)
+}
+
+// requireRootFn checks root privileges using the provided euid getter.
+func requireRootFn(euid func() int) error {
+	if euid() != 0 {
+		return fmt.Errorf("this command must be run as root")
+	}
+	return nil
+}

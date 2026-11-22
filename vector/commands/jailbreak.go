@@ -152,8 +152,8 @@ func (c *JailbreakCommand) configStr(key string) (string, error) {
 }
 
 func (c *JailbreakCommand) Run() error {
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	sysroot, err := c.configStr("Ostree.Sysroot")

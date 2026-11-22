@@ -189,8 +189,8 @@ func (c *SetupOSCommand) configStr(key string) (string, error) {
 }
 
 func (c *SetupOSCommand) Run() error {
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRootFn(c.run.getEuid); err != nil {
+		return err
 	}
 	if c.run.getCurrentUser() != "root" {
 		fmt.Fprintf(c.run.stderr,

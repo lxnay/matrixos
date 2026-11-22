@@ -126,8 +126,8 @@ func (c *FlashCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	return nil

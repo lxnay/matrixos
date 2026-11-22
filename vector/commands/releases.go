@@ -122,9 +122,8 @@ func (c *ReleasesCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	// Must be root.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	c.skipSeeders = SplitCSV(c.skipSeedersRaw)
