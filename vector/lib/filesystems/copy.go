@@ -21,25 +21,33 @@ func CopyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst + ".tmp")
+	destFile, err := os.CreateTemp(filepath.Dir(dst), ".copy-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	tmpPath := destFile.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = destFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	_, err = io.Copy(destFile, sourceFile)
-	if err != nil {
+	if _, err = io.Copy(destFile, sourceFile); err != nil {
 		return err
 	}
-
-	err = destFile.Sync()
-	if err != nil {
+	if err = destFile.Sync(); err != nil {
 		return err
 	}
-	sourceFile.Close()
-	destFile.Close()
-
-	return os.Rename(dst+".tmp", dst)
+	if err = destFile.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+	success = true
+	return nil
 }
 
 // CopyDirPreserve recursively copies a directory tree from src to dst,
