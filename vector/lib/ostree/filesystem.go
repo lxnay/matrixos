@@ -63,13 +63,13 @@ func (o *Ostree) prepareVarHome(imageDir, homeName, varHomeName string) error {
 // moveDirToTargetAndSymlink moves srcDir to targetDir (if srcDir exists as a real
 // directory or removes it if it's a non-directory), ensures targetDir exists, and
 // creates a symlink at srcDir pointing to symlinkTarget.
-func moveDirToTargetAndSymlink(srcDir, targetDir, symlinkTarget string) error {
+func (o *Ostree) moveDirToTargetAndSymlink(srcDir, targetDir, symlinkTarget string) error {
 	if info, err := os.Lstat(srcDir); err == nil {
 		if info.IsDir() {
 			if pathExists(targetDir) {
 				os.RemoveAll(targetDir)
 			}
-			fmt.Fprintf(os.Stderr, "WARNING: moving %s to %s.\n", srcDir, targetDir)
+			o.PrintError("WARNING: moving %s to %s.\n", srcDir, targetDir)
 			if err := filesystems.Move(srcDir, targetDir); err != nil {
 				return fmt.Errorf("failed to move %s: %w", srcDir, err)
 			}
@@ -162,7 +162,7 @@ func (o *Ostree) prepareVarDbPkg(imageDir, roVdbPath string) error {
 // prepareOpt moves /opt to /usr/opt and symlinks it.
 func (o *Ostree) prepareOpt(imageDir string) error {
 	o.Print("Setting up /opt...\n")
-	return moveDirToTargetAndSymlink(
+	return o.moveDirToTargetAndSymlink(
 		filepath.Join(imageDir, "opt"),
 		filepath.Join(imageDir, "usr", "opt"),
 		"usr/opt",
@@ -172,7 +172,7 @@ func (o *Ostree) prepareOpt(imageDir string) error {
 // prepareSrv moves /srv to /var/srv and symlinks it.
 func (o *Ostree) prepareSrv(imageDir string) error {
 	o.Print("Setting up /srv...\n")
-	return moveDirToTargetAndSymlink(
+	return o.moveDirToTargetAndSymlink(
 		filepath.Join(imageDir, "srv"),
 		filepath.Join(imageDir, "var", "srv"),
 		"var/srv",
@@ -319,9 +319,9 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "Expected %s to be a symlink to a directory.\n",
+		o.PrintError("Expected %s to be a symlink to a directory.\n",
 			fullPath)
-		fmt.Fprintln(os.Stderr, "Please check the filesystem hierarchy.")
+		o.PrintError("Please check the filesystem hierarchy.\n")
 		issues++
 	}
 
@@ -335,8 +335,8 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 	fi, err := os.Lstat(tmpPath)
 	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 ||
 		fi.Mode().Perm() != 0o777 || fi.Mode()&os.ModeSticky == 0 {
-		fmt.Fprintf(os.Stderr, "Expected %s to be a sticky directory with mode 1777.\n", tmpPath)
-		fmt.Fprintln(os.Stderr, "Please check the filesystem hierarchy.")
+		o.PrintError("Expected %s to be a sticky directory with mode 1777.\n", tmpPath)
+		o.PrintError("Please check the filesystem hierarchy.\n")
 		return fmt.Errorf("filesystem hierarchy validation failed: /tmp is not a sticky 1777 directory")
 	}
 
