@@ -172,7 +172,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 			fmt.Fprintf(imgStdout, "Opening encrypted rootfs as %s ...\n", mapperName)
 		},
 		func(mapperName string) {
-			fmt.Fprintf(imgStdout, "Closing encrypted rootfs as %s ...\n", mapperName)
+			fmt.Fprintf(imgStdout, "Opened encrypted rootfs as %s.\n", mapperName)
 		},
 	)
 	if err != nil {
@@ -181,6 +181,8 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 			ref, err,
 		)
 	}
+	fsenc.SetStdout(imgStdout)
+	fsenc.SetStderr(imgStderr)
 	if err := fsenc.ValidateLuksVariables(); err != nil {
 		return fmt.Errorf(
 			"LUKS validation failed for ref %s: %w",

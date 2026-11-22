@@ -3,7 +3,6 @@ package filesystems
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
 
@@ -130,34 +129,50 @@ func CleanupMounts(opts CleanupMountsOptions) {
 
 // CleanupCryptsetupDevices closes a list of cryptsetup devices.
 func CleanupCryptsetupDevices(devices []string) {
+	cleanupCryptsetupDevices(devices, os.Stdout, os.Stderr)
+}
+
+// cleanupCryptsetupDevices closes the given cryptsetup devices, routing output
+// through stdout/stderr, and returns the subset of devices that failed to close.
+func cleanupCryptsetupDevices(devices []string, stdout, stderr io.Writer) []string {
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	var failed []string
 	DevicesSettle()
 	for _, cd := range devices {
 		cdpath, err := GetLuksRootfsDevicePath(cd)
 		if err != nil {
-			log.Println(err)
+			fmt.Fprintf(stderr, "%v\n", err)
 			continue
 		}
 		if _, err := os.Stat(cdpath); os.IsNotExist(err) {
 			continue
 		}
 
-		fmt.Printf("Closing LUKS device: %s ...\n", cd)
+		fmt.Fprintf(stdout, "Closing LUKS device: %s ...\n", cd)
 		FlushBlockDeviceBuffers(cdpath)
 		cmd := &runner.Cmd{
 			Name:   "cryptsetup",
 			Args:   []string{"close", cd},
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
+			Stdout: stdout,
+			Stderr: stderr,
 		}
 		if err := execRun(cmd); err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to cryptsetup close %s\n", cdpath)
+			fmt.Fprintf(stderr, "Unable to cryptsetup close %s\n", cdpath)
 			if entries, mntErr := findMountsBySource(cdpath); mntErr == nil {
-				fmt.Fprintf(os.Stderr, "%s\n", formatMountEntries(entries))
+				fmt.Fprintf(stderr, "%s\n", formatMountEntries(entries))
 			}
+			failed = append(failed, cd)
 			continue
 		}
 	}
 	DevicesSettle()
+	return failed
 }
 
 // CheckActiveMounts checks for active mounts under a given directory

@@ -1,9 +1,12 @@
 package filesystems
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -313,11 +316,12 @@ func TestFsenc_CleanupWaitsForInFlightCryptsetupOpen(t *testing.T) {
 	var cleanedMappers []string
 	var openFinishedAtCleanup bool
 	var openFinished atomic.Bool
-	f.cleanupDevices = func(devices []string) {
+	f.cleanupDevices = func(devices []string, _, _ io.Writer) []string {
 		cleanedMu.Lock()
 		cleanedMappers = append(cleanedMappers, devices...)
 		openFinishedAtCleanup = openFinished.Load()
 		cleanedMu.Unlock()
+		return nil
 	}
 
 	inOpen := make(chan struct{})
@@ -362,5 +366,163 @@ func TestFsenc_CleanupWaitsForInFlightCryptsetupOpen(t *testing.T) {
 	}
 	if len(cleanedMappers) != 1 || cleanedMappers[0] != "matrixosroot" {
 		t.Fatalf("cleanedMappers = %v, want [matrixosroot]", cleanedMappers)
+	}
+}
+
+func TestFsenc_CleanupDuringLuksFormatPreventsSubsequentOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+	if err := os.WriteFile(desiredDevice, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+
+	inFormat := make(chan struct{})
+	releaseFormat := make(chan struct{})
+	var openCalled atomic.Bool
+	f.runner = func(cmd *runner.Cmd) error {
+		if containsArg(cmd.Args, "luksFormat") {
+			close(inFormat)
+			<-releaseFormat
+		}
+		if containsArg(cmd.Args, "open") {
+			openCalled.Store(true)
+		}
+		return nil
+	}
+
+	encryptErr := make(chan error, 1)
+	go func() {
+		encryptErr <- f.LuksEncrypt("/dev/loop0p3", desiredDevice)
+	}()
+
+	<-inFormat
+	// Cleanup runs while luksFormat is in flight (e.g. SIGINT).
+	f.Cleanup()
+	close(releaseFormat)
+
+	if err := <-encryptErr; err == nil {
+		t.Fatal("expected LuksEncrypt to fail when Cleanup() ran during luksFormat")
+	}
+	if openCalled.Load() {
+		t.Fatal("cryptsetup open was called after Cleanup() already ran (leaked LUKS mapper)")
+	}
+}
+
+func TestFsenc_LuksEncryptRejectsEmptyKey(t *testing.T) {
+	cfg := baseFsencConfig()
+	cfg.Items["Imager.EncryptionKey"] = []string{""}
+	f, err := NewFsenc(cfg, noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	var runnerCalled bool
+	f.runner = func(*runner.Cmd) error {
+		runnerCalled = true
+		return nil
+	}
+	if err := f.LuksEncrypt("/dev/loop0p3", "/dev/mapper/matrixosroot"); err == nil {
+		t.Fatal("expected error for empty encryption key, got nil")
+	}
+	if runnerCalled {
+		t.Fatal("cryptsetup should not be invoked with an empty encryption key")
+	}
+}
+
+func TestFsenc_ConcurrentCleanupSerializes(t *testing.T) {
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	f.openMappers = []string{"crypt-test"}
+
+	inCleanup := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	var calls atomic.Int32
+	f.cleanupDevices = func(devices []string, _, _ io.Writer) []string {
+		if calls.Add(1) == 1 {
+			close(inCleanup)
+			<-releaseCleanup
+			// Simulate close failure on first attempt so second Cleanup retries it.
+			return devices
+		}
+		return nil
+	}
+
+	call1Done := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(call1Done)
+	}()
+
+	<-inCleanup
+
+	call2Done := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(call2Done)
+	}()
+
+	select {
+	case <-call2Done:
+		close(releaseCleanup)
+		<-call1Done
+		t.Fatal("second concurrent Fsenc.Cleanup() returned while first Cleanup() was still closing LUKS mappers")
+	case <-time.After(100 * time.Millisecond):
+		close(releaseCleanup)
+	}
+
+	<-call1Done
+	<-call2Done
+
+	if got := calls.Load(); got != 2 {
+		t.Errorf("cleanupDevices calls = %d, want 2 (second Cleanup should retry failed mapper)", got)
+	}
+}
+
+func TestFsenc_UsesInjectedWriters(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+	if err := os.WriteFile(desiredDevice, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	f.SetStdout(&stdout)
+	f.SetStderr(&stderr)
+	f.runner = func(cmd *runner.Cmd) error {
+		if cmd.Stdout != &stdout {
+			t.Error("expected runner cmd.Stdout to be injected stdout writer")
+		}
+		if cmd.Stderr != &stderr {
+			t.Error("expected runner cmd.Stderr to be injected stderr writer")
+		}
+		return nil
+	}
+
+	if err := f.ValidateLuksVariables(); err != nil {
+		t.Fatalf("ValidateLuksVariables: %v", err)
+	}
+	if err := f.LuksEncrypt("/dev/loop0p3", desiredDevice); err != nil {
+		t.Fatalf("LuksEncrypt: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Formatting /dev/loop0p3") {
+		t.Errorf("expected LuksEncrypt output in injected stdout, got %q", stdout.String())
 	}
 }

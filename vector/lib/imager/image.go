@@ -96,49 +96,93 @@ type Imager struct {
 	// QA validation instance.
 	qa *validation.QA
 
-	// trackedMounts records every mount point created by this Imager
-	// so that Cleanup can attempt to unmount them all on failure or signal.
-	trackedMountsMu      sync.Mutex
-	trackedMounts        []string
-	trackedTmpDirsMu     sync.Mutex
-	trackedTmpDirs       []string
-	trackedLoopDevicesMu sync.Mutex
-	trackedLoopDevices   []*filesystems.Loop
+	// cleanupMu serializes Cleanup() calls so concurrent callers (e.g.
+	// SignalGuard and finalizeBuild/defer) never remove temp dirs or close
+	// LUKS/loop devices while an earlier Cleanup() is still unmounting.
+	cleanupMu sync.Mutex
+
+	// trackMu guards trackedMounts, trackedTmpDirs, trackedLoopDevices,
+	// cleaning, and cleanupGen. Lock order: cleanupMu -> trackMu.
+	trackMu            sync.Mutex
+	trackedMounts      []string
+	trackedTmpDirs     []string
+	trackedLoopDevices []*filesystems.Loop
+	cleaning           bool
+	cleanupGen         uint64
 }
 
-// trackMount appends a single mount point to the tracked list.
-func (im *Imager) trackMount(mnt string) {
-	im.trackedMountsMu.Lock()
-	defer im.trackedMountsMu.Unlock()
+// trackMount appends a single mount point to the tracked list and returns the
+// current cleanup generation so the caller can detect an overlapping Cleanup().
+func (im *Imager) trackMount(mnt string) uint64 {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedMounts = append(im.trackedMounts, mnt)
+	return im.cleanupGen
 }
 
 // trackTmpDir appends a single temporary directory to the tracked list.
 func (im *Imager) trackTmpDir(tmpDir string) {
-	im.trackedTmpDirsMu.Lock()
-	defer im.trackedTmpDirsMu.Unlock()
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedTmpDirs = append(im.trackedTmpDirs, tmpDir)
 }
 
-// trackLoopDevice appends a loop device to the tracked list.
-func (im *Imager) trackLoopDevice(loop *filesystems.Loop) {
-	im.trackedLoopDevicesMu.Lock()
-	defer im.trackedLoopDevicesMu.Unlock()
+// untrackTmpDir removes a temporary directory from the tracked list once its
+// owner has already cleaned it up.
+func (im *Imager) untrackTmpDir(tmpDir string) {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	for i, d := range im.trackedTmpDirs {
+		if d == tmpDir {
+			im.trackedTmpDirs = append(im.trackedTmpDirs[:i], im.trackedTmpDirs[i+1:]...)
+			return
+		}
+	}
+}
+
+// trackLoopDevice appends a loop device to the tracked list and returns the
+// current cleanup generation so the caller can detect an overlapping Cleanup().
+func (im *Imager) trackLoopDevice(loop *filesystems.Loop) uint64 {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedLoopDevices = append(im.trackedLoopDevices, loop)
+	return im.cleanupGen
+}
+
+// cleanupActiveOrRanSince reports whether Cleanup() is currently running or has
+// completed at least once since gen was observed.
+func (im *Imager) cleanupActiveOrRanSince(gen uint64) bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	return im.cleaning || im.cleanupGen != gen
 }
 
 func (im *Imager) Cleanup() {
-	im.trackedMountsMu.Lock()
+	im.cleanupMu.Lock()
+	defer im.cleanupMu.Unlock()
+
+	im.trackMu.Lock()
+	im.cleaning = true
+	im.cleanupGen++
 	mounts := slices.Clone(im.trackedMounts)
 	im.trackedMounts = nil
-	im.trackedMountsMu.Unlock()
+	im.trackMu.Unlock()
 
-	copts := filesystems.CleanupMountsOptions{
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-		Mounts: mounts,
+	defer func() {
+		im.trackMu.Lock()
+		im.cleaning = false
+		im.cleanupGen++
+		im.trackMu.Unlock()
+	}()
+
+	if len(mounts) > 0 {
+		copts := filesystems.CleanupMountsOptions{
+			Stdout: im.Stdout(),
+			Stderr: im.Stderr(),
+			Mounts: mounts,
+		}
+		filesystems.CleanupMounts(copts)
 	}
-	filesystems.CleanupMounts(copts)
 
 	// Close LUKS mappers after unmounting filesystems and before detaching
 	// the underlying loop devices so dm-crypt releases the backing image file.
@@ -146,13 +190,17 @@ func (im *Imager) Cleanup() {
 		im.fsenc.Cleanup()
 	}
 
-	im.trackedLoopDevicesMu.Lock()
+	im.trackMu.Lock()
 	loops := slices.Clone(im.trackedLoopDevices)
 	im.trackedLoopDevices = nil
-	im.trackedLoopDevicesMu.Unlock()
+	im.trackMu.Unlock()
 
+	var failedLoops []*filesystems.Loop
 	for _, loop := range loops {
 		dev := loop.DevicePath()
+		if dev == "" {
+			continue
+		}
 		if err := loop.Detach(); err != nil {
 			im.PrintWarning(
 				"warning: failed to detach loop device %s (path: %s): %v\n",
@@ -160,16 +208,24 @@ func (im *Imager) Cleanup() {
 				loop.Path,
 				err,
 			)
+			if loop.DevicePath() != "" {
+				failedLoops = append(failedLoops, loop)
+			}
 		}
+	}
+	if len(failedLoops) > 0 {
+		im.trackMu.Lock()
+		im.trackedLoopDevices = append(failedLoops, im.trackedLoopDevices...)
+		im.trackMu.Unlock()
 	}
 
 	// Sync buffers for image files after umount.
 	syscall.Sync()
 
-	im.trackedTmpDirsMu.Lock()
+	im.trackMu.Lock()
 	tmpDirs := slices.Clone(im.trackedTmpDirs)
 	im.trackedTmpDirs = nil
-	im.trackedTmpDirsMu.Unlock()
+	im.trackMu.Unlock()
 
 	for _, tmpDir := range tmpDirs {
 		im.Print("Removing temp dir %s\n", tmpDir)

@@ -17,6 +17,11 @@ import (
 // IFsenc defines the interface for filesystem encryption operations.
 // It mirrors all public methods of Fsenc for testability.
 type IFsenc interface {
+	// SetStdout replaces the writer used for informational output.
+	SetStdout(w io.Writer)
+	// SetStderr replaces the writer used for warnings and errors.
+	SetStderr(w io.Writer)
+
 	// EncryptionEnabled returns whether rootfs encryption is enabled.
 	EncryptionEnabled() (bool, error)
 	// EncryptionKey returns the configured encryption key (passphrase or file path).
@@ -35,12 +40,19 @@ type IFsenc interface {
 	Cleanup()
 }
 
+// Compile-time interface check.
+var _ IFsenc = (*Fsenc)(nil)
+
 // Fsenc provides filesystem encryption operations backed by LUKS/cryptsetup.
 type Fsenc struct {
 	cfg            config.IConfig
 	runner         runner.Func
-	cleanupDevices func([]string)
+	cleanupDevices func(devices []string, stdout, stderr io.Writer) []string
+	ioMu           sync.Mutex
+	stdout         io.Writer
+	stderr         io.Writer
 	openMu         sync.Mutex
+	closed         bool
 	openMappers    []string
 	opening        func(string)
 	opened         func(string)
@@ -54,26 +66,59 @@ func NewFsenc(cfg config.IConfig, opening, opened func(string)) (*Fsenc, error) 
 	return &Fsenc{
 		cfg:            cfg,
 		runner:         runner.Run,
-		cleanupDevices: CleanupCryptsetupDevices,
+		cleanupDevices: cleanupCryptsetupDevices,
 		opening:        opening,
 		opened:         opened,
 	}, nil
 }
 
+// SetStdout replaces the writer used for informational output.
+func (f *Fsenc) SetStdout(w io.Writer) {
+	f.ioMu.Lock()
+	defer f.ioMu.Unlock()
+	f.stdout = w
+}
+
+// SetStderr replaces the writer used for warnings and errors.
+func (f *Fsenc) SetStderr(w io.Writer) {
+	f.ioMu.Lock()
+	defer f.ioMu.Unlock()
+	f.stderr = w
+}
+
+func (f *Fsenc) getStdout() io.Writer {
+	f.ioMu.Lock()
+	defer f.ioMu.Unlock()
+	if f.stdout == nil {
+		return os.Stdout
+	}
+	return f.stdout
+}
+
+func (f *Fsenc) getStderr() io.Writer {
+	f.ioMu.Lock()
+	defer f.ioMu.Unlock()
+	if f.stderr == nil {
+		return os.Stderr
+	}
+	return f.stderr
+}
+
 func (f *Fsenc) Cleanup() {
 	f.openMu.Lock()
-	mappers := slices.Clone(f.openMappers)
-	f.openMappers = nil
-	f.openMu.Unlock()
+	defer f.openMu.Unlock()
 
-	if len(mappers) == 0 {
+	f.closed = true
+	if len(f.openMappers) == 0 {
 		return
 	}
+	mappers := slices.Clone(f.openMappers)
 	cleanup := f.cleanupDevices
 	if cleanup == nil {
-		cleanup = CleanupCryptsetupDevices
+		cleanup = cleanupCryptsetupDevices
 	}
-	cleanup(mappers)
+	// Retain any mappers that failed to close so a subsequent Cleanup() can retry.
+	f.openMappers = cleanup(mappers, f.getStdout(), f.getStderr())
 }
 
 func (f *Fsenc) EncryptionEnabled() (bool, error) {
@@ -104,17 +149,23 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	if err != nil {
 		return fmt.Errorf("failed to retrieve encryption key: %w", err)
 	}
+	if encKey == "" {
+		return errors.New("Imager.EncryptionKey is empty")
+	}
+
+	stdout := f.getStdout()
+	stderr := f.getStderr()
 
 	var stdin io.Reader
 	var keyFileArg string
 
 	keyIsFile := FileExists(encKey)
 	if keyIsFile {
-		fmt.Fprintln(os.Stdout, "LUKS Encryption key is a file.")
+		fmt.Fprintln(stdout, "LUKS Encryption key is a file.")
 		keyFileArg = encKey
 		stdin = nil
 	} else {
-		fmt.Fprintln(os.Stdout, "LUKS Encryption key is NOT a file.")
+		fmt.Fprintln(stdout, "LUKS Encryption key is NOT a file.")
 		keyFileArg = "-"
 		stdin = strings.NewReader(encKey)
 	}
@@ -122,7 +173,7 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	luksName := filepath.Base(desiredLuksDevice)
 
 	// Format the device with LUKS encryption.
-	fmt.Fprintf(os.Stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
+	fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
 	err = f.runner(&runner.Cmd{
 		Name: "cryptsetup",
 		Args: []string{
@@ -135,8 +186,8 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 			keyFileArg,
 		},
 		Stdin:  stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+		Stdout: stdout,
+		Stderr: stderr,
 	})
 	if err != nil {
 		return fmt.Errorf("cryptsetup luksFormat failed on %s: %w", devicePath, err)
@@ -149,15 +200,24 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 		stdin = nil
 	}
 
+	f.openMu.Lock()
+	alreadyClosed := f.closed
+	f.openMu.Unlock()
+	if alreadyClosed {
+		return fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
+	}
+
 	if f.opening != nil {
 		f.opening(luksName)
 	}
-	// Hold openMu across tracking + cryptsetup open so a concurrent Cleanup()
-	// waits for the open attempt to complete instead of draining openMappers
-	// before /dev/mapper/<luksName> appears and leaking the mapper.
+	// Hold openMu across closed-check, tracking, and cryptsetup open so a
+	// concurrent Cleanup() cannot race with open and leak /dev/mapper/<luksName>.
 	err = func() error {
 		f.openMu.Lock()
 		defer f.openMu.Unlock()
+		if f.closed {
+			return fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
+		}
 		f.openMappers = append(f.openMappers, luksName)
 		return f.runner(&runner.Cmd{
 			Name: "cryptsetup",
@@ -169,8 +229,8 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 				luksName,
 			},
 			Stdin:  stdin,
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
+			Stdout: stdout,
+			Stderr: stderr,
 		})
 	}()
 	if err != nil {
@@ -200,7 +260,7 @@ func (f *Fsenc) ValidateLuksVariables() error {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stdout, "Encryption of rootfs enabled. Setting up...")
+	fmt.Fprintln(f.getStdout(), "Encryption of rootfs enabled. Setting up...")
 
 	key, err := f.EncryptionKey()
 	if err != nil {

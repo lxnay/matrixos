@@ -162,11 +162,13 @@ func (c *FlashCommand) runFlash() error {
 	fsenc, err := filesystems.NewFsenc(
 		c.cfg,
 		func(n string) { c.Printf("Opening encrypted rootfs as %s ...\n", n) },
-		func(n string) { c.Printf("Closing encrypted rootfs as %s ...\n", n) },
+		func(n string) { c.Printf("Opened encrypted rootfs as %s.\n", n) },
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize fsenc: %w", err)
 	}
+	fsenc.SetStdout(c.StdoutWriter())
+	fsenc.SetStderr(c.StderrWriter())
 	c.fsenc = fsenc
 
 	if err := c.fsenc.ValidateLuksVariables(); err != nil {

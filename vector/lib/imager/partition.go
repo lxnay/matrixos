@@ -229,7 +229,7 @@ func (im *Imager) MountEfifs(mountEfifs string) error {
 	}
 
 	im.Print("Mounting %s to %s\n", im.efiDevice, mountEfifs)
-	im.trackMount(mountEfifs)
+	gen := im.trackMount(mountEfifs)
 	if err := im.runner(&runner.Cmd{
 		Name:   "mount",
 		Args:   []string{"-t", "vfat", im.efiDevice, mountEfifs},
@@ -237,6 +237,11 @@ func (im *Imager) MountEfifs(mountEfifs string) error {
 		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
+	}
+	if im.cleanupActiveOrRanSince(gen) {
+		im.trackMount(mountEfifs)
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted mount of %s", mountEfifs)
 	}
 	im.efifsMount = mountEfifs
 	return nil
@@ -311,7 +316,7 @@ func (im *Imager) MountBootfs(mountBootfs string) error {
 		}
 	}
 	im.Print("Mounting %s to %s\n", im.bootDevice, mountBootfs)
-	im.trackMount(mountBootfs)
+	gen := im.trackMount(mountBootfs)
 	var mountArgs []string
 	switch fsType {
 	case "vfat":
@@ -326,6 +331,11 @@ func (im *Imager) MountBootfs(mountBootfs string) error {
 		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
+	}
+	if im.cleanupActiveOrRanSince(gen) {
+		im.trackMount(mountBootfs)
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted mount of %s", mountBootfs)
 	}
 	im.bootfsMount = mountBootfs
 	return nil
@@ -400,7 +410,7 @@ func (im *Imager) MountRootfs(mountRootfs string) error {
 	btrfsOpts := fmt.Sprintf("compress-force=%s,space_cache=v2,commit=120", compression)
 	im.Print("Mounting %s to %s\n", im.rootDevice, mountRootfs)
 
-	im.trackMount(mountRootfs)
+	gen := im.trackMount(mountRootfs)
 	args := []string{
 		"mount",
 		"-o", btrfsOpts,
@@ -414,6 +424,11 @@ func (im *Imager) MountRootfs(mountRootfs string) error {
 		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
+	}
+	if im.cleanupActiveOrRanSince(gen) {
+		im.trackMount(mountRootfs)
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted mount of %s", mountRootfs)
 	}
 	im.rootfsMount = mountRootfs
 

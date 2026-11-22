@@ -215,7 +215,11 @@ func (im *Imager) TestImage() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir for testing: %w", err)
 	}
-	defer os.RemoveAll(imageTempDir)
+	im.trackTmpDir(imageTempDir)
+	defer func() {
+		os.RemoveAll(imageTempDir)
+		im.untrackTmpDir(imageTempDir)
+	}()
 
 	imageName := filepath.Base(im.imagePath)
 	testImagePath := filepath.Join(imageTempDir, imageName)

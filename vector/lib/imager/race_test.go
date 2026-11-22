@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/runner"
 )
 
 func TestParallelImage_ConcurrentPoolStderrSkip(t *testing.T) {
@@ -203,5 +205,99 @@ func TestParallelImage_CancelsInFlightWorkersOnFirstError(t *testing.T) {
 	}
 	if slowReachedSetup.Load() {
 		t.Fatal("in-flight sibling worker reached SetupBuild despite earlier failure (pool context not cancelled)")
+	}
+}
+
+func TestImagerCleanup_ConcurrentCallsSerializeTmpDirRemoval(t *testing.T) {
+	cfg := baseImageConfig()
+	tmpDir := t.TempDir()
+
+	inFsenc := make(chan struct{})
+	releaseFsenc := make(chan struct{})
+	var fsencCalls atomic.Int32
+	var tmpDirExistedDuringFirstCleanup atomic.Bool
+
+	fsenc := &orderTrackingFsenc{
+		MockFsenc: filesystems.DefaultMockFsenc(),
+		onCleanup: func() {
+			if fsencCalls.Add(1) == 1 {
+				close(inFsenc)
+				<-releaseFsenc
+				if _, err := os.Stat(tmpDir); err == nil {
+					tmpDirExistedDuringFirstCleanup.Store(true)
+				}
+			}
+		},
+	}
+
+	im, err := NewImager(cfg, &ostree.MockOstree{}, fsenc, nil)
+	if err != nil {
+		t.Fatalf("NewImager: %v", err)
+	}
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.trackTmpDir(tmpDir)
+
+	call1Done := make(chan struct{})
+	go func() {
+		im.Cleanup()
+		close(call1Done)
+	}()
+
+	<-inFsenc
+
+	call2Done := make(chan struct{})
+	go func() {
+		im.Cleanup()
+		close(call2Done)
+	}()
+
+	// On buggy code without cleanupMu, call 2 completes and removes tmpDir
+	// while call 1 is still blocked in fsenc.Cleanup().
+	select {
+	case <-call2Done:
+		close(releaseFsenc)
+		<-call1Done
+		t.Fatal("second concurrent Imager.Cleanup() completed while first Cleanup() was still in progress")
+	case <-time.After(400 * time.Millisecond):
+		close(releaseFsenc)
+	}
+
+	<-call1Done
+	<-call2Done
+
+	if !tmpDirExistedDuringFirstCleanup.Load() {
+		t.Fatal("second concurrent Imager.Cleanup() deleted tmpDir while first Cleanup() was still closing mounts/LUKS")
+	}
+}
+
+func TestImagerMount_CleanupDuringInFlightMountAborts(t *testing.T) {
+	cfg := baseImageConfig()
+	im := newTestImager(cfg, &ostree.MockOstree{})
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.SetRootDevice("/dev/loop0p3")
+
+	mountDir := t.TempDir()
+	inMount := make(chan struct{})
+	releaseMount := make(chan struct{})
+	im.runner = func(cmd *runner.Cmd) error {
+		close(inMount)
+		<-releaseMount
+		return nil
+	}
+
+	mountErrCh := make(chan error, 1)
+	go func() {
+		mountErrCh <- im.MountRootfs(mountDir)
+	}()
+
+	<-inMount
+	// Signal-driven Cleanup runs and completes while mount is still in flight.
+	im.Cleanup()
+	close(releaseMount)
+
+	if err := <-mountErrCh; err == nil {
+		t.Fatal("MountRootfs succeeded even though Cleanup() ran while mount was in flight (TOCTOU mount leak)")
 	}
 }

@@ -196,11 +196,16 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create loop device: %w", err)
 	}
-	im.trackLoopDevice(loop)
+	gen := im.trackLoopDevice(loop)
 
 	if err := loop.Attach(); err != nil {
 		return fmt.Errorf("failed to attach image %s as loop device: %w",
 			imagePath, err)
+	}
+	if im.cleanupActiveOrRanSince(gen) {
+		im.trackLoopDevice(loop)
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted loop attach for %s", imagePath)
 	}
 	blockDevice := loop.DevicePath()
 	im.SetDevicePath(blockDevice)

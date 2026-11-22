@@ -1,5 +1,10 @@
 package filesystems
 
+import "io"
+
+// Compile-time interface check.
+var _ IFsenc = (*MockFsenc)(nil)
+
 // MockFsenc implements IFsenc for testing.
 // Only the fields/methods relevant to each test need to be configured;
 // everything else returns safe zero values.
@@ -13,6 +18,10 @@ type MockFsenc struct {
 	ValidateLuksErr        error
 	LuksEncryptErr         error
 }
+
+func (m *MockFsenc) SetStdout(io.Writer) {}
+
+func (m *MockFsenc) SetStderr(io.Writer) {}
 
 func (m *MockFsenc) Cleanup() {}
 

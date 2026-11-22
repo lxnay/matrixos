@@ -169,12 +169,14 @@ func (c *ImageCommand) runImage() error {
 		},
 		func(mapperName string) {
 			c.Printf(
-				"Closing encrypted rootfs as %s ...\n", mapperName)
+				"Opened encrypted rootfs as %s.\n", mapperName)
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize fsenc: %w", err)
 	}
+	fsenc.SetStdout(c.StdoutWriter())
+	fsenc.SetStderr(c.StderrWriter())
 	c.fsenc = fsenc
 
 	// Validate LUKS variables.
