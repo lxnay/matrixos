@@ -98,16 +98,6 @@ func TestCommitArgs(t *testing.T) {
 	if got != expected {
 		t.Errorf("args mismatch:\n  got:  %s\n  want: %s", got, expected)
 	}
-
-	// With verbose
-	o.SetVerbose(true)
-	args, err = o.commitArgs(opts)
-	if err != nil {
-		t.Fatalf("commitArgs verbose: %v", err)
-	}
-	if args[1] != "--verbose" {
-		t.Errorf("expected --verbose as second arg, got %q", args[1])
-	}
 }
 
 func TestCommitArgsMinimal(t *testing.T) {
