@@ -5,9 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
+	"matrixos/vector/lib/runner"
 )
 
 func TestCopyFile_ConcurrentSameDest(t *testing.T) {
@@ -227,4 +230,137 @@ func TestLoop_ConcurrentAttachAndDeviceRead(t *testing.T) {
 		_ = l.Detach()
 	}()
 	wg.Wait()
+}
+
+func TestFsenc_NilCallbacksDoNotPanic(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+	if err := os.WriteFile(desiredDevice, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	f, err := NewFsenc(baseFsencConfig(), nil, nil)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	f.runner = runner.NewMockRunner().Run
+
+	if err := f.LuksEncrypt("/dev/loop0p3", desiredDevice); err != nil {
+		t.Fatalf("LuksEncrypt with nil callbacks failed: %v", err)
+	}
+}
+
+func TestFsenc_KeyFileCheckedOnce(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyFile := filepath.Join(tmpDir, "enc.key")
+	if err := os.WriteFile(keyFile, []byte("secret-key"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+	if err := os.WriteFile(desiredDevice, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	cfg := baseFsencConfig()
+	cfg.Items["Imager.EncryptionKey"] = []string{keyFile}
+	f, err := NewFsenc(cfg, noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+
+	var openStdinNonNil bool
+	f.runner = func(cmd *runner.Cmd) error {
+		if containsArg(cmd.Args, "luksFormat") {
+			// Remove key file between luksFormat and open to expose TOCTOU re-stat.
+			_ = os.Remove(keyFile)
+		}
+		if containsArg(cmd.Args, "open") {
+			openStdinNonNil = cmd.Stdin != nil
+		}
+		return nil
+	}
+
+	if err := f.LuksEncrypt("/dev/loop0p3", desiredDevice); err != nil {
+		t.Fatalf("LuksEncrypt: %v", err)
+	}
+	if openStdinNonNil {
+		t.Error("cryptsetup open received non-nil Stdin despite keyFileArg being a file path (TOCTOU re-stat)")
+	}
+}
+
+func TestFsenc_CleanupWaitsForInFlightCryptsetupOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+
+	var cleanedMu sync.Mutex
+	var cleanedMappers []string
+	var openFinishedAtCleanup bool
+	var openFinished atomic.Bool
+	f.cleanupDevices = func(devices []string) {
+		cleanedMu.Lock()
+		cleanedMappers = append(cleanedMappers, devices...)
+		openFinishedAtCleanup = openFinished.Load()
+		cleanedMu.Unlock()
+	}
+
+	inOpen := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	f.runner = func(cmd *runner.Cmd) error {
+		if containsArg(cmd.Args, "open") {
+			close(inOpen)
+			<-releaseOpen
+			// Simulate cryptsetup open creating the device node right before returning.
+			_ = os.WriteFile(desiredDevice, []byte{}, 0600)
+			openFinished.Store(true)
+		}
+		return nil
+	}
+
+	encryptDone := make(chan error, 1)
+	go func() {
+		encryptDone <- f.LuksEncrypt("/dev/loop0p3", desiredDevice)
+	}()
+
+	<-inOpen
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(cleanupDone)
+	}()
+
+	// Give Cleanup a moment to contend with in-flight cryptsetup open.
+	time.Sleep(40 * time.Millisecond)
+	close(releaseOpen)
+
+	if err := <-encryptDone; err != nil {
+		t.Fatalf("LuksEncrypt: %v", err)
+	}
+	<-cleanupDone
+
+	cleanedMu.Lock()
+	defer cleanedMu.Unlock()
+	if !openFinishedAtCleanup {
+		t.Fatal("Cleanup ran cleanupDevices while cryptsetup open was still in flight")
+	}
+	if len(cleanedMappers) != 1 || cleanedMappers[0] != "matrixosroot" {
+		t.Fatalf("cleanedMappers = %v, want [matrixosroot]", cleanedMappers)
+	}
 }

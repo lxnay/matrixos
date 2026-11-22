@@ -37,12 +37,13 @@ type IFsenc interface {
 
 // Fsenc provides filesystem encryption operations backed by LUKS/cryptsetup.
 type Fsenc struct {
-	cfg           config.IConfig
-	runner        runner.Func
-	openMappersMu sync.Mutex
-	openMappers   []string
-	opening       func(string)
-	opened        func(string)
+	cfg            config.IConfig
+	runner         runner.Func
+	cleanupDevices func([]string)
+	openMu         sync.Mutex
+	openMappers    []string
+	opening        func(string)
+	opened         func(string)
 }
 
 // NewFsenc creates a new Fsenc instance.
@@ -51,27 +52,28 @@ func NewFsenc(cfg config.IConfig, opening, opened func(string)) (*Fsenc, error) 
 		return nil, errors.New("missing config parameter")
 	}
 	return &Fsenc{
-		cfg:     cfg,
-		runner:  runner.Run,
-		opening: opening,
-		opened:  opened,
+		cfg:            cfg,
+		runner:         runner.Run,
+		cleanupDevices: CleanupCryptsetupDevices,
+		opening:        opening,
+		opened:         opened,
 	}, nil
 }
 
-// add adds a device-mapper name to the tracking list of opened mappers for cleanup.
-func (f *Fsenc) add(mapperName string) {
-	f.openMappersMu.Lock()
-	defer f.openMappersMu.Unlock()
-	f.openMappers = append(f.openMappers, mapperName)
-}
-
 func (f *Fsenc) Cleanup() {
-	f.openMappersMu.Lock()
+	f.openMu.Lock()
 	mappers := slices.Clone(f.openMappers)
 	f.openMappers = nil
-	f.openMappersMu.Unlock()
+	f.openMu.Unlock()
 
-	CleanupCryptsetupDevices(mappers)
+	if len(mappers) == 0 {
+		return
+	}
+	cleanup := f.cleanupDevices
+	if cleanup == nil {
+		cleanup = CleanupCryptsetupDevices
+	}
+	cleanup(mappers)
 }
 
 func (f *Fsenc) EncryptionEnabled() (bool, error) {
@@ -106,7 +108,8 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	var stdin io.Reader
 	var keyFileArg string
 
-	if FileExists(encKey) {
+	keyIsFile := FileExists(encKey)
+	if keyIsFile {
 		fmt.Fprintln(os.Stdout, "LUKS Encryption key is a file.")
 		keyFileArg = encKey
 		stdin = nil
@@ -140,32 +143,42 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	}
 
 	// Re-create stdin for the open command if the key is not a file.
-	if !FileExists(encKey) {
+	if !keyIsFile {
 		stdin = strings.NewReader(encKey)
 	} else {
 		stdin = nil
 	}
 
-	// Track the opened device-mapper name for cleanup.
-	f.add(luksName)
-	f.opening(luksName)
-	err = f.runner(&runner.Cmd{
-		Name: "cryptsetup",
-		Args: []string{
-			"open",
-			"--allow-discards",
-			"--key-file=" + keyFileArg,
-			devicePath,
-			luksName,
-		},
-		Stdin:  stdin,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
-	})
+	if f.opening != nil {
+		f.opening(luksName)
+	}
+	// Hold openMu across tracking + cryptsetup open so a concurrent Cleanup()
+	// waits for the open attempt to complete instead of draining openMappers
+	// before /dev/mapper/<luksName> appears and leaking the mapper.
+	err = func() error {
+		f.openMu.Lock()
+		defer f.openMu.Unlock()
+		f.openMappers = append(f.openMappers, luksName)
+		return f.runner(&runner.Cmd{
+			Name: "cryptsetup",
+			Args: []string{
+				"open",
+				"--allow-discards",
+				"--key-file=" + keyFileArg,
+				devicePath,
+				luksName,
+			},
+			Stdin:  stdin,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		})
+	}()
 	if err != nil {
 		return fmt.Errorf("cryptsetup open failed on %s: %w", devicePath, err)
 	}
-	f.opened(luksName)
+	if f.opened != nil {
+		f.opened(luksName)
+	}
 
 	// Wait for the device node to appear.
 	DevicesSettle()
