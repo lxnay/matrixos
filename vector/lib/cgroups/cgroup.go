@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -15,6 +16,8 @@ const (
 	defaultCgroupV2Root = "/sys/fs/cgroup"
 	cpuPeriod           = 100000
 )
+
+var poolSeq atomic.Uint64
 
 // workerCgroup holds the state for a single per-worker cgroup.
 type workerCgroup struct {
@@ -86,7 +89,7 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 	// permission, both of which are fine.
 	enableRootControllers(subCtl)
 
-	parentDir := filepath.Join(root, fmt.Sprintf("vector-seeds-%d", os.Getpid()))
+	parentDir := filepath.Join(root, fmt.Sprintf("vector-seeds-%d-%d", os.Getpid(), poolSeq.Add(1)))
 	if err := os.Mkdir(parentDir, 0755); err != nil {
 		return nil, fmt.Errorf("cgroups: failed to create parent dir %s: %w", parentDir, err)
 	}
