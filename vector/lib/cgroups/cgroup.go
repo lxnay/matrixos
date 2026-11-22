@@ -10,7 +10,10 @@ import (
 	"syscall"
 )
 
-const defaultCgroupV2Root = "/sys/fs/cgroup"
+const (
+	defaultCgroupV2Root = "/sys/fs/cgroup"
+	cpuPeriod           = 100000
+)
 
 // workerCgroup holds the state for a single per-worker cgroup.
 type workerCgroup struct {
@@ -191,18 +194,26 @@ func writeMemoryLimit(dir string, index int, memBytes uint64) error {
 	return nil
 }
 
+func writeCPUQuotaValue(dir string, index, cpuQuota int, suffix string) error {
+	path := filepath.Join(dir, "cpu.max")
+	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
+		return fmt.Errorf("cgroups: failed to write cpu.max%s for worker-%d: %w", suffix, index, err)
+	}
+	return nil
+}
+
 func writeCPUQuota(dir string, index int, opts *WorkerPoolOptions) error {
 	// CPU bandwidth limit via cpu.max: "$MAX $PERIOD" in µs.
 	// e.g. 4 CPUs → "400000 100000" (400ms of CPU time per 100ms).
 	// Supports fractional CPUs (e.g. 12 CPUs / 5 workers = 240000).
-	const cpuPeriod = 100000
-	cpuQuota := opts.NumCPUs * cpuPeriod / opts.Parallelism
-	if cpuQuota < cpuPeriod {
-		cpuQuota = cpuPeriod // At least 1 CPU worth of bandwidth.
-	}
-	path := filepath.Join(dir, "cpu.max")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpu.max for worker-%d: %w", index, err)
+	cpuQuota := max(opts.NumCPUs*cpuPeriod/opts.Parallelism, cpuPeriod)
+	return writeCPUQuotaValue(dir, index, cpuQuota, "")
+}
+
+func writeCpusetRange(dir string, index, cpuStart, cpuEnd int, suffix string) error {
+	path := filepath.Join(dir, "cpuset.cpus")
+	if err := os.WriteFile(path, fmt.Appendf(nil, "%d-%d", cpuStart, cpuEnd), 0644); err != nil {
+		return fmt.Errorf("cgroups: failed to write cpuset.cpus%s for worker-%d: %w", suffix, index, err)
 	}
 	return nil
 }
@@ -229,14 +240,7 @@ func writeCpusetPinning(dir string, index int, opts *WorkerPoolOptions) error {
 
 	// Compute the start position from strict partitioning, then centre
 	// the (potentially wider) range around it.
-	strictStart := 0
-	for i := range index {
-		n := baseCPUs
-		if i < extraCPUs {
-			n++
-		}
-		strictStart += n
-	}
+	strictStart := index*baseCPUs + min(index, extraCPUs)
 	strictMid := strictStart + baseForWorker/2
 
 	cpuStart := strictMid - effective/2
@@ -249,70 +253,47 @@ func writeCpusetPinning(dir string, index int, opts *WorkerPoolOptions) error {
 	}
 	if cpuEnd >= opts.NumCPUs {
 		cpuEnd = opts.NumCPUs - 1
-		cpuStart = cpuEnd - effective + 1
-		if cpuStart < 0 {
-			cpuStart = 0
-		}
+		cpuStart = max(cpuEnd-effective+1, 0)
 	}
 
-	path := filepath.Join(dir, "cpuset.cpus")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d-%d", cpuStart, cpuEnd), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpuset.cpus for worker-%d: %w", index, err)
+	return writeCpusetRange(dir, index, cpuStart, cpuEnd, "")
+}
+
+func (p *WorkerPool) setWorkerResources(workerIndex int, boosted bool) error {
+	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
+		return nil
 	}
-	return nil
+	w := p.workers[workerIndex]
+	memBytes := p.opts.MemPerWorkerBytes
+	if boosted {
+		memBytes = p.opts.TotalMemBytes
+	}
+	if err := writeMemoryLimit(w.dir, workerIndex, memBytes); err != nil {
+		return err
+	}
+	if p.useCpuset {
+		if boosted {
+			return writeCpusetRange(w.dir, workerIndex, 0, p.opts.NumCPUs-1, " (boost)")
+		}
+		return writeCpusetPinning(w.dir, workerIndex, p.opts)
+	}
+	if boosted {
+		return writeCPUQuotaValue(w.dir, workerIndex, p.opts.NumCPUs*cpuPeriod, " (boost)")
+	}
+	return writeCPUQuota(w.dir, workerIndex, p.opts)
 }
 
 // BoostWorker reconfigures a worker's cgroup to use all available
 // resources (memory + CPU).  This is intended for situations where only
 // one seed is runnable at a time and should get the full machine.
 func (p *WorkerPool) BoostWorker(workerIndex int) error {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
-		return nil
-	}
-	w := p.workers[workerIndex]
-	if err := writeMemoryLimit(w.dir, workerIndex, p.opts.TotalMemBytes); err != nil {
-		return err
-	}
-	if p.useCpuset {
-		return writeCpusetFull(w.dir, workerIndex, p.opts)
-	}
-	return writeCPUQuotaFull(w.dir, workerIndex, p.opts)
+	return p.setWorkerResources(workerIndex, true)
 }
 
 // UnboostWorker restores a worker's cgroup to its partitioned share
 // of resources.
 func (p *WorkerPool) UnboostWorker(workerIndex int) error {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
-		return nil
-	}
-	w := p.workers[workerIndex]
-	if err := writeMemoryLimit(w.dir, workerIndex, p.opts.MemPerWorkerBytes); err != nil {
-		return err
-	}
-	if p.useCpuset {
-		return writeCpusetPinning(w.dir, workerIndex, p.opts)
-	}
-	return writeCPUQuota(w.dir, workerIndex, p.opts)
-}
-
-// writeCpusetFull sets a worker's cpuset to all available CPUs.
-func writeCpusetFull(dir string, index int, opts *WorkerPoolOptions) error {
-	path := filepath.Join(dir, "cpuset.cpus")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "0-%d", opts.NumCPUs-1), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpuset.cpus (boost) for worker-%d: %w", index, err)
-	}
-	return nil
-}
-
-// writeCPUQuotaFull sets a worker's CPU quota to the full CPU count.
-func writeCPUQuotaFull(dir string, index int, opts *WorkerPoolOptions) error {
-	const cpuPeriod = 100000
-	cpuQuota := opts.NumCPUs * cpuPeriod
-	path := filepath.Join(dir, "cpu.max")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpu.max (boost) for worker-%d: %w", index, err)
-	}
-	return nil
+	return p.setWorkerResources(workerIndex, false)
 }
 
 // SysProcAttr returns a SysProcAttr configured to spawn a child process

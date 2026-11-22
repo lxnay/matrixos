@@ -23,11 +23,22 @@ type MockRunner struct {
 	OutputData map[int][]byte
 }
 
-// Run implements the Func signature.
-func (mr *MockRunner) Run(c *Cmd) error {
+func (mr *MockRunner) recordCmd(c *Cmd) {
 	mr.Calls = append(mr.Calls, MockRunnerCall{
 		Name: c.Name, Args: c.Args, Dir: c.Dir, Env: c.Env,
 	})
+}
+
+func (mr *MockRunner) recordChrootCmd(c *ChrootCmd) {
+	mr.Calls = append(mr.Calls, MockRunnerCall{
+		Name: "chroot:" + c.Name, Args: c.Args,
+		Dir: c.Dir, Env: c.Env, ChrootDir: c.ChrootDir,
+	})
+}
+
+// Run implements the Func signature.
+func (mr *MockRunner) Run(c *Cmd) error {
+	mr.recordCmd(c)
 	return mr.errForCall()
 }
 
@@ -53,35 +64,24 @@ func (mr *MockRunner) outputForCall() []byte {
 
 // Output implements the OutputFunc signature.
 func (mr *MockRunner) Output(c *Cmd) ([]byte, error) {
-	mr.Calls = append(mr.Calls, MockRunnerCall{
-		Name: c.Name, Args: c.Args, Dir: c.Dir, Env: c.Env,
-	})
+	mr.recordCmd(c)
 	return mr.outputForCall(), mr.errForCall()
 }
 
 // CombinedOutput implements the CombinedOutputFunc signature.
 func (mr *MockRunner) CombinedOutput(c *Cmd) ([]byte, error) {
-	mr.Calls = append(mr.Calls, MockRunnerCall{
-		Name: c.Name, Args: c.Args, Dir: c.Dir, Env: c.Env,
-	})
-	return mr.outputForCall(), mr.errForCall()
+	return mr.Output(c)
 }
 
 // ChrootRun implements the ChrootRunFunc signature.
 func (mr *MockRunner) ChrootRun(c *ChrootCmd) error {
-	mr.Calls = append(mr.Calls, MockRunnerCall{
-		Name: "chroot:" + c.Name, Args: c.Args,
-		Dir: c.Dir, Env: c.Env, ChrootDir: c.ChrootDir,
-	})
+	mr.recordChrootCmd(c)
 	return mr.errForCall()
 }
 
 // ChrootOutput implements the ChrootOutputFunc signature.
 func (mr *MockRunner) ChrootOutput(c *ChrootCmd) ([]byte, error) {
-	mr.Calls = append(mr.Calls, MockRunnerCall{
-		Name: "chroot:" + c.Name, Args: c.Args,
-		Dir: c.Dir, Env: c.Env, ChrootDir: c.ChrootDir,
-	})
+	mr.recordChrootCmd(c)
 	return mr.outputForCall(), mr.errForCall()
 }
 

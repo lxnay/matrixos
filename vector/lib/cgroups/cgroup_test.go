@@ -388,8 +388,8 @@ func TestBoostUnboostWorker_CPUQuota(t *testing.T) {
 		t.Errorf("partitioned cpu.max: got %q, want %q", got, "200000 100000")
 	}
 
-	if err := writeCPUQuotaFull(dir, 0, opts); err != nil {
-		t.Fatalf("writeCPUQuotaFull: %v", err)
+	if err := writeCPUQuotaValue(dir, 0, opts.NumCPUs*cpuPeriod, " (boost)"); err != nil {
+		t.Fatalf("writeCPUQuotaValue (boost): %v", err)
 	}
 	got, _ = os.ReadFile(filepath.Join(dir, "cpu.max"))
 	if string(got) != "800000 100000" {

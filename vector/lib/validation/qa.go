@@ -13,13 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
-)
-
-var (
-	execCommand = exec.Command
-	lookPath    = exec.LookPath
 )
 
 type QA struct {
@@ -34,14 +28,6 @@ func New(cfg config.IConfig) (*QA, error) {
 	return &QA{
 		cfg: cfg,
 	}, nil
-}
-
-// RootPrivs checks the current process is root. Returns error if not.
-func (q *QA) RootPrivs() error {
-	if os.Geteuid() != 0 {
-		return errors.New("Run as root")
-	}
-	return nil
 }
 
 // CheckMatrixOSPrivate verifies PrivateGitRepoPath exists and is a directory.
@@ -174,7 +160,7 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 
 		// Simple command name (e.g. "sh")
 		if imageDir == "/" {
-			if _, err := lookPath(exe); err != nil {
+			if _, err := exec.LookPath(exe); err != nil {
 				retErrs = append(retErrs, fmt.Sprintf("%s not found", exe))
 			}
 			continue
@@ -219,258 +205,74 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 	return nil
 }
 
+var imagerBaseExecutables = []string{
+	"blockdev",
+	"btrfs",
+	"chroot",
+	"cryptsetup",
+	"efibootmgr",
+	"findmnt",
+	"fstrim",
+	"gpg",
+	"losetup",
+	"mkfs.btrfs",
+	"mkfs.vfat",
+	"openssl",
+	"ostree",
+	"partprobe",
+	"qemu-img",
+	"qemu-system-x86_64",
+	"sgdisk",
+	"udevadm",
+	"unshare",
+	"xz",
+}
+
 // VerifyDistroRootfsEnvironmentSetup checks the typical distro binaries and dirs
 func (q *QA) VerifyDistroRootfsEnvironmentSetup(imageDir string) error {
-	if imageDir == "" {
-		return errors.New("missing parameter imageDir")
-	}
-	executables := []string{
-		"blockdev",
-		"btrfs",
-		"chroot",
-		"cryptsetup",
-		"efibootmgr",
-		"find",
-		"findmnt",
-		"fstrim",
-		"git",
-		"gpg",
-		"losetup",
-		"mkfs.btrfs",
-		"mkfs.vfat",
-		"openssl",
-		"ostree",
-		"partprobe",
-		"qemu-img",
-		"qemu-system-x86_64",
-		"sgdisk",
-		"udevadm",
-		"unshare",
-		"wget",
-		"xz",
-	}
+	executables := append(append([]string{}, imagerBaseExecutables...), "find", "git", "wget")
 	if imageDir != "/" {
 		executables = append(executables, "/usr/bin/grub-install")
 	}
-	dirs := []string{"/usr/share/shim"}
-	return verifyEnvironmentSetup(imageDir, executables, dirs)
+	return verifyEnvironmentSetup(imageDir, executables, []string{"/usr/share/shim"})
 }
 
-func (q *QA) privateGitRepoPath(imageDir string) (string, error) {
-	var path string
-	var err error
+func (q *QA) verifyWithPrivateRepo(imageDir string, executables []string) error {
+	if imageDir == "" {
+		return errors.New("missing parameter imageDir")
+	}
+	key := "matrixOS.DefaultPrivateGitRepoPath"
 	if imageDir == "/" {
-		path, err = q.cfg.GetItem("matrixOS.PrivateGitRepoPath")
-	} else {
-		path, err = q.cfg.GetItem("matrixOS.DefaultPrivateGitRepoPath")
+		key = "matrixOS.PrivateGitRepoPath"
 	}
+	privatePath, err := q.cfg.GetItem(key)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if path == "" {
-		return "", errors.New("matrixOS.PrivateGitRepoPath not set")
+	if privatePath == "" {
+		return errors.New("matrixOS.PrivateGitRepoPath not set")
 	}
-	return path, nil
-
+	return verifyEnvironmentSetup(imageDir, executables, []string{privatePath})
 }
 
 // VerifyReleaserEnvironmentSetup checks for tools required by releaser
 func (q *QA) VerifyReleaserEnvironmentSetup(imageDir string) error {
-	if imageDir == "" {
-		return errors.New("missing parameter imageDir")
-	}
-	executables := []string{
-		"chroot",
-		"find",
-		"findmnt",
-		"gpg",
-		"openssl",
-		"ostree",
-		"unshare",
-	}
-
-	var dirs []string
-	privatePath, err := q.privateGitRepoPath(imageDir)
-	if err != nil {
-		return err
-	}
-	dirs = append(dirs, privatePath)
-	return verifyEnvironmentSetup(imageDir, executables, dirs)
+	return q.verifyWithPrivateRepo(imageDir, []string{
+		"chroot", "find", "findmnt", "gpg", "openssl", "ostree", "unshare",
+	})
 }
 
 // VerifySeederEnvironmentSetup checks tools for seeder
 func (q *QA) VerifySeederEnvironmentSetup(imageDir string) error {
-	if imageDir == "" {
-		return errors.New("missing parameter imageDir")
-	}
-	executables := []string{
-		"chroot",
-		"git",
-		"gpg",
-		"openssl",
-		"ostree",
-		"unshare",
-		"wget",
-	}
-
-	var dirs []string
-	privatePath, err := q.privateGitRepoPath(imageDir)
-	if err != nil {
-		return err
-	}
-	dirs = append(dirs, privatePath)
-	return verifyEnvironmentSetup(imageDir, executables, dirs)
+	return q.verifyWithPrivateRepo(imageDir, []string{
+		"chroot", "git", "gpg", "openssl", "ostree", "unshare", "wget",
+	})
 }
 
 // VerifyImagerEnvironmentSetup checks tools for imager
 func (q *QA) VerifyImagerEnvironmentSetup(imageDir string) error {
-	if imageDir == "" {
-		return errors.New("missing parameter imageDir")
-	}
-	executables := []string{
-		"blockdev",
-		"btrfs",
-		"chroot",
-		"cryptsetup",
-		"efibootmgr",
-		"findmnt",
-		"fstrim",
-		"gpg",
-		"grub-install",
-		"losetup",
-		"mkfs.vfat",
-		"mkfs.btrfs",
-		"openssl",
-		"ostree",
-		"partprobe",
-		"qemu-img",
-		"qemu-system-x86_64",
-		"sgdisk",
-		"unshare",
-		"udevadm",
-		"xz",
-	}
-	dirs := []string{"/usr/share/shim"}
-	return verifyEnvironmentSetup(imageDir, executables, dirs)
-}
-
-// CheckKernelAndExternalModule validates presence of kernels, initramfs and kernel
-// modules matching moduleName (a glob pattern like "nvidia.ko*").
-func (q *QA) CheckKernelAndExternalModule(imageDir, moduleName string) error {
-	if moduleName == "" || imageDir == "" {
-		return errors.New("missing parameters imageDir and module name")
-	}
-	modulesdir := filepath.Join(imageDir, "lib/modules")
-	vmlinuzes, _ := filepath.Glob(filepath.Join(modulesdir, "*", "vmlinuz"))
-	vmlinuzCount := len(vmlinuzes)
-	for _, v := range vmlinuzes {
-		fmt.Printf("Found kernel: %s\n", v)
-	}
-	initramfses, _ := filepath.Glob(filepath.Join(modulesdir, "*", "initramfs"))
-	initramfsCount := len(initramfses)
-	for _, i := range initramfses {
-		fmt.Printf("Found initramfs: %s\n", i)
-	}
-	if vmlinuzCount == 0 {
-		return errors.New("No kernel found. Refusing to release.")
-	}
-	if initramfsCount == 0 {
-		return errors.New("No initramfs found. Refusing to release.")
-	}
-	if vmlinuzCount != initramfsCount {
-		return fmt.Errorf(
-			"vmlinuz found: %d -- initramfs found: %d. Refusing to release.",
-			vmlinuzCount, initramfsCount,
-		)
-	}
-
-	// Find kernel modules matching moduleName
-	var kernelMods []string
-	_ = filepath.WalkDir(modulesdir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() {
-			if ok, _ := filepath.Match(moduleName, filepath.Base(p)); ok {
-				kernelMods = append(kernelMods, p)
-			}
-		}
-		return nil
-	})
-	if len(kernelMods) == 0 {
-		return fmt.Errorf("No %s found in %s", moduleName, modulesdir)
-	}
-
-	modCount := 0
-	var failure bool
-
-	for _, kernelMod := range kernelMods {
-		rel := strings.TrimPrefix(kernelMod, strings.TrimRight(imageDir, "/"))
-		modCount++
-		fmt.Printf("Testing module: %s\n", rel)
-		out, err := filesystems.ChrootOutput(imageDir, "modinfo", "-F", "vermagic", rel)
-		if err != nil {
-			failure = true
-			continue
-		}
-
-		kernelModVermagic := strings.TrimSpace(string(out))
-		moduleKernelVer := strings.Fields(kernelModVermagic)[0]
-		fmt.Printf(
-			"%s: vermagic is: %s, kernel ver is: %s\n",
-			rel,
-			kernelModVermagic,
-			moduleKernelVer,
-		)
-
-		correspondingVmlinuz := filepath.Join(modulesdir, moduleKernelVer, "vmlinuz")
-		if _, err := os.Stat(correspondingVmlinuz); err != nil {
-			fmt.Printf(
-				"%s not found for related %s. Refusing to release.\n",
-				correspondingVmlinuz,
-				rel,
-			)
-			failure = true
-			continue
-		}
-
-		// run file -b to extract version
-		fout, err := execCommand("file", "-b", correspondingVmlinuz).Output()
-		if err != nil {
-			failure = true
-			continue
-		}
-
-		re := regexp.MustCompile(`version (\S+)`)
-		m := re.FindStringSubmatch(string(fout))
-		if len(m) < 2 {
-			failure = true
-			continue
-		}
-
-		vmlinuzKernelVer := m[1]
-		if vmlinuzKernelVer != moduleKernelVer {
-			fmt.Printf(
-				"%s: mismatch in kernel ver: (M) %s vs (K) %s\n",
-				rel,
-				moduleKernelVer,
-				vmlinuzKernelVer,
-			)
-			failure = true
-			continue
-		}
-	}
-	if failure {
-		return errors.New("kernel module checks failed")
-	}
-	if modCount != vmlinuzCount {
-		return fmt.Errorf(
-			"Unexpected number of %s files found! Refusing to release. "+
-				"Number of %s modules: %d -- vmlinuz found: %d",
-			moduleName, moduleName, modCount, vmlinuzCount,
-		)
-	}
-	return nil
+	executables := append(append([]string{}, imagerBaseExecutables...), "grub-install")
+	return verifyEnvironmentSetup(imageDir, executables, []string{"/usr/share/shim"})
 }
 
 // CheckNumberOfKernels verifies the number of vmlinuz files under /usr/lib/modules

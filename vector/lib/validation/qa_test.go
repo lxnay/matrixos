@@ -11,37 +11,16 @@ import (
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/runner"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// Mock helpers for command execution
-var mockCmdOutput map[string]string
-
-func fakeExecCommand(command string, args ...string) *exec.Cmd {
-	cs := []string{"-test.run=TestHelperProcess", "--", command}
-	cs = append(cs, args...)
-	cmd := exec.Command(os.Args[0], cs...)
-	// pass env vars to identify the command
-	// MUST append to os.Environ() so MOCK_SIG_KEY is passed through!
-	env := os.Environ()
-	env = append(env, "GO_WANT_HELPER_PROCESS=1",
-		"GO_HELPER_CMD="+command,
-		"GO_HELPER_ARGS="+strings.Join(args, " "))
-	cmd.Env = env
-	return cmd
-}
 
 // fakeExecChrootOutput mocks filesystems.ExecChrootOutput for tests.
 func fakeExecChrootOutput(c *runner.ChrootCmd) ([]byte, error) {
 	allArgs := strings.Join(c.Args, " ")
 	if c.Name == "modinfo" && strings.Contains(allArgs, "-F sig_key") {
 		return []byte(os.Getenv("MOCK_SIG_KEY")), nil
-	}
-	if c.Name == "modinfo" && strings.Contains(allArgs, "-F vermagic") {
-		return []byte("5.15.0 SMP mod_unload"), nil
 	}
 	if c.Name == "which" {
 		return []byte("/usr/bin/" + c.Args[len(c.Args)-1]), nil
@@ -53,57 +32,6 @@ func setupMockChrootOutput(t *testing.T) {
 	orig := filesystems.ExecChrootOutput
 	filesystems.ExecChrootOutput = runner.ChrootOutputFunc(fakeExecChrootOutput)
 	t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
-}
-
-func TestHelperProcess(t *testing.T) {
-	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
-		return
-	}
-	defer os.Exit(0)
-
-	cmd := os.Getenv("GO_HELPER_CMD")
-	args := os.Getenv("GO_HELPER_ARGS")
-
-	// Special mocking logic based on arguments
-	// Specifically for modinfo
-	if cmd == "unshare" && strings.Contains(args, "modinfo -F sig_key") {
-		// return a dummy signature key
-		// The key must match what we expect in the test
-		// If test sets special env var, use it
-		fmt.Print(os.Getenv("MOCK_SIG_KEY"))
-		return
-	}
-
-	if cmd == "unshare" && strings.Contains(args, "modinfo -F vermagic") {
-		// Mock vermagic
-		fmt.Print("5.15.0 SMP mod_unload")
-		return
-	}
-
-	if cmd == "file" && strings.Contains(args, "-b") {
-		// Mock file output for vmlinuz
-		fmt.Print("Linux kernel x86 boot executable bzImage, version 5.15.0 (root@host) #1 SMP ...")
-		return
-	}
-
-	// default
-	fmt.Fprintf(os.Stderr, "Unknown mock command: %s %s\n", cmd, args)
-	os.Exit(1)
-}
-
-func TestRootPrivs(t *testing.T) {
-	// Behavior depends on test runner (may be root in some CI); assert consistent result
-	q, _ := New(&config.MockConfig{})
-	err := q.RootPrivs()
-	if os.Geteuid() == 0 {
-		if err != nil {
-			t.Fatalf("expected nil when running as root, got %v", err)
-		}
-	} else {
-		if err == nil {
-			t.Fatalf("expected error when not running as root, got nil")
-		}
-	}
 }
 
 func TestCheckMatrixOSPrivate(t *testing.T) {
@@ -173,9 +101,6 @@ func TestVerifyEnvironmentSetup(t *testing.T) {
 }
 
 func TestCheckSecureBoot(t *testing.T) {
-	// Setup overrides
-	execCommand = fakeExecCommand
-	defer func() { execCommand = exec.Command }()
 	setupMockChrootOutput(t)
 
 	tmp := t.TempDir()
@@ -220,37 +145,6 @@ func TestCheckSecureBoot(t *testing.T) {
 	os.Setenv("MOCK_SIG_KEY", "aa:bb:cc")
 	if err := q.CheckSecureBoot(tmp, certPath); err == nil {
 		t.Fatalf("expected error for mismatched serial, got nil")
-	}
-}
-
-func TestCheckKernelAndExternalModule(t *testing.T) {
-	// Setup overrides
-	execCommand = fakeExecCommand
-	defer func() { execCommand = exec.Command }()
-	setupMockChrootOutput(t)
-
-	tmp := t.TempDir()
-	modVer := "5.15.0"
-	modDir := filepath.Join(tmp, "lib/modules", modVer)
-	if err := os.MkdirAll(modDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Create vmlinuz and initramfs
-	if err := os.WriteFile(filepath.Join(modDir, "vmlinuz"), []byte("kernel"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(modDir, "initramfs"), []byte("initramfs"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// Create dummy module
-	if err := os.WriteFile(filepath.Join(modDir, "nvidia.ko"), []byte("mod"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	q, _ := New(&config.MockConfig{})
-	// Mock returns 5.15.0 which matches our dir structure
-	if err := q.CheckKernelAndExternalModule(tmp, "nvidia.ko*"); err != nil {
-		t.Fatalf("expected nil for valid module check, got %v", err)
 	}
 }
 

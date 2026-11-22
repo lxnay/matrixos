@@ -2,7 +2,11 @@
 // params reading.
 package config
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 type IConfig interface {
 	// Load loads the associated config file or source.
@@ -40,4 +44,36 @@ func FilterEnvKey(env []string, key string) []string {
 		}
 	}
 	return filtered
+}
+
+// GetRequiredItem retrieves a non-empty config string for key.
+func GetRequiredItem(cfg IConfig, key string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("missing config parameter")
+	}
+	val, err := cfg.GetItem(key)
+	if err != nil {
+		return "", err
+	}
+	if val == "" {
+		return "", fmt.Errorf("invalid %s", key)
+	}
+	return val, nil
+}
+
+// GetParallelism retrieves a positive integer parallelism value from key.
+// Defaults to 1 (sequential) if the key is missing, empty, or < 1.
+func GetParallelism(cfg IConfig, key string) (int, error) {
+	v, err := cfg.GetItem(key)
+	if err != nil || v == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", key, v, err)
+	}
+	if n < 1 {
+		return 1, nil
+	}
+	return n, nil
 }

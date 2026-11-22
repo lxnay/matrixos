@@ -84,7 +84,7 @@ func findMarkerDir() (string, error) {
 		return cwd, nil
 	}
 
-	return "", fmt.Errorf("market path not found in any parent directories of %s", cwd)
+	return "", fmt.Errorf("marker path not found in any parent directories of %s", cwd)
 }
 
 // SystemSearchPathEnabled controls whether the fallback system-level
@@ -133,11 +133,7 @@ type IniConfig struct {
 
 func cfgNameToSearchPath(cfgName string) *searchPath {
 	for _, sp := range searchPaths(cfgName) {
-		searchFullPath := sp.ConfigPath()
-		if _, err := filepath.Abs(searchFullPath); err != nil {
-			continue
-		}
-		if _, err := os.Stat(searchFullPath); err == nil {
+		if _, err := os.Stat(sp.ConfigPath()); err == nil {
 			return &sp
 		}
 	}
@@ -346,156 +342,50 @@ func (c *IniConfig) generateParent(ini IniFile) error {
 	return nil
 }
 
-func (c *IniConfig) loadRootConfigs(fullPath string) error {
-	rootDependents := []string{
-		"matrixOS.PrivateGitRepoPath",
-		"matrixOS.LogsDir",
-		"matrixOS.LocksDir",
-		"Seeder.LocksDir",
-		"Releaser.HooksDir",
-		"Seeder.SeedersDir",
-		"Releaser.LocksDir",
-		"Imager.LocksDir",
-		"Ostree.RepoDir",
-	}
+type rootConfigSpec struct {
+	key        string
+	defaultVal string
+	rootify    bool
+	expandAbs  bool
+	dependents []string
+}
 
-	// Set defaults for base paths if missing, to allow expansion
-	rootVal, foundRoot := c.getVal("matrixOS.Root")
-	if !foundRoot {
+func (c *IniConfig) loadRootConfig(fullPath string, spec rootConfigSpec) error {
+	val, found := c.getVal(spec.key)
+	if !found {
 		log.Printf(
 			`WARNING WARNING WARNING:
-- matrixOS.Root is not set in %s.
+- %s is not set in %s.
 - Relative paths depending on it will be expanded using %s.
 - Those paths are:
   - %s`,
+			spec.key,
 			fullPath,
-			c.sp.defaultRoot,
-			strings.Join(rootDependents, "\n  - "),
+			spec.defaultVal,
+			strings.Join(spec.dependents, "\n  - "),
 		)
-		c.setVal("matrixOS.Root", c.sp.defaultRoot)
-	} else {
-		rootVal, err := smartRootify(rootVal, c.sp.defaultRoot)
+		c.setVal(spec.key, spec.defaultVal)
+	} else if spec.rootify {
+		rootVal, err := smartRootify(val, spec.defaultVal)
 		if err != nil {
 			return err
 		}
-		c.setVal("matrixOS.Root", rootVal)
+		c.setVal(spec.key, rootVal)
 	}
 
-	// Expand base paths to absolute
-	if err := c.expandAbs("matrixOS.Root"); err != nil {
-		return err
-	}
-
-	for _, key := range rootDependents {
-		c.expand(key, "matrixOS.Root")
-	}
-
-	return nil
-}
-
-func (c *IniConfig) loadDefaultRootConfigs(fullPath string) error {
-	defaultRootDependents := []string{
-		"Seeder.ChrootSeedersDir",
-	}
-
-	// Some very minimal sanity checks at this stage.
-	_, foundDefaultRoot := c.getVal("matrixOS.DefaultRoot")
-	if !foundDefaultRoot {
-		log.Printf(
-			`WARNING WARNING WARNING:
-- matrixOS.DefaultRoot is not set in %s.
-- Relative paths depending on it will be expanded using %s.
-- Those paths are:
-  - %s`,
-			fullPath,
-			c.sp.defaultRoot,
-			strings.Join(defaultRootDependents, "\n  - "),
-		)
-		c.setVal("matrixOS.DefaultRoot", c.sp.defaultRoot)
-	}
-
-	for _, key := range defaultRootDependents {
-		c.expand(key, "matrixOS.DefaultRoot")
-	}
-	return nil
-}
-
-func (c *IniConfig) loadConfRootConfigs(fullPath string) error {
-	confRootDependents := []string{
-		"Ostree.GpgOfficialPublicKey",
-		"Imager.HooksDir",
-		"Imager.TestsDir",
-	}
-
-	confRootVal, foundConfRoot := c.getVal("matrixOS.ConfRoot")
-	if !foundConfRoot {
-		log.Printf(
-			`WARNING WARNING WARNING:
-- matrixOS.ConfRoot is not set in %s.
-- Relative paths depending on it will be expanded using %s.
-- Those paths are:
-  - %s`,
-			fullPath,
-			c.sp.confRoot,
-			strings.Join(confRootDependents, "\n  - "),
-		)
-		c.setVal("matrixOS.ConfRoot", c.sp.confRoot)
-	} else {
-		confRootVal, err := smartRootify(confRootVal, c.sp.confRoot)
-		if err != nil {
+	if spec.expandAbs {
+		if err := c.expandAbs(spec.key); err != nil {
 			return err
 		}
-		c.setVal("matrixOS.ConfRoot", confRootVal)
 	}
 
-	// Expand paths depending on base paths.
-	for _, key := range confRootDependents {
-		c.expand(key, "matrixOS.ConfRoot")
+	for _, key := range spec.dependents {
+		c.expand(key, spec.key)
 	}
 	return nil
 }
 
-func (c *IniConfig) loadArtifactsRootConfigs(fullPath string) error {
-	artifactsRootDependents := []string{
-		"Ostree.DevGpgHomeDir",
-		"Seeder.BinpkgsDir",
-		"Seeder.DownloadsDir",
-		"Seeder.DistfilesDir",
-		"Seeder.GpgKeysDir",
-		"Seeder.PortageReposDir",
-		"Imager.ImagesDir",
-		"Imager.MountDir",
-	}
-
-	artifactsRootVal, foundArtifactsRoot := c.getVal("matrixOS.ArtifactsRoot")
-	if !foundArtifactsRoot {
-		log.Printf(
-			`WARNING WARNING WARNING:
-- matrixOS.ArtifactsRoot is not set in %s.
-- Relative paths depending on it will be expanded using %s.
-- Those paths are:
-  - %s`,
-			fullPath,
-			c.sp.artifactsRoot,
-			strings.Join(artifactsRootDependents, "\n  - "),
-		)
-		c.setVal("matrixOS.ArtifactsRoot", c.sp.artifactsRoot)
-	} else {
-		artifactsRootVal, err := smartRootify(artifactsRootVal, c.sp.artifactsRoot)
-		if err != nil {
-			return err
-		}
-		c.setVal("matrixOS.ArtifactsRoot", artifactsRootVal)
-	}
-
-	// Expand paths depending on base paths.
-	for _, key := range artifactsRootDependents {
-		c.expand(key, "matrixOS.ArtifactsRoot")
-	}
-	return nil
-}
-
-func (c *IniConfig) loadPrivateRepoConfigs() error {
+func (c *IniConfig) loadPrivateRepoConfigs() {
 	privateRepoDependents := []string{
 		"Seeder.SecureBootPrivateKey",
 		"Seeder.SecureBootPublicKey",
@@ -513,7 +403,6 @@ func (c *IniConfig) loadPrivateRepoConfigs() error {
 	for _, key := range defaultPrivateRepoDependents {
 		c.expand(key, "matrixOS.DefaultPrivateGitRepoPath")
 	}
-	return nil
 }
 
 func (c *IniConfig) Load() error {
@@ -538,25 +427,64 @@ func (c *IniConfig) Load() error {
 		return err
 	}
 
-	if err := c.loadRootConfigs(fullPath); err != nil {
-		return err
+	rootSpecs := []rootConfigSpec{
+		{
+			key:        "matrixOS.Root",
+			defaultVal: c.sp.defaultRoot,
+			rootify:    true,
+			expandAbs:  true,
+			dependents: []string{
+				"matrixOS.PrivateGitRepoPath",
+				"matrixOS.LogsDir",
+				"matrixOS.LocksDir",
+				"Seeder.LocksDir",
+				"Releaser.HooksDir",
+				"Seeder.SeedersDir",
+				"Releaser.LocksDir",
+				"Imager.LocksDir",
+				"Ostree.RepoDir",
+			},
+		},
+		{
+			key:        "matrixOS.DefaultRoot",
+			defaultVal: c.sp.defaultRoot,
+			dependents: []string{
+				"Seeder.ChrootSeedersDir",
+			},
+		},
+		{
+			key:        "matrixOS.ConfRoot",
+			defaultVal: c.sp.confRoot,
+			rootify:    true,
+			dependents: []string{
+				"Ostree.GpgOfficialPublicKey",
+				"Imager.HooksDir",
+				"Imager.TestsDir",
+			},
+		},
+		{
+			key:        "matrixOS.ArtifactsRoot",
+			defaultVal: c.sp.artifactsRoot,
+			rootify:    true,
+			dependents: []string{
+				"Ostree.DevGpgHomeDir",
+				"Seeder.BinpkgsDir",
+				"Seeder.DownloadsDir",
+				"Seeder.DistfilesDir",
+				"Seeder.GpgKeysDir",
+				"Seeder.PortageReposDir",
+				"Imager.ImagesDir",
+				"Imager.MountDir",
+			},
+		},
+	}
+	for _, spec := range rootSpecs {
+		if err := c.loadRootConfig(fullPath, spec); err != nil {
+			return err
+		}
 	}
 
-	if err := c.loadDefaultRootConfigs(fullPath); err != nil {
-		return err
-	}
-
-	if err := c.loadConfRootConfigs(fullPath); err != nil {
-		return err
-	}
-
-	if err := c.loadArtifactsRootConfigs(fullPath); err != nil {
-		return err
-	}
-
-	if err := c.loadPrivateRepoConfigs(); err != nil {
-		return err
-	}
+	c.loadPrivateRepoConfigs()
 
 	return nil
 }
