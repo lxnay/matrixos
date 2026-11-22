@@ -196,7 +196,7 @@ func (s *SystemdBootBootloader) Install() error {
 // ConfigureMemtest writes a systemd-boot Type-1 loader entry for the
 // memtest86+ EFI binary already installed by InstallMemtest at
 // <esp>/<RelativeEfiBootPath>/memtest86plus.efi.
-func (s *SystemdBootBootloader) ConfigureMemtest(memtestBin string) error {
+func (s *SystemdBootBootloader) ConfigureMemtest() error {
 	im := s.im
 
 	if im.efifsMount == "" {

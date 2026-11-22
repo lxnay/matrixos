@@ -18,8 +18,6 @@ type ParallelSeedOptions struct {
 	ParamsByName map[string]*SeederParams
 	// Parallelism is the maximum number of concurrent seeder builds.
 	Parallelism int
-	// Verbose enables verbose mode for created seeder instances.
-	Verbose bool
 	// ChrootDir overrides the chroot directory for all seeders.
 	// When empty, each seeder's PreferredChrootDir from params is used.
 	ChrootDir string
@@ -308,9 +306,8 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 
 				// Create an isolated ISeeder for this worker.
 				sopts := &NewSeederOptions{
-					Verbose: wp.opts.Verbose,
-					Stdout:  wp.opts.NewStdoutWriter(fmt.Sprintf("seeds:%s", seederName)),
-					Stderr:  wp.opts.NewStderrWriter(fmt.Sprintf("seeds:%s", seederName)),
+					Stdout: wp.opts.NewStdoutWriter(fmt.Sprintf("seeds:%s", seederName)),
+					Stderr: wp.opts.NewStderrWriter(fmt.Sprintf("seeds:%s", seederName)),
 				}
 				workerSD, err := wp.opts.NewSeeder(sopts)
 				if err != nil {

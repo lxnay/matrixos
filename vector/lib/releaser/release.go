@@ -52,7 +52,6 @@ type NewReleaserOptions struct {
 	ChrootDir string // source chroot directory
 	ImageDir  string // destination image directory
 	Ref       string // ostree ref (branch) to operate on
-	Verbose   bool   // show detailed output
 }
 
 // IRelease defines the interface for release operations.
@@ -89,15 +88,9 @@ type Releaser struct {
 	chrootDir string // source chroot directory
 	imageDir  string // destination image directory
 	ref       string // ostree ref (branch) to operate on
-	verbose   bool   // show detailed output
 
 	// QA validation instance.
 	qa *validation.QA
-
-	// trackedMounts records every mount point created by this Releaser
-	// so that Cleanup can attempt to unmount them all on failure or signal.
-	trackedMountsMu sync.Mutex
-	trackedMounts   []string
 }
 
 // NewReleaser creates a new Releaser instance.
@@ -131,9 +124,11 @@ func NewReleaser(cfg config.IConfig, ot ostree.IOstree, opts *NewReleaserOptions
 		chrootDir:      opts.ChrootDir,
 		imageDir:       opts.ImageDir,
 		ref:            opts.Ref,
-		verbose:        opts.Verbose,
 	}, nil
 }
+
+// Cleanup releases any resources held by this Releaser instance.
+func (r *Releaser) Cleanup() {}
 
 // Build runs the full release pipeline for a single branch.
 // The full branch name (with -full suffix) is computed internally via

@@ -158,7 +158,7 @@ func (c *SeedsCommand) updateStdWriters(sd seeder.ISeeder, name string) {
 func (c *SeedsCommand) runSeeds() error {
 	sd, err := newSeeder(
 		c.cfg,
-		&seeder.NewSeederOptions{Verbose: c.verbose},
+		&seeder.NewSeederOptions{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize seeder: %w", err)
@@ -271,7 +271,6 @@ func (c *SeedsCommand) runSeeds() error {
 		Seeders:      seeders,
 		ParamsByName: paramsByName,
 		Parallelism:  parallelism,
-		Verbose:      c.verbose,
 		ChrootDir:    c.chrootDir,
 		Resume:       c.resume,
 		Stage3File:   c.stage3File,
@@ -400,9 +399,8 @@ func (c *SeedsCommand) runPostBuild(seeders []seeder.SeederInfo, paramsByName ma
 		c.Printf("  [%s] Running post-build in %s ...\n", info.Name, chrootDir)
 
 		sopts := &seeder.NewSeederOptions{
-			Verbose: c.verbose,
-			Stdout:  c.UI.NewStdoutWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
-			Stderr:  c.UI.NewStderrWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
+			Stdout: c.UI.NewStdoutWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
+			Stderr: c.UI.NewStderrWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
 		}
 		postSD, err := newSeeder(c.cfg, sopts)
 		if err != nil {
@@ -433,7 +431,7 @@ func (c *SeedsCommand) runPostBuild(seeders []seeder.SeederInfo, paramsByName ma
 func (c *SeedsCommand) parseSeedersParams(seeders []seeder.SeederInfo) (map[string]*seeder.SeederParams, error) {
 	paramsByName := make(map[string]*seeder.SeederParams, len(seeders))
 	for _, info := range seeders {
-		opts := &seeder.NewSeederOptions{Verbose: c.verbose}
+		opts := &seeder.NewSeederOptions{}
 		sd, err := newSeeder(c.cfg, opts)
 		if err != nil {
 			return nil, fmt.Errorf("[%s] failed to create seeder: %w", info.Name, err)

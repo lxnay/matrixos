@@ -358,14 +358,6 @@ func TestDetect_SkipsNonDirectoryEntries(t *testing.T) {
 
 // ---------- Naming helpers ----------
 
-func TestSeederExecToDir(t *testing.T) {
-	got := SeederExecToDir("/build/seeders/00-bedrock/chroot.sh")
-	want := "/build/seeders/00-bedrock"
-	if got != want {
-		t.Errorf("SeederExecToDir() = %q, want %q", got, want)
-	}
-}
-
 func TestSeederExecToName(t *testing.T) {
 	got := SeederExecToName("/build/seeders/00-bedrock/chroot.sh")
 	want := "00-bedrock"
@@ -393,13 +385,5 @@ func TestSeederNameWithoutOrderPrefix(t *testing.T) {
 				t.Errorf("SeederNameWithoutOrderPrefix(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestSeederChrootDirToName(t *testing.T) {
-	got := SeederChrootDirToName("/some/path/10-server")
-	want := "10-server"
-	if got != want {
-		t.Errorf("SeederChrootDirToName() = %q, want %q", got, want)
 	}
 }

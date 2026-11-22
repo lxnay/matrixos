@@ -146,7 +146,6 @@ func (c *ReleaseCommand) runRelease() error {
 		ChrootDir: c.chrootDir,
 		ImageDir:  c.imageDir,
 		Ref:       ref,
-		Verbose:   c.verbose,
 	}
 	rel, err := releaser.NewReleaser(c.cfg, c.ot, opts)
 	if err != nil {

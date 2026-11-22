@@ -30,7 +30,7 @@ type Bootloader interface {
 
 	// ConfigureMemtest sets up the memtest86+ EFI binary in the image
 	// if available on the host.
-	ConfigureMemtest(memtestBin string) error
+	ConfigureMemtest() error
 
 	// ConfigureVmtest sets up VM test boot configuration.
 	ConfigureVmtest() error
@@ -54,11 +54,6 @@ func (im *Imager) GenerateBootArgs() ([]string, error) {
 // SetupVmtestConfig delegates to the configured Bootloader.ConfigureVmtest().
 func (im *Imager) SetupVmtestConfig() error {
 	return im.bootloader.ConfigureVmtest()
-}
-
-// GetBootloader returns the configured Bootloader implementation.
-func (im *Imager) GetBootloader() Bootloader {
-	return im.bootloader
 }
 
 func (im *Imager) InstallSecurebootCerts() error {
@@ -159,7 +154,7 @@ func (im *Imager) InstallMemtest() error {
 		return fmt.Errorf("failed to copy memtest86+ EFI binary: %w", err)
 	}
 
-	return im.bootloader.ConfigureMemtest(memtestBin)
+	return im.bootloader.ConfigureMemtest()
 }
 
 func (im *Imager) GenerateKernelBootArgs() ([]string, error) {

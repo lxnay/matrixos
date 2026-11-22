@@ -228,7 +228,7 @@ func TestNewSeeder_NilOpts(t *testing.T) {
 
 func TestNewSeeder_DefaultWriters(t *testing.T) {
 	cfg := &config.MockConfig{Items: map[string][]string{}}
-	s, err := NewSeeder(cfg, &NewSeederOptions{Verbose: true})
+	s, err := NewSeeder(cfg, &NewSeederOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -237,9 +237,6 @@ func TestNewSeeder_DefaultWriters(t *testing.T) {
 	}
 	if s.stderr != os.Stderr {
 		t.Error("expected default stderr")
-	}
-	if !s.verbose {
-		t.Error("expected verbose to be true")
 	}
 }
 

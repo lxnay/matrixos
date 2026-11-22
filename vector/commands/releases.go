@@ -74,7 +74,7 @@ func (c *ReleasesCommand) Init(args []string) error {
 	c.qa = qa
 
 	sd, err := seeder.NewSeeder(
-		c.cfg, &seeder.NewSeederOptions{Verbose: c.verbose},
+		c.cfg, &seeder.NewSeederOptions{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize seeder: %w", err)
@@ -231,7 +231,6 @@ func (c *ReleasesCommand) runReleases() error {
 		Seeders:      seeders,
 		Parallelism:  parallelism,
 		ReleaseStage: c.releaseStage,
-		Verbose:      c.verbose,
 		Config:       c.cfg,
 		Ostree:       c.ot,
 		NewStdoutWriter: func(label string) io.Writer {

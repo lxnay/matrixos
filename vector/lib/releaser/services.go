@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/runner"
 )
 
 // validServiceName matches systemd unit names and targets.
@@ -321,13 +321,12 @@ func (r *Releaser) ReleaseHook() error {
 	}
 
 	r.Print("Running release hook %s ...\n", hookPath)
-	cmd := exec.Command(hookPath)
 
 	env := os.Environ()
 	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
 	env = config.FilterEnvKey(env, "REF")
 	env = config.FilterEnvKey(env, "DEFAULT_PRIVATE_GIT_REPO_PATH")
-	cmd.Env = append(
+	env = append(
 		env,
 		"REF="+ref,
 		"CHROOT_DIR="+r.imageDir,
@@ -336,7 +335,14 @@ func (r *Releaser) ReleaseHook() error {
 		"RELEASER_DEFAULT_USERNAME="+defaultUsername,
 		"RELEASER_OSNAME="+OSName,
 	)
-	cmd.Stdout = r.stdout
-	cmd.Stderr = r.stderr
-	return cmd.Run()
+	run := r.runner
+	if run == nil {
+		run = runner.Run
+	}
+	return run(&runner.Cmd{
+		Name:   hookPath,
+		Env:    env,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
+	})
 }

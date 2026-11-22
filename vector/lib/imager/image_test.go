@@ -151,22 +151,18 @@ func TestImagePrintMethods(t *testing.T) {
 	}
 }
 
-// --- trackMounts Tests ---
+// --- trackMount Tests ---
 
-func TestImageTrackMounts(t *testing.T) {
+func TestImageTrackMount(t *testing.T) {
 	im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
 	var stdout, stderr bytes.Buffer
 	im.SetStdout(&stdout)
 	im.SetStderr(&stderr)
 
-	im.trackMounts([]string{"/mnt/a", "/mnt/b", "/mnt/c"})
-	if len(im.trackedMounts) != 3 {
-		t.Errorf("expected 3 mounts, got %d", len(im.trackedMounts))
-	}
-
-	im.trackMount("/mnt/d")
-	if len(im.trackedMounts) != 4 {
-		t.Errorf("expected 4 mounts, got %d", len(im.trackedMounts))
+	im.trackMount("/mnt/a")
+	im.trackMount("/mnt/b")
+	if len(im.trackedMounts) != 2 {
+		t.Errorf("expected 2 mounts, got %d", len(im.trackedMounts))
 	}
 }
 

@@ -26,8 +26,6 @@ type ParallelReleaseOptions struct {
 	Parallelism int
 	// ReleaseStage is the release stage (dev or prod).
 	ReleaseStage string
-	// Verbose enables verbose mode.
-	Verbose bool
 
 	// Config is the application configuration.
 	Config config.IConfig
@@ -219,8 +217,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 
 	// Create the releaser instance.
 	relOpts := &NewReleaserOptions{
-		Ref:     branch,
-		Verbose: opts.Verbose,
+		Ref: branch,
 	}
 	rel, err := NewReleaser(opts.Config, workerOt, relOpts)
 	if err != nil {

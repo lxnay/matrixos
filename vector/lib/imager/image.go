@@ -131,13 +131,6 @@ func (im *Imager) trackMount(mnt string) {
 	im.trackedMounts = append(im.trackedMounts, mnt)
 }
 
-// trackMounts appends multiple mount points to the tracked list.
-func (im *Imager) trackMounts(mnts []string) {
-	im.trackedMountsMu.Lock()
-	defer im.trackedMountsMu.Unlock()
-	im.trackedMounts = append(im.trackedMounts, mnts...)
-}
-
 // trackTmpDir appends a single temporary directory to the tracked list.
 func (im *Imager) trackTmpDir(tmpDir string) {
 	im.trackedTmpDirsMu.Lock()

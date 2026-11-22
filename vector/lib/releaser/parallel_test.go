@@ -48,7 +48,6 @@ func testParallelOpts(
 		Seeders:      seeders,
 		Parallelism:  2,
 		ReleaseStage: "dev",
-		Verbose:      false,
 		Config:       cfg,
 		Ostree:       ot,
 		NewStdoutWriter: func(label string) io.Writer {

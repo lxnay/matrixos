@@ -8,15 +8,14 @@ import (
 
 // MockBootloader implements Bootloader for testing.
 type MockBootloader struct {
-	ConfigureCalled         bool
-	ConfigureErr            error
-	InstallCalled           bool
-	InstallErr              error
-	ConfigureMemtestCalled  bool
-	ConfigureMemtestBin     string
-	ConfigureMemtestErr     error
-	ConfigureVmtestCalled   bool
-	ConfigureVmtestErr      error
+	ConfigureCalled        bool
+	ConfigureErr           error
+	InstallCalled          bool
+	InstallErr             error
+	ConfigureMemtestCalled bool
+	ConfigureMemtestErr    error
+	ConfigureVmtestCalled  bool
+	ConfigureVmtestErr     error
 }
 
 func (m *MockBootloader) Configure() error {
@@ -33,9 +32,8 @@ func (m *MockBootloader) BootArgs() ([]string, error) {
 	return []string{}, nil
 }
 
-func (m *MockBootloader) ConfigureMemtest(memtestBin string) error {
+func (m *MockBootloader) ConfigureMemtest() error {
 	m.ConfigureMemtestCalled = true
-	m.ConfigureMemtestBin = memtestBin
 	return m.ConfigureMemtestErr
 }
 

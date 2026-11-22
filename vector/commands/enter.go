@@ -120,10 +120,9 @@ func (c *EnterCommand) Run() error {
 // run implements the enter workflow.
 func (c *EnterCommand) run() error {
 	opts := seeder.NewSeederOptions{
-		Verbose: false,
-		Stdin:   os.Stdin,
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
 	}
 	sd, err := newSeeder(c.cfg, &opts)
 	if err != nil {

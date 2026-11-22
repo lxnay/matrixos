@@ -34,10 +34,9 @@ type SeederInfo struct {
 
 // NewSeederOptions contains options for creating a new Seeder.
 type NewSeederOptions struct {
-	Verbose bool // show detailed output
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Stderr  io.Writer
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 // SeedOptions contains options for running a seeder.
@@ -134,8 +133,6 @@ type Seeder struct {
 	stdin        io.Reader
 	stdout       io.Writer
 	stderr       io.Writer
-
-	verbose bool
 }
 
 // NewSeeder creates a new Seeder instance.
@@ -165,7 +162,6 @@ func NewSeeder(cfg config.IConfig, opts *NewSeederOptions) (*Seeder, error) {
 		stdin:        stdin,
 		stdout:       stdout,
 		stderr:       stderr,
-		verbose:      opts.Verbose,
 	}, nil
 }
 
