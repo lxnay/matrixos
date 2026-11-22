@@ -341,8 +341,7 @@ func (c *IniConfig) generateParent(ini IniFile) error {
 		return err
 	}
 
-	c.loadAndGenerateConfig(parentPath)
-	return nil
+	return c.loadAndGenerateConfig(parentPath)
 }
 
 type rootConfigSpec struct {
@@ -424,9 +423,18 @@ func (c *IniConfig) Load() error {
 		return err
 	}
 
-	c.generateParent(ini)
-	c.generateConfig(ini)
-	if err := c.generateSubConfigs(fullPath); err != nil {
+	// Build into a fresh staging map so reloads do not duplicate history
+	// slices and errors never leave partial state in c.cfg.
+	staging := &IniConfig{
+		sp:  c.sp,
+		cfg: make(map[string][]string),
+	}
+
+	if err := staging.generateParent(ini); err != nil {
+		return err
+	}
+	staging.generateConfig(ini)
+	if err := staging.generateSubConfigs(fullPath); err != nil {
 		return err
 	}
 
@@ -482,12 +490,13 @@ func (c *IniConfig) Load() error {
 		},
 	}
 	for _, spec := range rootSpecs {
-		if err := c.loadRootConfig(fullPath, spec); err != nil {
+		if err := staging.loadRootConfig(fullPath, spec); err != nil {
 			return err
 		}
 	}
 
-	c.loadPrivateRepoConfigs()
+	staging.loadPrivateRepoConfigs()
+	c.cfg = staging.cfg
 
 	return nil
 }
