@@ -3,7 +3,6 @@ package commands
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -14,55 +13,21 @@ import (
 // testSetupOSRunner creates a setupOSRunner with sensible defaults for testing.
 func testSetupOSRunner() *setupOSRunner {
 	return &setupOSRunner{
-		execCommand: func(name string, args ...string) cmdRunner {
-			return &mockCmdRunner{}
-		},
-		readFile: func(path string) ([]byte, error) {
-			return nil, fmt.Errorf("readFile not mocked for %s", path)
-		},
-		writeFile: func(path string, data []byte, perm os.FileMode) error {
-			return nil
-		},
-		appendFile: func(path string, data []byte) error {
-			return nil
-		},
-		mkdirAll: func(path string, perm os.FileMode) error {
-			return nil
-		},
+		osRunner: testOSRunner(""),
 		mkdirTemp: func(dir, pattern string) (string, error) {
 			return "/tmp/mock-setupos-win-test", nil
 		},
-		stat: func(path string) (os.FileInfo, error) {
-			return nil, fmt.Errorf("stat not mocked for %s", path)
-		},
-		removeFile: func(path string) error { return nil },
-		fileExists: func(path string) bool { return false },
-		copyFile:   func(src, dst string) error { return nil },
-		chmod:      func(path string, mode os.FileMode) error { return nil },
-		chown:      func(path string, uid, gid int) error { return nil },
-		getMountDevice: func(mnt string) (string, error) {
-			return "/dev/sda1", nil
-		},
-		getPartitionNumber: func(device string) (string, error) {
-			return "1", nil
-		},
-		getPartitionLabel: func(device string) (string, error) {
-			return "EFI", nil
-		},
-		getBlockDevice: func(device string) (string, error) {
-			return "/dev/sda", nil
-		},
-		listBlockDevices: func(fields string) ([]string, error) {
-			return nil, nil
-		},
-		getBlkidValue: func(device, tag string) (string, error) {
-			return "test-uuid", nil
-		},
-		getEuid:        func() int { return 0 },
-		getCurrentUser: func() string { return "root" },
-		stdin:          strings.NewReader(""),
-		stdout:         io.Discard,
-		stderr:         io.Discard,
+		fileExists:         func(path string) bool { return false },
+		chmod:              func(path string, mode os.FileMode) error { return nil },
+		chown:              func(path string, uid, gid int) error { return nil },
+		getMountDevice:     func(mnt string) (string, error) { return "/dev/sda1", nil },
+		getPartitionNumber: func(device string) (string, error) { return "1", nil },
+		getPartitionLabel:  func(device string) (string, error) { return "EFI", nil },
+		getBlockDevice:     func(device string) (string, error) { return "/dev/sda", nil },
+		listBlockDevices:   func(fields string) ([]string, error) { return nil, nil },
+		getBlkidValue:      func(device, tag string) (string, error) { return "test-uuid", nil },
+		getEuid:            func() int { return 0 },
+		getCurrentUser:     func() string { return "root" },
 	}
 }
 

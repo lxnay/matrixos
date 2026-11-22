@@ -3,7 +3,6 @@ package commands
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,77 +17,32 @@ const maxLuksPasswordAttempts = 5
 
 // setupOSRunner abstracts OS-level operations so they can be replaced in tests.
 type setupOSRunner struct {
-	// execCommand wraps exec.Command for spawning processes.
-	execCommand func(name string, args ...string) cmdRunner
-	// readFile reads a file's content.
-	readFile func(path string) ([]byte, error)
-	// writeFile writes data to a file with the given permissions.
-	writeFile func(path string, data []byte, perm os.FileMode) error
-	// appendFile appends data to a file.
-	appendFile func(path string, data []byte) error
-	// mkdirAll creates directories recursively.
-	mkdirAll func(path string, perm os.FileMode) error
-	// mkdirTemp creates a unique temporary directory.
-	mkdirTemp func(dir, pattern string) (string, error)
-	// stat returns file info for a path.
-	stat func(path string) (os.FileInfo, error)
-	// removeFile removes a file.
-	removeFile func(path string) error
-	// fileExists returns true if a file exists.
-	fileExists func(path string) bool
-	// copyFile copies src to dst.
-	copyFile func(src, dst string) error
-	// chmod changes file permissions.
-	chmod func(path string, mode os.FileMode) error
-	// chown changes file owner.
-	chown func(path string, uid, gid int) error
-	// getMountDevice returns the device for a mountpoint.
-	getMountDevice func(mnt string) (string, error)
-	// getPartitionNumber returns the partition number.
+	osRunner
+	mkdirTemp          func(dir, pattern string) (string, error)
+	fileExists         func(path string) bool
+	chmod              func(path string, mode os.FileMode) error
+	chown              func(path string, uid, gid int) error
+	getMountDevice     func(mnt string) (string, error)
 	getPartitionNumber func(device string) (string, error)
-	// getPartitionLabel returns the partition label.
-	getPartitionLabel func(device string) (string, error)
-	// getBlockDevice returns the block device for a partition.
-	getBlockDevice func(device string) (string, error)
-	// listBlockDevices lists block devices with given output fields.
-	listBlockDevices func(fields string) ([]string, error)
-	// getBlkidValue returns a blkid attribute value for a device.
-	getBlkidValue func(device, tag string) (string, error)
-	// getEuid returns the effective user ID.
-	getEuid func() int
-	// getCurrentUser returns the current username.
-	getCurrentUser func() string
-	// stdin provides user input for prompts.
-	stdin io.Reader
-	// stdout is the writer for info output.
-	stdout io.Writer
-	// stderr is the writer for error/warning output.
-	stderr io.Writer
-	// glob returns paths matching a pattern.
-	glob func(pattern string) ([]string, error)
+	getPartitionLabel  func(device string) (string, error)
+	getBlockDevice     func(device string) (string, error)
+	listBlockDevices   func(fields string) ([]string, error)
+	getBlkidValue      func(device, tag string) (string, error)
+	getEuid            func() int
+	getCurrentUser     func() string
+	glob               func(pattern string) ([]string, error)
 }
 
 func defaultSetupOSRunner() *setupOSRunner {
 	return &setupOSRunner{
-		execCommand: newRealCmdRunner,
-		readFile:    os.ReadFile,
-		writeFile:   os.WriteFile,
-		appendFile:  appendBytesToFile,
-		mkdirAll:    os.MkdirAll,
-		mkdirTemp:   os.MkdirTemp,
-		stat:        os.Stat,
-		removeFile:  os.Remove,
+		osRunner:  defaultOSRunner(),
+		mkdirTemp: os.MkdirTemp,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
 		},
-		copyFile: filesystems.CopyFile,
-		chmod: func(path string, mode os.FileMode) error {
-			return os.Chmod(path, mode)
-		},
-		chown: func(path string, uid, gid int) error {
-			return os.Chown(path, uid, gid)
-		},
+		chmod:              os.Chmod,
+		chown:              os.Chown,
 		getMountDevice:     filesystems.MountpointToDevice,
 		getPartitionNumber: filesystems.PartitionNumber,
 		getPartitionLabel:  filesystems.PartitionLabel,
@@ -118,9 +72,6 @@ func defaultSetupOSRunner() *setupOSRunner {
 		},
 		getEuid:        getEuid,
 		getCurrentUser: func() string { return os.Getenv("USER") },
-		stdin:          os.Stdin,
-		stdout:         os.Stdout,
-		stderr:         os.Stderr,
 		glob:           filepath.Glob,
 	}
 }

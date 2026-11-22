@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"matrixos/vector/lib/config"
+	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
 )
 
@@ -400,4 +401,38 @@ func (r *realCmdRunner) SetStderr(w io.Writer)   { r.cmd.Stderr = w }
 
 func newRealCmdRunner(name string, args ...string) cmdRunner {
 	return &realCmdRunner{cmd: execCommand(name, args...)}
+}
+
+// osRunner holds the common OS-level hooks embedded by interactive command
+// runners (jailbreakRunner, setupOSRunner) so they can be mocked in tests.
+type osRunner struct {
+	execCommand func(name string, args ...string) cmdRunner
+	readFile    func(path string) ([]byte, error)
+	writeFile   func(path string, data []byte, perm os.FileMode) error
+	appendFile  func(path string, data []byte) error
+	mkdirAll    func(path string, perm os.FileMode) error
+	stat        func(path string) (os.FileInfo, error)
+	lstat       func(path string) (os.FileInfo, error)
+	removeFile  func(path string) error
+	copyFile    func(src, dst string) error
+	stdin       io.Reader
+	stdout      io.Writer
+	stderr      io.Writer
+}
+
+func defaultOSRunner() osRunner {
+	return osRunner{
+		execCommand: newRealCmdRunner,
+		readFile:    os.ReadFile,
+		writeFile:   os.WriteFile,
+		appendFile:  appendBytesToFile,
+		mkdirAll:    os.MkdirAll,
+		stat:        os.Stat,
+		lstat:       os.Lstat,
+		removeFile:  os.Remove,
+		copyFile:    filesystems.CopyFile,
+		stdin:       os.Stdin,
+		stdout:      os.Stdout,
+		stderr:      os.Stderr,
+	}
 }

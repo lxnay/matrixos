@@ -54,39 +54,41 @@ func newTestJailbreakCommandWithArgs(
 	return cmd, nil
 }
 
-// testRunner creates a jailbreakRunner with sensible defaults for testing.
-// The caller can override individual fields after creation.
-func testRunner() *jailbreakRunner {
-	return &jailbreakRunner{
+// testOSRunner returns an osRunner with safe mock defaults for tests.
+// lstat is intentionally nil so tests overriding stat flow through to stat.
+func testOSRunner(stdin string) osRunner {
+	return osRunner{
 		execCommand: func(name string, args ...string) cmdRunner {
 			return &mockCmdRunner{}
 		},
 		readFile: func(path string) ([]byte, error) {
 			return nil, fmt.Errorf("readFile not mocked for %s", path)
 		},
-		writeFile: func(path string, data []byte, perm os.FileMode) error {
-			return nil
-		},
-		appendFile: func(path string, data []byte) error {
-			return nil
-		},
-		mkdirAll: func(path string, perm os.FileMode) error {
-			return nil
-		},
+		writeFile:  func(path string, data []byte, perm os.FileMode) error { return nil },
+		appendFile: func(path string, data []byte) error { return nil },
+		mkdirAll:   func(path string, perm os.FileMode) error { return nil },
 		stat: func(path string) (os.FileInfo, error) {
 			return nil, fmt.Errorf("stat not mocked for %s", path)
 		},
 		removeFile: func(path string) error { return nil },
-		removeAll:  func(path string) error { return nil },
-		rename:     func(src, dst string) error { return nil },
 		copyFile:   func(src, dst string) error { return nil },
+		stdin:      strings.NewReader(stdin),
+		stdout:     io.Discard,
+		stderr:     io.Discard,
+	}
+}
+
+// testRunner creates a jailbreakRunner with sensible defaults for testing.
+// The caller can override individual fields after creation.
+func testRunner() *jailbreakRunner {
+	return &jailbreakRunner{
+		osRunner:  testOSRunner("DESTROYALL\n"),
+		removeAll: func(path string) error { return nil },
+		rename:    func(src, dst string) error { return nil },
 		getMountInfo: func(mnt string) (*mountInfo, error) {
 			return &mountInfo{UUID: "test-uuid", FSType: "ext4"}, nil
 		},
 		remountRW: func(mnt string) error { return nil },
-		stdin:     strings.NewReader("DESTROYALL\n"),
-		stdout:    io.Discard,
-		stderr:    io.Discard,
 	}
 }
 

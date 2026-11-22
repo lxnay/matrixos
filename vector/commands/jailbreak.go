@@ -3,7 +3,6 @@ package commands
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,58 +19,20 @@ type mountInfo struct {
 
 // jailbreakRunner abstracts OS-level operations so they can be replaced in tests.
 type jailbreakRunner struct {
-	// execCommand wraps exec.Command for spawning processes.
-	execCommand func(name string, args ...string) cmdRunner
-	// readFile reads a file's content.
-	readFile func(path string) ([]byte, error)
-	// writeFile writes data to a file with the given permissions.
-	writeFile func(path string, data []byte, perm os.FileMode) error
-	// appendFile appends data to a file.
-	appendFile func(path string, data []byte) error
-	// mkdirAll creates directories recursively.
-	mkdirAll func(path string, perm os.FileMode) error
-	// stat returns file info for a path.
-	stat func(path string) (os.FileInfo, error)
-	// lstat returns file info for a path without following symlinks.
-	lstat func(path string) (os.FileInfo, error)
-	// removeFile removes a file.
-	removeFile func(path string) error
-	// remove recursively removes a path.
-	removeAll func(path string) error
-	// rename renames a file.
-	rename func(src, dst string) error
-	// copyFile copies src to dst.
-	copyFile func(src, dst string) error
-	// getMountInfo returns UUID and filesystem type for a mountpoint.
+	osRunner
+	removeAll    func(path string) error
+	rename       func(src, dst string) error
 	getMountInfo func(mnt string) (*mountInfo, error)
-	// remountRW remounts a filesystem read-write.
-	remountRW func(mnt string) error
-	// stdin provides user input for confirmation prompts.
-	stdin io.Reader
-	// stdout is the writer for info output.
-	stdout io.Writer
-	// stderr is the writer for error/warning output.
-	stderr io.Writer
+	remountRW    func(mnt string) error
 }
 
 func defaultRunner() *jailbreakRunner {
 	return &jailbreakRunner{
-		execCommand:  newRealCmdRunner,
-		readFile:     os.ReadFile,
-		writeFile:    os.WriteFile,
-		appendFile:   appendBytesToFile,
-		mkdirAll:     os.MkdirAll,
-		stat:         os.Stat,
-		lstat:        os.Lstat,
-		removeFile:   os.Remove,
+		osRunner:     defaultOSRunner(),
 		removeAll:    os.RemoveAll,
 		rename:       filesystems.Move,
-		copyFile:     filesystems.CopyFile,
 		getMountInfo: getMountInfoFromSystem,
 		remountRW:    filesystems.RemountReadWrite,
-		stdin:        os.Stdin,
-		stdout:       os.Stdout,
-		stderr:       os.Stderr,
 	}
 }
 
