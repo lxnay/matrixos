@@ -47,7 +47,8 @@ type ParallelReleaseOptions struct {
 	// ShortRef returns a short display name for a branch ref.
 	ShortRef func(ref string) string
 	// OnReleaseDone is called when a release completes successfully.
-	// It receives the branch name.  Must be safe for concurrent use.
+	// It receives the branch name.  Serialized internally — the callback
+	// does not need its own locking.
 	OnReleaseDone func(branch string) error
 }
 
@@ -55,14 +56,21 @@ type ParallelReleaseOptions struct {
 // semaphore-based worker pool.  Unlike seed parallelism, releases
 // have no inter-dependencies so all seeders are immediately eligible.
 func ParallelRelease(ctx context.Context, opts *ParallelReleaseOptions) error {
+	if opts.Parallelism < 1 {
+		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
+	}
 	return runReleaseWorkerPool(ctx, opts)
 }
 
 // runReleaseWorkerPool spawns a fixed pool of worker goroutines that
 // pull seeders from a work channel.
 func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) error {
+	poolCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var firstErr error
 	var errMu sync.Mutex
+	var onReleaseDoneMu sync.Mutex
 
 	setError := func(err error) {
 		errMu.Lock()
@@ -70,6 +78,7 @@ func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) err
 			firstErr = err
 		}
 		errMu.Unlock()
+		cancel()
 	}
 
 	work := make(chan seeder.SeederInfo, len(opts.Seeders))
@@ -83,7 +92,7 @@ func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) err
 		wg.Go(func() {
 			for {
 				select {
-				case <-ctx.Done():
+				case <-poolCtx.Done():
 					return
 				case info, ok := <-work:
 					if !ok {
@@ -98,7 +107,7 @@ func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) err
 						return
 					}
 
-					err := releaseWorker(ctx, opts, info)
+					err := releaseWorker(poolCtx, opts, info, &onReleaseDoneMu)
 					if err != nil {
 						setError(fmt.Errorf(
 							"seeder %s release failed: %w",
@@ -116,7 +125,7 @@ func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) err
 }
 
 // releaseWorker processes a single seeder release.
-func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seeder.SeederInfo) error {
+func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seeder.SeederInfo, onReleaseDoneMu *sync.Mutex) error {
 	seederName := info.Name
 	branchShortname := seeder.SeederNameWithoutOrderPrefix(
 		seederName,
@@ -273,9 +282,12 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 		)
 
 		if opts.OnReleaseDone != nil {
-			if err := opts.OnReleaseDone(branch); err != nil {
+			onReleaseDoneMu.Lock()
+			onDoneErr := opts.OnReleaseDone(branch)
+			onReleaseDoneMu.Unlock()
+			if onDoneErr != nil {
 				return fmt.Errorf(
-					"failed to record built release: %w", err,
+					"failed to record built release: %w", onDoneErr,
 				)
 			}
 		}

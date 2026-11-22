@@ -1,6 +1,8 @@
 package releaser
 
 import (
+	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/seeder"
 )
 
 type trackingOstree struct {
@@ -134,4 +137,82 @@ func TestReleaser_ConcurrentOstreeRepoMutationsSerialized(t *testing.T) {
 	if got := initCalls.Load(); got != 1 {
 		t.Errorf("InitRepo called %d times across concurrent workers, want 1", got)
 	}
+}
+
+func TestParallelRelease_NonPositiveParallelismReturnsError(t *testing.T) {
+	opts := testParallelOpts([]seeder.SeederInfo{{Name: "00-bedrock"}}, t.TempDir())
+	opts.Parallelism = 0
+
+	if err := ParallelRelease(context.Background(), opts); err == nil {
+		t.Fatal("expected error for Parallelism <= 0, got nil")
+	}
+}
+
+func TestParallelRelease_CancelsInFlightWorkersOnFirstError(t *testing.T) {
+	tmp := t.TempDir()
+	locksDir := filepath.Join(tmp, "locks")
+	slowChroot := filepath.Join(tmp, "slow-chroot")
+	if err := os.MkdirAll(slowChroot, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := testParallelOpts([]seeder.SeederInfo{
+		{Name: "00-fail"},
+		{Name: "01-slow"},
+	}, slowChroot)
+	opts.Parallelism = 2
+	opts.Config = &config.MockConfig{
+		Items: map[string][]string{
+			"Ostree.Sysroot":              {"/sysroot"},
+			"Ostree.FullBranchSuffix":     {"full"},
+			"matrixOS.OsName":             {"matrixos"},
+			"matrixOS.Arch":               {"amd64"},
+			"matrixOS.PrivateGitRepoPath": {tmp},
+			"Releaser.LocksDir":           {locksDir},
+			"Releaser.LockWaitSeconds":    {"5"},
+		},
+	}
+
+	slowInFind := make(chan struct{})
+	failDone := make(chan struct{})
+
+	opts.FindChrootDir = func(info seeder.SeederInfo) (string, error) {
+		if info.Name == "01-slow" {
+			close(slowInFind)
+			<-failDone
+			time.Sleep(30 * time.Millisecond)
+			return slowChroot, nil
+		}
+		<-slowInFind
+		defer close(failDone)
+		return "", errors.New("find chroot boom")
+	}
+
+	var slowReachedBuild atomic.Bool
+	baseOt := opts.Ostree.(*ostree.MockOstree)
+	opts.Ostree = &buildDetectOstree{MockOstree: baseOt, buildTouched: &slowReachedBuild}
+
+	err := ParallelRelease(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected error from failing release worker")
+	}
+	if slowReachedBuild.Load() {
+		t.Fatal("in-flight sibling worker entered Build despite earlier failure (pool context not cancelled)")
+	}
+}
+
+type buildDetectOstree struct {
+	*ostree.MockOstree
+	buildTouched *atomic.Bool
+}
+
+func (b *buildDetectOstree) CloneForRef(ref string) (ostree.IOstree, error) {
+	c := *b.MockOstree
+	c.Ref_ = ref
+	return &buildDetectOstree{MockOstree: &c, buildTouched: b.buildTouched}, nil
+}
+
+func (b *buildDetectOstree) BranchToFull() (string, error) {
+	b.buildTouched.Store(true)
+	return "", errors.New("should not reach build")
 }
