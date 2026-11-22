@@ -156,44 +156,51 @@ func (o *Ostree) Deploy(sysroot string, bootArgs []string) error {
 		return err
 	}
 
-	ostreeCommit, err := o.lastCommitFromRepo(repoDir, ref)
-	if err != nil {
-		return fmt.Errorf("cannot get last ostree commit: %w", err)
-	}
-	o.Print(
-		"Last ostree commit for ref %s in %s is %s.\n",
-		ref, repoDir, ostreeCommit,
-	)
-
-	o.Print("Initializing ostree dir structure into %s ...\n", sysroot)
-	if err := o.ostreeRun("admin", "init-fs", sysroot); err != nil {
-		return err
-	}
-
 	osName, err := o.OsName()
 	if err != nil {
 		return err
 	}
 
-	o.Print("Initializing OS %s into %s...\n", osName, sysroot)
-	osInitArgs := []string{
-		"admin", "os-init",
-		osName,
-		"--sysroot=" + sysroot,
-	}
-	if err := o.ostreeRun(osInitArgs...); err != nil {
-		return err
-	}
-
 	sysrootRepo := filepath.Join(sysroot, "ostree", "repo")
-	o.Print("Pulling local ostree commit %s into %s ...\n", ostreeCommit, sysrootRepo)
-	pullArgs := []string{
-		"--repo=" + sysrootRepo,
-		"pull-local",
-		repoDir,
-		ostreeCommit,
-	}
-	if err := o.ostreeRun(pullArgs...); err != nil {
+	var ostreeCommit string
+	if err := func() error {
+		unlock := LockRepo(repoDir)
+		defer unlock()
+
+		var lerr error
+		ostreeCommit, lerr = o.lastCommitFromRepo(repoDir, ref)
+		if lerr != nil {
+			return fmt.Errorf("cannot get last ostree commit: %w", lerr)
+		}
+		o.Print(
+			"Last ostree commit for ref %s in %s is %s.\n",
+			ref, repoDir, ostreeCommit,
+		)
+
+		o.Print("Initializing ostree dir structure into %s ...\n", sysroot)
+		if err := o.ostreeRun("admin", "init-fs", sysroot); err != nil {
+			return err
+		}
+
+		o.Print("Initializing OS %s into %s...\n", osName, sysroot)
+		osInitArgs := []string{
+			"admin", "os-init",
+			osName,
+			"--sysroot=" + sysroot,
+		}
+		if err := o.ostreeRun(osInitArgs...); err != nil {
+			return err
+		}
+
+		o.Print("Pulling local ostree commit %s into %s ...\n", ostreeCommit, sysrootRepo)
+		pullArgs := []string{
+			"--repo=" + sysrootRepo,
+			"pull-local",
+			repoDir,
+			ostreeCommit,
+		}
+		return o.ostreeRun(pullArgs...)
+	}(); err != nil {
 		return err
 	}
 

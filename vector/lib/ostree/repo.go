@@ -19,7 +19,10 @@ var (
 // unlock function. This serializes ostree repository mutations (init, remote
 // setup, commit, prune, static-delta, summary) across concurrent workers.
 func LockRepo(repoDir string) func() {
-	key := filepath.Clean(repoDir)
+	key, err := filepath.Abs(repoDir)
+	if err != nil {
+		key = filepath.Clean(repoDir)
+	}
 	repoLocksMu.Lock()
 	mu, ok := repoLocks[key]
 	if !ok {
@@ -192,6 +195,8 @@ func (o *Ostree) LastCommit() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.lastCommitFromRepo(repoDir, o.ref)
 }
 
@@ -208,6 +213,8 @@ func (o *Ostree) Pull() error {
 	if err != nil {
 		return err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.pullFromRepo(repoDir, remote, ref)
 }
 
@@ -251,7 +258,7 @@ func (o *Ostree) GenerateStaticDelta() error {
 	if revOld != "" {
 		err := o.runCmd(
 			io.Discard,
-			o.stderr,
+			o.Stderr(),
 			o.verbose,
 			"--repo="+repoDir,
 			"rev-parse",
@@ -269,7 +276,7 @@ func (o *Ostree) GenerateStaticDelta() error {
 	if revOld != "" {
 		err := o.runCmd(
 			io.Discard,
-			o.stderr,
+			o.Stderr(),
 			o.verbose,
 			"show",
 			"--repo="+repoDir,
@@ -317,7 +324,14 @@ func (o *Ostree) UpdateSummary() error {
 		"--update",
 	}
 
-	gpgArgs, err := o.GpgArgs()
+	// Hold gpgMu across GpgArgs + summary signing so ostree's internal GPGME
+	// signing never races with concurrent gpg keyring/agent operations.
+	// Callers (e.g. Releaser.Release) hold LockRepo before UpdateSummary,
+	// preserving LockRepo -> gpgMu.
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+
+	gpgArgs, err := o.gpgArgsLocked()
 	if err != nil {
 		return err
 	}
@@ -353,6 +367,8 @@ func (o *Ostree) AddRemote() error {
 	if err != nil {
 		return err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.addRemoteForTarget(repoDir, "")
 }
 

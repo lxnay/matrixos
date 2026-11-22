@@ -24,14 +24,17 @@ func (o *Ostree) prepareVarHome(imageDir, homeName, varHomeName string) error {
 	symlinkTarget := "var/" + varHomeName
 
 	if homeInfo, err := os.Lstat(homeDir); err == nil && homeInfo.Mode()&os.ModeSymlink != 0 {
-		if info, err := os.Stat(varHomeDir); err == nil && info.IsDir() {
-			link, _ := os.Readlink(homeDir)
-			if strings.HasSuffix(link, symlinkTarget) {
-				o.Print("%s is a symlink and %s is a directory. All good.\n", homeDir, varHomeDir)
-				return nil
-			}
+		link, err := os.Readlink(homeDir)
+		if err != nil {
+			return fmt.Errorf("failed to read symlink %s: %w", homeDir, err)
+		}
+		if !strings.HasSuffix(link, symlinkTarget) {
 			o.PrintError("%s symlink points to an unexpected path: %s\n", homeDir, link)
 			return fmt.Errorf("home symlink invalid")
+		}
+		if info, err := os.Stat(varHomeDir); err == nil && info.IsDir() {
+			o.Print("%s is a symlink and %s is a directory. All good.\n", homeDir, varHomeDir)
+			return nil
 		}
 		if err := os.MkdirAll(varHomeDir, 0755); err != nil {
 			return fmt.Errorf("failed to create %v: %w", varHomeDir, err)
@@ -192,6 +195,13 @@ func (o *Ostree) prepareUsrLocal(imageDir string) error {
 }
 
 func (o *Ostree) PrepareFilesystemHierarchy(rootfs string) error {
+	if rootfs == "" {
+		return fmt.Errorf("missing rootfs parameter")
+	}
+	if err := filesystems.CheckDirIsRoot(rootfs); err != nil {
+		return err
+	}
+
 	marker := filepath.Join(rootfs, "var", ".matrixos-prepared")
 	if fileExists(marker) {
 		return fmt.Errorf("filesystem hierarchy already prepared: %s exists", marker)
@@ -253,7 +263,9 @@ func (o *Ostree) PrepareFilesystemHierarchy(rootfs string) error {
 		return fmt.Errorf("config item Imager.EfiRoot is not set")
 	}
 	o.Print("Setting up %s...\n", efiRoot)
-	os.MkdirAll(filepath.Join(rootfs, efiRoot), 0755)
+	if err := os.MkdirAll(filepath.Join(rootfs, efiRoot), 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", efiRoot, err)
+	}
 
 	if err := o.prepareUsrLocal(rootfs); err != nil {
 		return err

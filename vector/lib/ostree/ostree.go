@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 	"os"
 	"strings"
 )
@@ -179,9 +179,8 @@ func SetupEnvironment() {
 }
 
 type Ostree struct {
+	worker.IO
 	cfg     config.IConfig
-	stdout  io.Writer
-	stderr  io.Writer
 	runner  runner.Func
 	verbose bool
 	ref     string
@@ -201,48 +200,30 @@ func NewOstree(opts NewOstreeOptions) (*Ostree, error) {
 	if opts.Config == nil {
 		return nil, errors.New("missing config parameter")
 	}
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	return &Ostree{
+	o := &Ostree{
 		cfg:     opts.Config,
-		stdout:  stdout,
-		stderr:  stderr,
 		runner:  runCommand,
 		verbose: opts.Verbose,
 		ref:     opts.Ref,
-	}, nil
+	}
+	o.SetStdout(opts.Stdout)
+	o.SetStderr(opts.Stderr)
+	return o, nil
 }
 
 func (o *Ostree) CloneForRef(ref string) (IOstree, error) {
-	return NewOstree(NewOstreeOptions{
+	clone, err := NewOstree(NewOstreeOptions{
 		Config:  o.cfg,
-		Stdout:  o.stdout,
-		Stderr:  o.stderr,
+		Stdout:  o.Stdout(),
+		Stderr:  o.Stderr(),
 		Verbose: o.verbose,
 		Ref:     ref,
 	})
-}
-
-func (o *Ostree) SetStdout(w io.Writer) {
-	o.stdout = w
-}
-
-func (o *Ostree) SetStderr(w io.Writer) {
-	o.stderr = w
-}
-
-func (o *Ostree) Print(format string, a ...any) {
-	fmt.Fprintf(o.stdout, format, a...)
-}
-
-func (o *Ostree) PrintError(format string, a ...any) {
-	fmt.Fprintf(o.stderr, format, a...)
+	if err != nil {
+		return nil, err
+	}
+	clone.runner = o.runner
+	return clone, nil
 }
 
 func (o *Ostree) SetVerbose(v bool) {
@@ -271,7 +252,7 @@ func (o *Ostree) runCmd(stdout, stderr io.Writer, verbose bool, args ...string) 
 
 // ostreeRun runs an ostree command with stdout/stderr directed to the instance's stdout/stderr.
 func (o *Ostree) ostreeRun(args ...string) error {
-	return o.runCmd(o.stdout, o.stderr, o.verbose, args...)
+	return o.runCmd(o.Stdout(), o.Stderr(), o.verbose, args...)
 }
 
 // ostreeRunCapture runs an ostree command and captures its stdout.
@@ -280,7 +261,7 @@ func (o *Ostree) ostreeRunCapture(args ...string) (io.Reader, error) {
 		o.PrintError(">> Executing: ostree (stdout capture) %s\n", strings.Join(args, " "))
 	}
 	stdo := new(bytes.Buffer)
-	err := o.runCmd(stdo, o.stderr, false, args...)
+	err := o.runCmd(stdo, o.Stderr(), false, args...)
 	return stdo, err
 }
 

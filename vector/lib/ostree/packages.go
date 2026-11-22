@@ -93,13 +93,16 @@ func ParseOstreeLsChecksumLine(line string) (*filesystems.PathInfo, error) {
 		// Directories have two checksums, use the second one.
 		idx++
 	}
+	if idx+1 >= len(parts) {
+		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+	}
 
 	pi.OSTreeChecksum = parts[idx]
 	idx++
 
 	pi.Path = parts[idx]
 	idx++
-	if pi.Mode.Type == "l" && len(parts) >= 8 {
+	if pi.Mode.Type == "l" && idx+1 < len(parts) && parts[idx] == "->" {
 		idx++
 		pi.Link = parts[idx]
 	}

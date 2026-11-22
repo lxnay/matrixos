@@ -164,7 +164,7 @@ func (o *Ostree) gpgKeyIDLocked(homeDir string) (string, error) {
 			pubkeyPath,
 		},
 		Stdout: out,
-		Stderr: o.stderr,
+		Stderr: o.Stderr(),
 	})
 	if err != nil {
 		return "", err
@@ -223,8 +223,8 @@ func (o *Ostree) ImportGpgKey(keyPath string) error {
 	return o.runner(&runner.Cmd{
 		Name:   "gpg",
 		Args:   []string{"--homedir", homeDir, "--batch", "--yes", "--import", keyPath},
-		Stdout: o.stdout,
-		Stderr: o.stderr,
+		Stdout: o.Stdout(),
+		Stderr: o.Stderr(),
 	})
 }
 
@@ -260,8 +260,8 @@ func (o *Ostree) GpgSignFile(file string) error {
 			"--output", ascFile,
 			file,
 		},
-		Stdout: o.stdout,
-		Stderr: o.stderr,
+		Stdout: o.Stdout(),
+		Stderr: o.Stderr(),
 	})
 	if err != nil {
 		return err
@@ -331,6 +331,10 @@ func (o *Ostree) initializeRemoteSigningGpg(remote, repoDir string) error {
 		return err
 	}
 
+	// Lock order: LockRepo(repoDir) -> gpgMu.
+	unlock := LockRepo(repoDir)
+	defer unlock()
+
 	o.Print("Remote GPG signing enabled.\n")
 	for _, key := range keys {
 		if !fileExists(key) {
@@ -377,7 +381,8 @@ func (o *Ostree) maybeInitializeGpgForRepo(remote, repoDir string) error {
 	return o.initializeRemoteSigningGpg(remote, repoDir)
 }
 
-func (o *Ostree) GpgArgs() ([]string, error) {
+// gpgArgsLocked builds --gpg-sign/--gpg-homedir arguments while gpgMu is held.
+func (o *Ostree) gpgArgsLocked() ([]string, error) {
 	gpgEnabled, err := o.GpgEnabled()
 	if err != nil {
 		return nil, err
@@ -386,12 +391,12 @@ func (o *Ostree) GpgArgs() ([]string, error) {
 		return nil, nil
 	}
 
-	keyID, err := o.GpgKeyID()
+	homeDir, err := o.gpgHomeDirLocked()
 	if err != nil {
 		return nil, err
 	}
 
-	homeDir, err := o.GpgHomeDir()
+	keyID, err := o.gpgKeyIDLocked(homeDir)
 	if err != nil {
 		return nil, err
 	}
@@ -402,6 +407,12 @@ func (o *Ostree) GpgArgs() ([]string, error) {
 	}, nil
 }
 
+func (o *Ostree) GpgArgs() ([]string, error) {
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	return o.gpgArgsLocked()
+}
+
 // KillGpgDaemons kills any gpg-agent, dirmngr, and scdaemon processes
 // for the OSTree GPG homedir.
 func (o *Ostree) KillGpgDaemons() {
@@ -410,5 +421,5 @@ func (o *Ostree) KillGpgDaemons() {
 		return
 	}
 	o.Print("Killing GPG daemons for %s ...\n", homeDir)
-	KillGpgDaemons(o.runner, homeDir, o.stdout, o.stderr)
+	KillGpgDaemons(o.runner, homeDir, o.Stdout(), o.Stderr())
 }

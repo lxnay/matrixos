@@ -121,5 +121,12 @@ func (o *Ostree) Commit(opts CommitOptions) error {
 	if err != nil {
 		return err
 	}
+	// Serialize GPG-signed commits with gpgMu so ostree's internal GPGME
+	// signing never races with concurrent gpg operations. Callers hold
+	// LockRepo before Commit, preserving LockRepo -> gpgMu.
+	if len(opts.GpgArgs) > 0 {
+		gpgMu.Lock()
+		defer gpgMu.Unlock()
+	}
 	return o.ostreeRun(args...)
 }
