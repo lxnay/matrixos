@@ -5,11 +5,16 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"matrixos/vector/lib/config"
+	"matrixos/vector/lib/runner"
 )
 
 func TestSignalGuard_ReArmRace(t *testing.T) {
@@ -176,5 +181,69 @@ func TestSignalGuard_NestedGuardsDoNotExitMidCleanup(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("timed out waiting for signalExit")
+	}
+}
+
+func TestAllCommand_FlushesAndClosesLogBeforeSendMail(t *testing.T) {
+	tmp := t.TempDir()
+	pusher := filepath.Join(tmp, "push.sh")
+	if err := os.WriteFile(pusher, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origMailCmd := allMailCommand
+	allMailCommand = "sh" // guaranteed to exist in PATH for exec.LookPath
+	t.Cleanup(func() { allMailCommand = origMailCmd })
+
+	cmd := NewAllCommand()
+	cmd.cfg = &config.MockConfig{
+		Items: map[string][]string{
+			"matrixOS.LocksDir": {filepath.Join(tmp, "locks")},
+			"matrixOS.LogsDir":  {filepath.Join(tmp, "logs")},
+		},
+	}
+	cmd.buildID = "test"
+	cmd.buildName = "test-build"
+	cmd.onlyImages = true
+	cmd.skipImages = true
+	cmd.disableJanitor = true
+	cmd.disableMail = false
+	cmd.mailUser = "root"
+	cmd.cdnPusher = pusher
+
+	var logAtMailTime string
+	var mailCalled bool
+	cmd.cmdRunner = func(c *runner.Cmd) error {
+		if c.Name == pusher {
+			// Emit a partial line (no trailing newline) so it stays buffered
+			// in styledWriter until FlushPrinters() runs.
+			_, _ = io.WriteString(c.Stdout, "partial-cdn-output")
+			return nil
+		}
+		// Mail invocation: read the attached log file at the moment sendMail executes.
+		mailCalled = true
+		data, err := os.ReadFile(cmd.logFile)
+		if err != nil {
+			t.Errorf("reading logFile during sendMail: %v", err)
+		}
+		logAtMailTime = string(data)
+		return nil
+	}
+
+	if err := cmd.run(); err != nil {
+		t.Fatalf("AllCommand.run(): %v", err)
+	}
+	if !mailCalled {
+		t.Fatal("expected sendMail to invoke cmdRunner")
+	}
+	if !strings.Contains(logAtMailTime, "partial-cdn-output") {
+		t.Errorf("logFile at sendMail time missing flushed partial output; got:\n%s", logAtMailTime)
+	}
+	finalLog, err := os.ReadFile(cmd.logFile)
+	if err != nil {
+		t.Fatalf("reading final logFile: %v", err)
+	}
+	if !strings.Contains(string(finalLog), "partial-cdn-output") {
+		t.Errorf("final logFile missing flushed partial output (FlushPrinters ran after logF.Close); got:\n%s", string(finalLog))
 	}
 }

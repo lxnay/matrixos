@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -224,17 +225,26 @@ func (c *AllCommand) run() error {
 	if err != nil {
 		return err
 	}
-	defer logF.Close()
+
+	// Flush buffered output, detach printers/global log, and close logF once
+	// before sendMail attaches c.logFile (and on panic/early return via defer).
+	closeLog := sync.OnceFunc(func() {
+		c.FlushPrinters()
+		c.SetLogWriter(nil)
+		ClearGlobalLogWriter()
+		_ = logF.Close()
+	})
+	defer closeLog()
 
 	// Tee all styled output (this command + sub-commands) to the log.
 	SetGlobalLogWriter(logF)
-	defer ClearGlobalLogWriter()
 	c.SetLogWriter(logF)
 
 	c.Printf("Logfile at: %s\n", c.logFile)
 
-	// Run the pipeline; send mail on exit.
+	// Run the pipeline, flush & close the log, then send mail.
 	runErr := c.runPipeline()
+	closeLog()
 
 	c.sendMail(runErr)
 	return runErr
