@@ -201,9 +201,12 @@ func (c *FlashCommand) runFlash() error {
 	c.im.SetRef(ref)
 	c.ot.SetRef(ref)
 
-	c.PushCleanup(c.im.Cleanup)
-	c.PushCleanup(c.fsenc.Cleanup)
+	// Register cleanups in reverse execution order (LIFO): unmount/detach
+	// imager resources first, close any remaining LUKS mappers second, and
+	// flush buffered printer output last.
 	c.PushCleanup(c.FlushPrinters)
+	c.PushCleanup(c.fsenc.Cleanup)
+	c.PushCleanup(c.im.Cleanup)
 
 	if err := c.initGpg(); err != nil {
 		return err

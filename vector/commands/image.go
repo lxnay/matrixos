@@ -220,9 +220,12 @@ func (c *ImageCommand) runImage() error {
 
 	// Setup image (the main work) under an exclusive image lock.
 	return c.im.ExecuteWithImageLock(func() error {
-		c.PushCleanup(c.im.Cleanup)
-		c.PushCleanup(c.fsenc.Cleanup)
+		// Register cleanups in reverse execution order (LIFO): unmount/detach
+		// imager resources first, close any remaining LUKS mappers second, and
+		// flush buffered printer output last.
 		c.PushCleanup(c.FlushPrinters)
+		c.PushCleanup(c.fsenc.Cleanup)
+		c.PushCleanup(c.im.Cleanup)
 
 		if err := c.initGpg(); err != nil {
 			return err
