@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -40,7 +41,7 @@ type ParallelSeedOptions struct {
 	PushCleanup func(fn func())
 	// OnSeederDone is called when a seeder build completes successfully.
 	// It receives the seeder name and resolved chroot directory.
-	// Must be safe for concurrent use.
+	// Serialized internally — the callback does not need its own locking.
 	OnSeederDone func(name, chrootDir string) error
 
 	// BoostWorker upgrades a worker's resource limits to the full system
@@ -71,6 +72,10 @@ func ResolveChrootDir(name string, params *SeederParams, overrideDir string) (st
 // order and the configured parallelism limit.  Each seeder gets its
 // own ISeeder instance so stdout/stderr and mount tracking are isolated.
 func ParallelSeed(ctx context.Context, opts *ParallelSeedOptions) error {
+	if opts.Parallelism < 1 {
+		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
+	}
+
 	infoByName := make(map[string]SeederInfo, len(opts.Seeders))
 	for _, info := range opts.Seeders {
 		infoByName[info.Name] = info
@@ -80,7 +85,10 @@ func ParallelSeed(ctx context.Context, opts *ParallelSeedOptions) error {
 		return fmt.Errorf("BoostWorker and UnboostWorker must both be set or both be nil")
 	}
 
-	graph := buildSeedGraph(opts.Seeders, opts.ParamsByName, infoByName)
+	graph, err := buildSeedGraph(opts.Seeders, opts.ParamsByName, infoByName)
+	if err != nil {
+		return err
+	}
 
 	return runWorkerPool(ctx, &workerPoolOpts{
 		parallelism:  opts.Parallelism,
@@ -113,7 +121,7 @@ func buildSeedGraph(
 	seeders []SeederInfo,
 	paramsByName map[string]*SeederParams,
 	infoByName map[string]SeederInfo,
-) *seedGraph {
+) (*seedGraph, error) {
 	graph := &seedGraph{
 		depCount:   make(map[string]int, len(seeders)),
 		dependents: make(map[string][]string),
@@ -122,8 +130,12 @@ func buildSeedGraph(
 		boostSeed:  make(map[string]bool),
 	}
 	for _, info := range seeders {
+		params := paramsByName[info.Name]
+		if params == nil {
+			return nil, fmt.Errorf("missing params for seeder %q", info.Name)
+		}
 		count := 0
-		for _, dep := range paramsByName[info.Name].Depends {
+		for _, dep := range params.Depends {
 			if _, ok := infoByName[dep]; ok {
 				count++
 				graph.dependents[dep] = append(
@@ -135,12 +147,48 @@ func buildSeedGraph(
 		graph.depCount[info.Name] = count
 	}
 
+	// Verify the dependency graph is a DAG (Kahn's algorithm) so cycles
+	// fail fast instead of deadlocking workers waiting on graph.ready.
+	inDeg := make(map[string]int, len(seeders))
+	var queue []string
+	for _, info := range seeders {
+		d := graph.depCount[info.Name]
+		inDeg[info.Name] = d
+		if d == 0 {
+			queue = append(queue, info.Name)
+		}
+	}
+	visited := 0
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		visited++
+		for _, dep := range graph.dependents[cur] {
+			inDeg[dep]--
+			if inDeg[dep] == 0 {
+				queue = append(queue, dep)
+			}
+		}
+	}
+	if visited != len(seeders) {
+		var cycleNodes []string
+		for _, info := range seeders {
+			if inDeg[info.Name] > 0 {
+				cycleNodes = append(cycleNodes, info.Name)
+			}
+		}
+		return nil, fmt.Errorf(
+			"seeder dependency cycle detected involving: %s",
+			strings.Join(cycleNodes, ", "),
+		)
+	}
+
 	graph.descCount = computeDescendantCounts(graph.dependents, seeders)
 
 	// Seed the ready queue with seeders that have zero unsatisfied deps.
 	if len(seeders) == 0 {
 		close(graph.ready)
-		return graph
+		return graph, nil
 	}
 	for _, info := range seeders {
 		if graph.depCount[info.Name] == 0 {
@@ -150,7 +198,7 @@ func buildSeedGraph(
 			graph.ready <- info.Name
 		}
 	}
-	return graph
+	return graph, nil
 }
 
 // computeDescendantCounts returns, for each seed, the number of seeds
@@ -178,17 +226,21 @@ func computeDescendantCounts(dependents map[string][]string, seeders []SeederInf
 }
 
 type workerPoolOpts struct {
-	parallelism  int
-	infoByName   map[string]SeederInfo
-	paramsByName map[string]*SeederParams
-	graph        *seedGraph
-	opts         *ParallelSeedOptions
+	parallelism    int
+	infoByName     map[string]SeederInfo
+	paramsByName   map[string]*SeederParams
+	graph          *seedGraph
+	opts           *ParallelSeedOptions
+	onSeederDoneMu sync.Mutex
 }
 
 // runWorkerPool spawns a fixed pool of worker goroutines that pull
 // seeders from the graph's ready channel.  Workers stop when the
 // context is cancelled, an error occurs, or all seeders are done.
 func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
+	poolCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var firstErr error
 	var errMu sync.Mutex
 
@@ -198,6 +250,7 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 			firstErr = err
 		}
 		errMu.Unlock()
+		cancel()
 		// Signal all workers to stop by closing the ready channel.
 		wp.graph.mu.Lock()
 		if !wp.graph.stopped {
@@ -220,7 +273,7 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 			for {
 				var seederName string
 				select {
-				case <-ctx.Done():
+				case <-poolCtx.Done():
 					return
 				case name, ok := <-wp.graph.ready:
 					if !ok {
@@ -263,9 +316,10 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 				if err != nil {
 					if gotBoost && wp.opts.UnboostWorker != nil {
 						ubErr := wp.opts.UnboostWorker(workerIdx)
-						if ubErr != nil {
-							workerSD.PrintError(
-								"[%s] failed to unboost worker after failed boost: %v\n",
+						if ubErr != nil && sopts.Stderr != nil {
+							fmt.Fprintf(
+								sopts.Stderr,
+								"[%s] failed to unboost worker after NewSeeder error: %v\n",
 								seederName,
 								ubErr,
 							)
@@ -290,12 +344,13 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 					seederName, workerStart.Format(time.RFC3339),
 				)
 				err = workerSD.ExecuteWithSeederLock(seederName, func() error {
-					return seedWorker(ctx, &seedWorkerOpts{
-						sd:          workerSD,
-						info:        info,
-						params:      wp.paramsByName[seederName],
-						sysProcAttr: sysProcAttr,
-						opts:        wp.opts,
+					return seedWorker(poolCtx, &seedWorkerOpts{
+						sd:             workerSD,
+						info:           info,
+						params:         wp.paramsByName[seederName],
+						sysProcAttr:    sysProcAttr,
+						opts:           wp.opts,
+						onSeederDoneMu: &wp.onSeederDoneMu,
 					})
 				})
 				workerSD.Cleanup()
@@ -350,11 +405,12 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 }
 
 type seedWorkerOpts struct {
-	sd          ISeeder
-	info        SeederInfo
-	params      *SeederParams
-	sysProcAttr *syscall.SysProcAttr
-	opts        *ParallelSeedOptions
+	sd             ISeeder
+	info           SeederInfo
+	params         *SeederParams
+	sysProcAttr    *syscall.SysProcAttr
+	opts           *ParallelSeedOptions
+	onSeederDoneMu *sync.Mutex
 }
 
 // seedWorker processes a single seeder: resolve chroot dir, run
@@ -487,11 +543,14 @@ func seedWorker(ctx context.Context, sw *seedWorkerOpts) error {
 		return err
 	}
 
-	// Notify the caller.
+	// Notify the caller (serialized across workers).
 	if opts.OnSeederDone != nil {
-		if err := opts.OnSeederDone(info.Name, chrootDir); err != nil {
+		sw.onSeederDoneMu.Lock()
+		onDoneErr := opts.OnSeederDone(info.Name, chrootDir)
+		sw.onSeederDoneMu.Unlock()
+		if onDoneErr != nil {
 			return fmt.Errorf(
-				"[%s] failed to call OnSeederDone: %w", info.Name, err,
+				"[%s] failed to call OnSeederDone: %w", info.Name, onDoneErr,
 			)
 		}
 	}
