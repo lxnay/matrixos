@@ -49,11 +49,12 @@ type ICommand interface {
 //	    })
 //	}
 type SignalGuard struct {
-	mu       sync.Mutex
-	cleanups []func()
-	armed    bool
-	sigCh    chan os.Signal
-	done     chan struct{}
+	mu        sync.Mutex
+	cleanupMu sync.Mutex
+	cleanups  []func()
+	armed     bool
+	sigCh     chan os.Signal
+	done      chan struct{}
 }
 
 // Arm starts listening for SIGINT and SIGTERM.  On receipt the full
@@ -67,21 +68,23 @@ func (sg *SignalGuard) Arm() {
 		return
 	}
 	sg.armed = true
-	sg.sigCh = make(chan os.Signal, 1)
-	sg.done = make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	sg.sigCh = sigCh
+	sg.done = done
 
-	signal.Notify(sg.sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	go func() {
+	go func(sigCh <-chan os.Signal, done <-chan struct{}) {
 		select {
-		case sig := <-sg.sigCh:
+		case sig := <-sigCh:
 			fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
 			sg.runCleanups()
 			os.Exit(1)
-		case <-sg.done:
+		case <-done:
 			return
 		}
-	}()
+	}(sigCh, done)
 }
 
 // Disarm stops the signal listener and clears the cleanup stack.
@@ -117,8 +120,14 @@ func (sg *SignalGuard) RunCleanups() {
 	sg.runCleanups()
 }
 
-// runCleanups is the internal, lock-free implementation.
+// runCleanups drains and executes all registered cleanups in LIFO order.
+// cleanupMu serializes concurrent callers (e.g. a signal handler arriving
+// while deferred cleanup is already running) so callers wait for in-flight
+// cleanups to finish rather than exiting early.
 func (sg *SignalGuard) runCleanups() {
+	sg.cleanupMu.Lock()
+	defer sg.cleanupMu.Unlock()
+
 	sg.mu.Lock()
 	fns := make([]func(), len(sg.cleanups))
 	copy(fns, sg.cleanups)

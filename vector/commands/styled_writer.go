@@ -88,10 +88,10 @@ func (w *styledWriter) writeToLog(content string) {
 	if w.logDest == nil {
 		return
 	}
-	_, _ = io.WriteString(
-		w.logDest,
-		ansiStripRe.ReplaceAllString(content, ""),
-	)
+	stripped := ansiStripRe.ReplaceAllString(content, "")
+	globalLogMu.Lock()
+	_, _ = io.WriteString(w.logDest, stripped)
+	globalLogMu.Unlock()
 }
 
 // Write implements io.Writer.  It buffers partial lines and flushes each
