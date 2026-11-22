@@ -19,8 +19,8 @@ matrixOS is a Gentoo-based Linux distribution using OSTree for atomic upgrades. 
 
 ## 2. Go Toolchain & Language Compatibility
 
-- `go.mod` and `.github/workflows/release-vendor.yml` pin **`go 1.25.0`**.
-- Even if the local host runs a newer Go compiler (e.g. Go 1.26/1.27+), **never** use language features or stdlib APIs introduced after Go 1.25 (for example, Go 1.26+ promoted fields in struct literals, which fail `go vet` / builds targeting `go 1.25.0`).
+- `go.mod` and `.github/workflows/release-vendor.yml` pin **`go 1.27.0`**.
+- Even if the local host runs a newer Go compiler, **never** use language features or stdlib APIs introduced after the Go version pinned in `go.mod` (`go 1.27.0`), which fail `go vet` / builds targeting `go 1.27.0`.
 - Keep dependencies minimal (`go.mod` currently depends only on `golang.org/x/sys`). Do not add third-party dependencies without explicit user approval.
 
 ## 3. matrixOS Go Architecture & Invariants
