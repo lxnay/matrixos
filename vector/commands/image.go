@@ -256,42 +256,16 @@ func (c *ImageCommand) validateDevicePaths() (*imager.BuildOptions, error) {
 		WholeDevice: c.wholeDevice,
 	}
 
+	if err := validateDeviceExistence(opts); err != nil {
+		return nil, err
+	}
+	if err := validateBuildDeviceCombination(opts); err != nil {
+		return nil, err
+	}
+
 	if opts.EfiDevice != "" {
-		if !filesystems.PathExists(opts.EfiDevice) {
-			return nil, fmt.Errorf("%s does not exist", opts.EfiDevice)
-		}
 		c.Printf("Selected the following device as EFI System Partition: %s (WILL NOT BE FORMATTED)\n", opts.EfiDevice)
 	}
-	if opts.BootDevice != "" {
-		if !filesystems.PathExists(opts.BootDevice) {
-			return nil, fmt.Errorf("%s does not exist", opts.BootDevice)
-		}
-	}
-	if opts.RootDevice != "" {
-		if !filesystems.PathExists(opts.RootDevice) {
-			return nil, fmt.Errorf("%s does not exist", opts.RootDevice)
-		}
-	}
-	if opts.WholeDevice != "" {
-		if !filesystems.PathExists(opts.WholeDevice) {
-			return nil, fmt.Errorf("%s does not exist", opts.WholeDevice)
-		}
-	}
-
-	// Check that either all 3 partition device paths are set or none.
-	anyDevice := opts.EfiDevice != "" || opts.BootDevice != "" || opts.RootDevice != ""
-	if anyDevice {
-		if opts.EfiDevice == "" || opts.BootDevice == "" || opts.RootDevice == "" {
-			return nil, fmt.Errorf("please specify all --*-device-path flags or none")
-		}
-	}
-
-	// Cannot specify both whole device and individual partitions.
-	if opts.WholeDevice != "" && anyDevice {
-		return nil, fmt.Errorf(
-			"please specify either --install-device or individual --*-device-path flags, not both")
-	}
-
 	if opts.WholeDevice != "" {
 		c.PrintErrf("Specified whole device %s to flash.\n", opts.WholeDevice)
 	}

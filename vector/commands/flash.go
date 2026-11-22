@@ -345,9 +345,9 @@ func validateDeviceExistence(opts *imager.BuildOptions) error {
 	return nil
 }
 
-// validateDeviceCombination checks that the flags form a valid combination:
-// either whole device, or all three individual partitions, or none.
-func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) error {
+// validateBuildDeviceCombination checks that the device flags form a valid
+// combination: either whole device, or all three individual partitions, or none.
+func validateBuildDeviceCombination(opts *imager.BuildOptions) error {
 	anyPartition := opts.EfiDevice != "" || opts.BootDevice != "" || opts.RootDevice != ""
 	allPartitions := opts.EfiDevice != "" && opts.BootDevice != "" && opts.RootDevice != ""
 
@@ -357,6 +357,16 @@ func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) erro
 	if opts.WholeDevice != "" && anyPartition {
 		return fmt.Errorf("please specify either --install-device or individual --*-device-path flags, not both")
 	}
+	return nil
+}
+
+// validateDeviceCombination checks that the flags form a valid combination
+// for flash mode (including requiring devices in batch mode).
+func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) error {
+	if err := validateBuildDeviceCombination(opts); err != nil {
+		return err
+	}
+	anyPartition := opts.EfiDevice != "" || opts.BootDevice != "" || opts.RootDevice != ""
 	if c.batch && opts.WholeDevice == "" && !anyPartition {
 		return fmt.Errorf("batch mode requires device flags; see --help")
 	}
