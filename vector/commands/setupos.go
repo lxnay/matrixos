@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -67,28 +66,13 @@ type setupOSRunner struct {
 
 func defaultSetupOSRunner() *setupOSRunner {
 	return &setupOSRunner{
-		execCommand: func(name string, args ...string) cmdRunner {
-			cmd := execCommand(name, args...)
-			return &realCmdRunner{
-				cmd:    cmd,
-				stdout: &cmd.Stdout,
-				stderr: &cmd.Stderr,
-			}
-		},
-		readFile:  os.ReadFile,
-		writeFile: os.WriteFile,
-		appendFile: func(path string, data []byte) error {
-			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = f.Write(data)
-			return err
-		},
-		mkdirAll:   os.MkdirAll,
-		stat:       os.Stat,
-		removeFile: os.Remove,
+		execCommand: newRealCmdRunner,
+		readFile:    os.ReadFile,
+		writeFile:   os.WriteFile,
+		appendFile:  appendBytesToFile,
+		mkdirAll:    os.MkdirAll,
+		stat:        os.Stat,
+		removeFile:  os.Remove,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
@@ -449,15 +433,9 @@ func (c *SetupOSCommand) changeUserPassword(targetUser string) error {
 		c.cBold, c.iconGear, targetUser, c.cReset)
 
 	passwdCmd := c.run.execCommand("passwd", targetUser)
+	passwdCmd.SetStdin(c.run.stdin)
 	passwdCmd.SetStdout(c.run.stdout)
 	passwdCmd.SetStderr(c.run.stderr)
-	// passwd reads from the controlling terminal directly, but we wire stdin
-	// through the runner so tests can supply mock input.
-	if rr, ok := passwdCmd.(*realCmdRunner); ok {
-		if ec, ok := rr.cmd.(*exec.Cmd); ok {
-			ec.Stdin = c.run.stdin
-		}
-	}
 	if err := passwdCmd.Run(); err != nil {
 		return fmt.Errorf("failed to change password for %s: %w", targetUser, err)
 	}
@@ -507,13 +485,9 @@ func (c *SetupOSCommand) changeLuksPassword() error {
 
 	for {
 		cryptsetupCmd := c.run.execCommand("cryptsetup", "luksChangeKey", luksDevice)
+		cryptsetupCmd.SetStdin(c.run.stdin)
 		cryptsetupCmd.SetStdout(c.run.stdout)
 		cryptsetupCmd.SetStderr(c.run.stderr)
-		if rr, ok := cryptsetupCmd.(*realCmdRunner); ok {
-			if ec, ok := rr.cmd.(*exec.Cmd); ok {
-				ec.Stdin = c.run.stdin
-			}
-		}
 		if err := cryptsetupCmd.Run(); err != nil {
 			fmt.Fprintf(c.run.stderr, "   %s%sFailed to change LUKS password. Please try again.%s\n",
 				c.cRed, c.iconError, c.cReset)
@@ -549,13 +523,9 @@ func (c *SetupOSCommand) setupLocalization() error {
 		firstbootArgs = append(firstbootArgs, "--prompt")
 	}
 	firstbootCmd := c.run.execCommand("systemd-firstboot", firstbootArgs...)
+	firstbootCmd.SetStdin(c.run.stdin)
 	firstbootCmd.SetStdout(c.run.stdout)
 	firstbootCmd.SetStderr(c.run.stderr)
-	if rr, ok := firstbootCmd.(*realCmdRunner); ok {
-		if ec, ok := rr.cmd.(*exec.Cmd); ok {
-			ec.Stdin = c.run.stdin
-		}
-	}
 	if err := firstbootCmd.Run(); err != nil {
 		return fmt.Errorf("systemd-firstboot failed: %w", err)
 	}

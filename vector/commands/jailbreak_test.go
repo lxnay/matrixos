@@ -22,6 +22,7 @@ type mockCmdRunner struct {
 
 func (m *mockCmdRunner) Run() error              { return m.runErr }
 func (m *mockCmdRunner) Output() ([]byte, error) { return m.outputVal, m.outputErr }
+func (m *mockCmdRunner) SetStdin(_ io.Reader)    {}
 func (m *mockCmdRunner) SetStdout(_ io.Writer)   {}
 func (m *mockCmdRunner) SetStderr(_ io.Writer)   {}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 
@@ -363,4 +364,39 @@ func appendLineToFile(path, line string) error {
 	defer f.Close()
 	_, err = fmt.Fprintln(f, line)
 	return err
+}
+
+// appendBytesToFile appends data to path, creating it (0644) if absent.
+func appendBytesToFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(data)
+	return err
+}
+
+// cmdRunner abstracts an *exec.Cmd for testability across interactive commands.
+type cmdRunner interface {
+	Run() error
+	Output() ([]byte, error)
+	SetStdin(r io.Reader)
+	SetStdout(w io.Writer)
+	SetStderr(w io.Writer)
+}
+
+// realCmdRunner wraps a real *exec.Cmd.
+type realCmdRunner struct {
+	cmd *exec.Cmd
+}
+
+func (r *realCmdRunner) Run() error              { return r.cmd.Run() }
+func (r *realCmdRunner) Output() ([]byte, error) { return r.cmd.Output() }
+func (r *realCmdRunner) SetStdin(rd io.Reader)   { r.cmd.Stdin = rd }
+func (r *realCmdRunner) SetStdout(w io.Writer)   { r.cmd.Stdout = w }
+func (r *realCmdRunner) SetStderr(w io.Writer)   { r.cmd.Stderr = w }
+
+func newRealCmdRunner(name string, args ...string) cmdRunner {
+	return &realCmdRunner{cmd: execCommand(name, args...)}
 }

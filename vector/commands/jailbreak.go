@@ -52,50 +52,12 @@ type jailbreakRunner struct {
 	stderr io.Writer
 }
 
-// cmdRunner abstracts an exec.Cmd for testability.
-type cmdRunner interface {
-	Run() error
-	Output() ([]byte, error)
-	SetStdout(w io.Writer)
-	SetStderr(w io.Writer)
-}
-
-// realCmdRunner wraps a real os/exec.Cmd.
-type realCmdRunner struct {
-	cmd interface {
-		Run() error
-		Output() ([]byte, error)
-	}
-	stdout *io.Writer
-	stderr *io.Writer
-}
-
-func (r *realCmdRunner) Run() error              { return r.cmd.Run() }
-func (r *realCmdRunner) Output() ([]byte, error) { return r.cmd.Output() }
-func (r *realCmdRunner) SetStdout(w io.Writer)   { *r.stdout = w }
-func (r *realCmdRunner) SetStderr(w io.Writer)   { *r.stderr = w }
-
 func defaultRunner() *jailbreakRunner {
 	return &jailbreakRunner{
-		execCommand: func(name string, args ...string) cmdRunner {
-			cmd := execCommand(name, args...)
-			return &realCmdRunner{
-				cmd:    cmd,
-				stdout: &cmd.Stdout,
-				stderr: &cmd.Stderr,
-			}
-		},
-		readFile:  os.ReadFile,
-		writeFile: os.WriteFile,
-		appendFile: func(path string, data []byte) error {
-			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = f.Write(data)
-			return err
-		},
+		execCommand:  newRealCmdRunner,
+		readFile:     os.ReadFile,
+		writeFile:    os.WriteFile,
+		appendFile:   appendBytesToFile,
 		mkdirAll:     os.MkdirAll,
 		stat:         os.Stat,
 		removeFile:   os.Remove,
