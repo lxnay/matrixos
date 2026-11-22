@@ -293,9 +293,9 @@ func (c *ImagesCommand) runImages() error {
 			}
 
 			if c.localOstree {
-				return c.showLocalRefs(ot, im)
+				return showLocalRefs(ot, im.Print)
 			}
-			return c.initializeRemoteOstree(ot, im)
+			return pullRemoteOstree(&c.UI, ot, im)
 		},
 	}
 
@@ -310,37 +310,4 @@ func (c *ImagesCommand) runImages() error {
 	}
 
 	return nil
-}
-
-// initializeRemoteOstree sets up the ostree remote and pulls
-// the specified ref.  The ot parameter is the per-worker ostree
-// instance (cloned for parallel safety).
-func (c *ImagesCommand) initializeRemoteOstree(ot ostree.IOstree, im imager.IImager) error {
-	remote, err := ot.Remote()
-	if err != nil {
-		return err
-	}
-
-	if err := c.showRemoteRefs(ot, im); err != nil {
-		return err
-	}
-
-	im.Print("\n%s%sPulling ostree ref %s:%s ...%s\n",
-		c.cBold, c.iconDownload, remote, ot.Ref(), c.cReset)
-	if err := ot.Pull(); err != nil {
-		return fmt.Errorf("ostree pull failed: %w", err)
-	}
-	return nil
-}
-
-// showLocalRefs prints the local ostree refs to the provided printf function.
-// The ot parameter is the per-worker ostree instance.
-func (c *ImagesCommand) showLocalRefs(ot ostree.IOstree, im imager.IImager) error {
-	return showLocalRefs(ot, im.Print)
-}
-
-// showRemoteRefs prints the remote ostree refs to the provided printf function.
-// The ot parameter is the per-worker ostree instance.
-func (c *ImagesCommand) showRemoteRefs(ot ostree.IOstree, im imager.IImager) error {
-	return showRemoteRefs(ot, im.Print)
 }

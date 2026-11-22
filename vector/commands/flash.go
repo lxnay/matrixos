@@ -151,57 +151,22 @@ func (c *FlashCommand) runFlash() error {
 	// Narrow the prefix now that we know the ref.
 	c.SetupPrinters(fmt.Sprintf("flash:%s", c.shortRef(ref)))
 
-	c.ot.SetStdout(c.StdoutWriter())
-	c.ot.SetStderr(c.StderrWriter())
-	c.ot.SetVerbose(false)
-
-	if err := c.qa.VerifyImagerEnvironmentSetup(installRoot); err != nil {
-		return fmt.Errorf("environment verification failed: %w", err)
-	}
-
-	fsenc, err := filesystems.NewFsenc(
-		c.cfg,
-		func(n string) { c.Printf("Opening encrypted rootfs as %s ...\n", n) },
-		func(n string) { c.Printf("Opened encrypted rootfs as %s.\n", n) },
-	)
+	fsenc, im, err := initImagerRuntime(c.cfg, c.ot, c.qa, &c.UI, installRoot, c.im)
 	if err != nil {
-		return fmt.Errorf("failed to initialize fsenc: %w", err)
+		return err
 	}
-	fsenc.SetStdout(c.StdoutWriter())
-	fsenc.SetStderr(c.StderrWriter())
 	c.fsenc = fsenc
-
-	if err := c.fsenc.ValidateLuksVariables(); err != nil {
-		return fmt.Errorf("LUKS validation failed: %w", err)
-	}
-
-	if c.im == nil {
-		im, err := imager.NewImager(c.cfg, c.ot, c.fsenc, nil)
-		if err != nil {
-			return fmt.Errorf("failed to initialize imager: %w", err)
-		}
-		c.im = im
-	}
-	c.im.SetStdout(c.StdoutWriter())
-	c.im.SetStderr(c.StderrWriter())
+	c.im = im
 
 	buildOpts, err := c.resolveDevices()
 	if err != nil {
 		return err
 	}
 
-	if err := c.detectRemotedAndPlainRefs(c.im.PrintError); err != nil {
-		return err
-	}
-
-	rr, err := c.resolveRefRemote(ref, c.im.PrintWarning)
+	ref, err = c.prepareImagerRef(c.im, ref)
 	if err != nil {
 		return err
 	}
-	ref = rr.Ref
-
-	c.im.SetRef(ref)
-	c.ot.SetRef(ref)
 
 	// Register cleanups in reverse execution order (LIFO): unmount/detach
 	// imager resources first, close any remaining LUKS mappers second, and
@@ -215,7 +180,7 @@ func (c *FlashCommand) runFlash() error {
 	}
 	c.PushCleanup(c.killGpg)
 
-	if err := c.showLocalRefs(); err != nil {
+	if err := showLocalRefs(c.ot, c.im.Print); err != nil {
 		return err
 	}
 
@@ -553,11 +518,6 @@ func (c *FlashCommand) showSummary(opts *imager.BuildOptions) {
 		c.Printf("  %s (ROOT) — format and install /. DATA WILL BE LOST.\n", opts.RootDevice)
 	}
 	c.Println("Note: final partition resizing will happen on first boot.")
-}
-
-// showLocalRefs lists the locally available ostree refs.
-func (c *FlashCommand) showLocalRefs() error {
-	return showLocalRefs(c.ot, c.im.Print)
 }
 
 // getPrompter returns the interactive prompter, creating one if needed.

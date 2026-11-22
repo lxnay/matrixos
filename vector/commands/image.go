@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/imager"
 	"matrixos/vector/lib/ostree"
@@ -124,6 +125,82 @@ func failFastChecks(ot ostree.IOstree, icfg *imager.ImagerConfig) error {
 	return nil
 }
 
+func initImagerRuntime(
+	cfg config.IConfig,
+	ot ostree.IOstree,
+	qa *validation.QA,
+	ui *UI,
+	envRoot string,
+	existingIm imager.IImager,
+) (filesystems.IFsenc, imager.IImager, error) {
+	ot.SetStdout(ui.StdoutWriter())
+	ot.SetStderr(ui.StderrWriter())
+	ot.SetVerbose(false) // ostree's own verbose flag, separate from ours.
+
+	if err := qa.VerifyImagerEnvironmentSetup(envRoot); err != nil {
+		return nil, nil, fmt.Errorf("environment verification failed: %w", err)
+	}
+
+	fsenc, err := filesystems.NewFsenc(
+		cfg,
+		func(mapperName string) {
+			ui.Printf("Opening encrypted rootfs as %s ...\n", mapperName)
+		},
+		func(mapperName string) {
+			ui.Printf("Opened encrypted rootfs as %s.\n", mapperName)
+		},
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to initialize fsenc: %w", err)
+	}
+	fsenc.SetStdout(ui.StdoutWriter())
+	fsenc.SetStderr(ui.StderrWriter())
+
+	if err := fsenc.ValidateLuksVariables(); err != nil {
+		return nil, nil, fmt.Errorf("LUKS validation failed: %w", err)
+	}
+
+	im := existingIm
+	if im == nil {
+		im, err = imager.NewImager(cfg, ot, fsenc, &imager.NewImagerOptions{})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to initialize imager: %w", err)
+		}
+	}
+	im.SetStdout(ui.StdoutWriter())
+	im.SetStderr(ui.StderrWriter())
+	return fsenc, im, nil
+}
+
+func (c *BaseCommand) prepareImagerRef(im imager.IImager, ref string) (string, error) {
+	if err := c.detectRemotedAndPlainRefs(im.PrintError); err != nil {
+		return "", err
+	}
+	rr, err := c.resolveRefRemote(ref, im.PrintWarning)
+	if err != nil {
+		return "", err
+	}
+	im.SetRef(rr.Ref)
+	c.ot.SetRef(rr.Ref)
+	return rr.Ref, nil
+}
+
+func pullRemoteOstree(ui *UI, ot ostree.IOstree, im imager.IImager) error {
+	if err := showRemoteRefs(ot, im.Print); err != nil {
+		return err
+	}
+	remote, err := ot.Remote()
+	if err != nil {
+		return err
+	}
+	im.Print("\n%s%sPulling ostree ref %s:%s ...%s\n",
+		ui.cBold, ui.iconDownload, remote, ot.Ref(), ui.cReset)
+	if err := ot.Pull(); err != nil {
+		return fmt.Errorf("ostree pull failed: %w", err)
+	}
+	return nil
+}
+
 // runImage implements the image building logic.
 func (c *ImageCommand) runImage() error {
 	c.SetupPrinters(fmt.Sprintf("image:%s", c.shortRef(c.ref)))
@@ -151,47 +228,13 @@ func (c *ImageCommand) runImage() error {
 			ref,
 		)
 	}
-	// Set up styled writers for subprocess output.
-	c.ot.SetStdout(c.StdoutWriter())
-	c.ot.SetStderr(c.StderrWriter())
-	c.ot.SetVerbose(false) // ostree's own verbose flag, separate from ours.
 
-	// Verify imager environment.
-	if err := c.qa.VerifyImagerEnvironmentSetup("/"); err != nil {
-		return fmt.Errorf("environment verification failed: %w", err)
-	}
-
-	fsenc, err := filesystems.NewFsenc(
-		c.cfg,
-		func(mapperName string) {
-			c.Printf(
-				"Opening encrypted rootfs as %s ...\n", mapperName)
-		},
-		func(mapperName string) {
-			c.Printf(
-				"Opened encrypted rootfs as %s.\n", mapperName)
-		},
-	)
+	fsenc, im, err := initImagerRuntime(c.cfg, c.ot, c.qa, &c.UI, "/", nil)
 	if err != nil {
-		return fmt.Errorf("failed to initialize fsenc: %w", err)
+		return err
 	}
-	fsenc.SetStdout(c.StdoutWriter())
-	fsenc.SetStderr(c.StderrWriter())
 	c.fsenc = fsenc
-
-	// Validate LUKS variables.
-	if err := c.fsenc.ValidateLuksVariables(); err != nil {
-		return fmt.Errorf("LUKS validation failed: %w", err)
-	}
-
-	opts := imager.NewImagerOptions{}
-	im, err := imager.NewImager(c.cfg, c.ot, c.fsenc, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to initialize imager: %w", err)
-	}
 	c.im = im
-	c.im.SetStdout(c.StdoutWriter())
-	c.im.SetStderr(c.StderrWriter())
 
 	// Fail fast on bad params.
 	if err := failFastChecks(c.ot, imager.NewImagerConfig(c.cfg)); err != nil {
@@ -204,20 +247,9 @@ func (c *ImageCommand) runImage() error {
 		return err
 	}
 
-	// Check against mixing refs with remote embedded in the ref and not, warn the user about it.
-	if err := c.detectRemotedAndPlainRefs(c.im.PrintError); err != nil {
+	if _, err := c.prepareImagerRef(c.im, ref); err != nil {
 		return err
 	}
-
-	// Handle refs that contain the remote prefix (e.g. "origin:matrixos/...").
-	rr, err := c.resolveRefRemote(ref, c.im.PrintWarning)
-	if err != nil {
-		return err
-	}
-	ref = rr.Ref
-
-	c.im.SetRef(ref)
-	c.ot.SetRef(ref)
 
 	// Setup image (the main work) under an exclusive image lock.
 	return c.im.ExecuteWithImageLock(func() error {
@@ -235,7 +267,7 @@ func (c *ImageCommand) runImage() error {
 
 		// Initialize ostree.
 		if c.localOstree {
-			if err := c.showLocalRefs(); err != nil {
+			if err := showLocalRefs(c.ot, c.im.Print); err != nil {
 				return err
 			}
 		} else {
@@ -276,29 +308,5 @@ func (c *ImageCommand) validateDevicePaths() (*imager.BuildOptions, error) {
 
 // initializeRemoteOstree sets up the ostree remote and pulls the specified ref.
 func (c *ImageCommand) initializeRemoteOstree() error {
-	if err := c.showRemoteRefs(); err != nil {
-		return err
-	}
-
-	remote, err := c.ot.Remote()
-	if err != nil {
-		return err
-	}
-
-	c.im.Print("\n%s%sPulling ostree ref %s:%s ...%s\n",
-		c.cBold, c.iconDownload, remote, c.ot.Ref(), c.cReset)
-	if err := c.ot.Pull(); err != nil {
-		return fmt.Errorf("ostree pull failed: %w", err)
-	}
-	return nil
-}
-
-// showLocalRefs prints the local ostree refs to the provided printf function.
-func (c *ImageCommand) showLocalRefs() error {
-	return showLocalRefs(c.ot, c.im.Print)
-}
-
-// showRemoteRefs prints the remote ostree refs to the provided printf function.
-func (c *ImageCommand) showRemoteRefs() error {
-	return showRemoteRefs(c.ot, c.im.Print)
+	return pullRemoteOstree(&c.UI, c.ot, c.im)
 }
