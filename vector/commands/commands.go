@@ -48,58 +48,96 @@ type ICommand interface {
 //	        ...
 //	    })
 //	}
+var (
+	// signalExit is the exit function called by SignalGuard after running
+	// cleanups on SIGINT/SIGTERM. Overridden in tests.
+	signalExit = os.Exit
+
+	sigCoordMu    sync.Mutex
+	activeGuards  []*SignalGuard
+	globalSigCh   chan os.Signal
+	globalSigDone chan struct{}
+)
+
 type SignalGuard struct {
 	mu        sync.Mutex
 	cleanupMu sync.Mutex
 	cleanups  []func()
 	armed     bool
-	sigCh     chan os.Signal
-	done      chan struct{}
 }
 
-// Arm starts listening for SIGINT and SIGTERM.  On receipt the full
-// cleanup stack is executed (LIFO) and the process exits with code 1.
+// runAllActiveCleanups executes cleanups for all currently armed SignalGuards
+// in LIFO order (innermost nested command first, outermost parent last).
+func runAllActiveCleanups() {
+	sigCoordMu.Lock()
+	guards := make([]*SignalGuard, len(activeGuards))
+	copy(guards, activeGuards)
+	sigCoordMu.Unlock()
+
+	for i := len(guards) - 1; i >= 0; i-- {
+		guards[i].runCleanups()
+	}
+}
+
+// Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
+// On receipt all armed guards' cleanup stacks are executed in LIFO order
+// before the process exits with code 1.
 // Arm is idempotent — calling it on an already-armed guard is a no-op.
 func (sg *SignalGuard) Arm() {
-	sg.mu.Lock()
-	defer sg.mu.Unlock()
+	sigCoordMu.Lock()
+	defer sigCoordMu.Unlock()
 
 	if sg.armed {
 		return
 	}
 	sg.armed = true
-	sigCh := make(chan os.Signal, 1)
-	done := make(chan struct{})
-	sg.sigCh = sigCh
-	sg.done = done
+	activeGuards = append(activeGuards, sg)
 
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if len(activeGuards) == 1 {
+		sigCh := make(chan os.Signal, 1)
+		done := make(chan struct{})
+		globalSigCh = sigCh
+		globalSigDone = done
 
-	go func(sigCh <-chan os.Signal, done <-chan struct{}) {
-		select {
-		case sig := <-sigCh:
-			fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
-			sg.runCleanups()
-			os.Exit(1)
-		case <-done:
-			return
-		}
-	}(sigCh, done)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+		go func(sigCh <-chan os.Signal, done <-chan struct{}) {
+			select {
+			case sig := <-sigCh:
+				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
+				runAllActiveCleanups()
+				signalExit(1)
+			case <-done:
+				return
+			}
+		}(sigCh, done)
+	}
 }
 
-// Disarm stops the signal listener and clears the cleanup stack.
-// It is safe to call multiple times.
+// Disarm unregisters this guard from the signal listener and clears its
+// cleanup stack.  It is safe to call multiple times.
 func (sg *SignalGuard) Disarm() {
-	sg.mu.Lock()
-	defer sg.mu.Unlock()
-
-	if !sg.armed {
-		return
+	sigCoordMu.Lock()
+	if sg.armed {
+		sg.armed = false
+		for i, g := range activeGuards {
+			if g == sg {
+				activeGuards = append(activeGuards[:i], activeGuards[i+1:]...)
+				break
+			}
+		}
+		if len(activeGuards) == 0 && globalSigCh != nil {
+			signal.Stop(globalSigCh)
+			close(globalSigDone)
+			globalSigCh = nil
+			globalSigDone = nil
+		}
 	}
-	sg.armed = false
-	signal.Stop(sg.sigCh)
-	close(sg.done)
+	sigCoordMu.Unlock()
+
+	sg.mu.Lock()
 	sg.cleanups = nil
+	sg.mu.Unlock()
 }
 
 // PushCleanup adds a cleanup function to the top of the LIFO stack.

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -137,5 +139,42 @@ func TestVMDriver_ExpectDoesNotBlockWriterAfterReturn(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("VMDriver pump stalled writer after Expect returned (deadlock risk during VM shutdown)")
+	}
+}
+
+func TestSignalGuard_NestedGuardsDoNotExitMidCleanup(t *testing.T) {
+	origExit := signalExit
+	exitCalled := make(chan bool, 4)
+	var innerCleanupDone atomic.Bool
+
+	signalExit = func(code int) {
+		exitCalled <- innerCleanupDone.Load()
+	}
+	t.Cleanup(func() { signalExit = origExit })
+
+	// Mirrors AllCommand (outer guard with no cleanups) running SeedsCommand /
+	// ReleasesCommand / ImagesCommand (inner guard with critical cleanups).
+	var outer, inner SignalGuard
+	outer.Arm()
+	defer outer.Disarm()
+
+	inner.Arm()
+	defer inner.Disarm()
+	inner.PushCleanup(func() {
+		time.Sleep(60 * time.Millisecond)
+		innerCleanupDone.Store(true)
+	})
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("kill SIGINT: %v", err)
+	}
+
+	select {
+	case doneBeforeExit := <-exitCalled:
+		if !doneBeforeExit {
+			t.Fatal("signalExit was called while inner SignalGuard cleanup was still running")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("timed out waiting for signalExit")
 	}
 }
