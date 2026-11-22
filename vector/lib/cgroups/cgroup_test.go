@@ -342,7 +342,7 @@ func TestBoostWorker_OutOfBounds(t *testing.T) {
 func TestBoostUnboostWorker_Memory(t *testing.T) {
 	root := fakeCgroupRoot(t)
 	memPerWorker := uint64(4 * 1024 * 1024 * 1024) // 4 GiB
-	totalMem := uint64(12 * 1024 * 1024 * 1024)     // 12 GiB
+	totalMem := uint64(12 * 1024 * 1024 * 1024)    // 12 GiB
 	pool, err := NewWorkerPool(&WorkerPoolOptions{
 		Parallelism:       3,
 		NumCPUs:           12,
