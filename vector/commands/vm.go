@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -33,12 +34,20 @@ const (
 	rootPassword = "matrix"
 )
 
+type vmChunk struct {
+	data string
+	err  error
+}
+
 type VMDriver struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	reader  *bufio.Reader
-	display io.Writer // where to echo VM output (nil = discard)
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	reader   *bufio.Reader
+	display  io.Writer // where to echo VM output (nil = discard)
+	pumpOnce sync.Once
+	chunks   chan vmChunk
+	pumpDone chan struct{}
 }
 
 func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
@@ -76,46 +85,64 @@ func (vm *VMDriver) Start() error {
 	return vm.cmd.Start()
 }
 
-// Expect waits for a specific string in the output within a timeout
-func (vm *VMDriver) Expect(target string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	resultCh := make(chan error)
-
-	go func() {
-		buf := make([]byte, 1024)
-		var matchBuf strings.Builder
-		for {
-			n, err := vm.reader.Read(buf)
-			if n > 0 {
-				chunk := string(buf[:n])
-				if vm.display != nil {
-					fmt.Fprint(vm.display, chunk)
+// ensurePump starts a single background goroutine that reads vm.reader
+// sequentially, avoiding concurrent bufio.Reader access and goroutine leaks
+// when Expect times out.
+func (vm *VMDriver) ensurePump() {
+	vm.pumpOnce.Do(func() {
+		vm.chunks = make(chan vmChunk, 64)
+		vm.pumpDone = make(chan struct{})
+		go func() {
+			defer close(vm.pumpDone)
+			defer close(vm.chunks)
+			buf := make([]byte, 1024)
+			for {
+				n, err := vm.reader.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					if vm.display != nil {
+						fmt.Fprint(vm.display, chunk)
+					}
+					vm.chunks <- vmChunk{data: chunk}
 				}
-				matchBuf.WriteString(chunk)
-				if strings.Contains(matchBuf.String(), target) {
-					resultCh <- nil
+				if err != nil {
+					vm.chunks <- vmChunk{err: err}
 					return
 				}
 			}
-			if err != nil {
-				if err != io.EOF {
-					resultCh <- err
-				} else {
-					// EOF reached but target not found yet, loop will exit next read
-					resultCh <- fmt.Errorf("EOF reached while waiting for pattern: %q", target)
-				}
-				return
-			}
-		}
-	}()
+		}()
+	})
+}
 
-	select {
-	case err := <-resultCh:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("timeout waiting for pattern: %q", target)
+// Expect waits for a specific string in the output within a timeout
+func (vm *VMDriver) Expect(target string, timeout time.Duration) error {
+	vm.ensurePump()
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var matchBuf strings.Builder
+	for {
+		select {
+		case chunk, ok := <-vm.chunks:
+			if !ok {
+				return fmt.Errorf("EOF reached while waiting for pattern: %q", target)
+			}
+			if chunk.data != "" {
+				matchBuf.WriteString(chunk.data)
+				if strings.Contains(matchBuf.String(), target) {
+					return nil
+				}
+			}
+			if chunk.err != nil {
+				if chunk.err == io.EOF {
+					return fmt.Errorf("EOF reached while waiting for pattern: %q", target)
+				}
+				return chunk.err
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for pattern: %q", target)
+		}
 	}
 }
 

@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"bufio"
 	"bytes"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -68,4 +70,31 @@ func TestStyledWriter_ConcurrentGlobalLogDest(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestVMDriver_ExpectTimeoutThenExpectRace(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	defer pr.Close()
+
+	vm := &VMDriver{
+		stdout:  pr,
+		reader:  bufio.NewReader(pr),
+		display: io.Discard,
+	}
+
+	// First Expect times out while reader is blocked on pipe.
+	if err := vm.Expect("never-arrives", 20*time.Millisecond); err == nil {
+		t.Fatal("expected timeout error")
+	}
+
+	// Second Expect while writing to the pipe races with the leaked reader
+	// goroutine from the first Expect on vm.reader.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		_, _ = pw.Write([]byte("ready\n"))
+	}()
+	if err := vm.Expect("ready", 200*time.Millisecond); err != nil {
+		t.Fatalf("second Expect failed: %v", err)
+	}
 }
