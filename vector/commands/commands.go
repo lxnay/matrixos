@@ -53,10 +53,11 @@ var (
 	// cleanups on SIGINT/SIGTERM. Overridden in tests.
 	signalExit = os.Exit
 
-	sigCoordMu    sync.Mutex
-	activeGuards  []*SignalGuard
-	globalSigCh   chan os.Signal
-	globalSigDone chan struct{}
+	sigCoordMu            sync.Mutex
+	activeGuards          []*SignalGuard
+	globalSigCh           chan os.Signal
+	globalSigDone         chan struct{}
+	globalSigListenerDone chan struct{}
 )
 
 type SignalGuard struct {
@@ -64,19 +65,6 @@ type SignalGuard struct {
 	cleanupMu sync.Mutex
 	cleanups  []func()
 	armed     bool
-}
-
-// runAllActiveCleanups executes cleanups for all currently armed SignalGuards
-// in LIFO order (innermost nested command first, outermost parent last).
-func runAllActiveCleanups() {
-	sigCoordMu.Lock()
-	guards := make([]*SignalGuard, len(activeGuards))
-	copy(guards, activeGuards)
-	sigCoordMu.Unlock()
-
-	for i := len(guards) - 1; i >= 0; i-- {
-		guards[i].runCleanups()
-	}
 }
 
 // Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
@@ -93,24 +81,50 @@ func (sg *SignalGuard) Arm() {
 	sg.armed = true
 	activeGuards = append(activeGuards, sg)
 
-	if len(activeGuards) == 1 {
+	if globalSigCh == nil {
 		sigCh := make(chan os.Signal, 1)
 		done := make(chan struct{})
+		listenerDone := make(chan struct{})
 		globalSigCh = sigCh
 		globalSigDone = done
+		globalSigListenerDone = listenerDone
 
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-		go func(sigCh <-chan os.Signal, done <-chan struct{}) {
+		go func(sigCh chan os.Signal, done <-chan struct{}, listenerDone chan struct{}) {
+			defer func() {
+				sigCoordMu.Lock()
+				if globalSigDone == done {
+					signal.Stop(sigCh)
+					globalSigCh = nil
+					globalSigDone = nil
+					globalSigListenerDone = nil
+				}
+				sigCoordMu.Unlock()
+				close(listenerDone)
+			}()
+
 			select {
-			case sig := <-sigCh:
-				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
-				runAllActiveCleanups()
-				signalExit(1)
 			case <-done:
 				return
+			case sig := <-sigCh:
+				sigCoordMu.Lock()
+				if globalSigDone != done {
+					// Disarm() already stopped this listener while a signal was buffered.
+					sigCoordMu.Unlock()
+					return
+				}
+				guards := make([]*SignalGuard, len(activeGuards))
+				copy(guards, activeGuards)
+				sigCoordMu.Unlock()
+
+				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
+				for i := len(guards) - 1; i >= 0; i-- {
+					guards[i].runCleanups()
+				}
+				signalExit(1)
 			}
-		}(sigCh, done)
+		}(sigCh, done, listenerDone)
 	}
 }
 
@@ -119,6 +133,7 @@ func (sg *SignalGuard) Arm() {
 func (sg *SignalGuard) Disarm() {
 	sigCoordMu.Lock()
 	wasArmed := sg.armed
+	var waitListener <-chan struct{}
 	if wasArmed {
 		sg.armed = false
 		for i, g := range activeGuards {
@@ -130,16 +145,24 @@ func (sg *SignalGuard) Disarm() {
 		if len(activeGuards) == 0 && globalSigCh != nil {
 			signal.Stop(globalSigCh)
 			close(globalSigDone)
+			waitListener = globalSigListenerDone
 			globalSigCh = nil
 			globalSigDone = nil
+			globalSigListenerDone = nil
 		}
 	}
 	sigCoordMu.Unlock()
 
+	if waitListener != nil {
+		<-waitListener
+	}
+
 	if wasArmed {
+		sg.cleanupMu.Lock()
 		sg.mu.Lock()
 		sg.cleanups = nil
 		sg.mu.Unlock()
+		sg.cleanupMu.Unlock()
 	}
 }
 
@@ -147,6 +170,9 @@ func (sg *SignalGuard) Disarm() {
 // Cleanups are executed in reverse order of registration (last-in, first-out)
 // exactly like nested bash trap handlers.
 func (sg *SignalGuard) PushCleanup(fn func()) {
+	if fn == nil {
+		return
+	}
 	sg.mu.Lock()
 	defer sg.mu.Unlock()
 	sg.cleanups = append(sg.cleanups, fn)
@@ -169,22 +195,28 @@ func (sg *SignalGuard) runCleanups() {
 	sg.cleanupMu.Lock()
 	defer sg.cleanupMu.Unlock()
 
-	sg.mu.Lock()
-	fns := make([]func(), len(sg.cleanups))
-	copy(fns, sg.cleanups)
-	sg.cleanups = nil
-	sg.mu.Unlock()
+	for {
+		sg.mu.Lock()
+		if len(sg.cleanups) == 0 {
+			sg.mu.Unlock()
+			return
+		}
+		fns := make([]func(), len(sg.cleanups))
+		copy(fns, sg.cleanups)
+		sg.cleanups = nil
+		sg.mu.Unlock()
 
-	// Execute in LIFO order.
-	for i := len(fns) - 1; i >= 0; i-- {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic during cleanup: %v\n", r)
-				}
+		// Execute in LIFO order.
+		for i := len(fns) - 1; i >= 0; i-- {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "panic during cleanup: %v\n", r)
+					}
+				}()
+				fns[i]()
 			}()
-			fns[i]()
-		}()
+		}
 	}
 }
 

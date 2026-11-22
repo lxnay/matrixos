@@ -311,3 +311,120 @@ func TestVMCommand_RunTestsCancelsBeforeWaitingOnError(t *testing.T) {
 		t.Fatalf("runTests took %v after 60ms boot timeout (defer vm.Close ran before defer cancel)", elapsed)
 	}
 }
+
+func TestSignalGuard_PushCleanupDuringRunCleanupsExecutes(t *testing.T) {
+	var sg SignalGuard
+	var lateRan atomic.Bool
+
+	sg.PushCleanup(func() {
+		sg.PushCleanup(func() {
+			lateRan.Store(true)
+		})
+	})
+
+	sg.RunCleanups()
+
+	if !lateRan.Load() {
+		t.Fatal("cleanup pushed while RunCleanups was draining did not execute")
+	}
+}
+
+func TestSignalGuard_DisarmWaitsForInFlightSignalHandler(t *testing.T) {
+	origExit := signalExit
+	exitDone := make(chan struct{}, 1)
+	signalExit = func(int) {
+		exitDone <- struct{}{}
+	}
+	t.Cleanup(func() { signalExit = origExit })
+
+	var sg SignalGuard
+	inCleanup := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+
+	sg.Arm()
+	sg.PushCleanup(func() {
+		close(inCleanup)
+		<-releaseCleanup
+	})
+
+	sigCoordMu.Lock()
+	ch := globalSigCh
+	sigCoordMu.Unlock()
+	ch <- syscall.SIGINT
+
+	<-inCleanup
+
+	disarmDone := make(chan struct{})
+	go func() {
+		sg.Disarm()
+		close(disarmDone)
+	}()
+
+	select {
+	case <-disarmDone:
+		close(releaseCleanup)
+		<-exitDone
+		t.Fatal("Disarm() returned while signal handler was still executing cleanups")
+	case <-time.After(80 * time.Millisecond):
+		close(releaseCleanup)
+	}
+
+	<-exitDone
+	<-disarmDone
+}
+
+func TestSignalGuard_RespawnsListenerAfterSignalExitReturns(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 2)
+	signalExit = func(code int) {
+		exitCh <- code
+	}
+	t.Cleanup(func() { signalExit = origExit })
+
+	var outer, inner1, inner2 SignalGuard
+	outer.Arm()
+	defer outer.Disarm()
+
+	inner1.Arm()
+	sigCoordMu.Lock()
+	ch1 := globalSigCh
+	sigCoordMu.Unlock()
+	ch1 <- syscall.SIGINT
+
+	select {
+	case <-exitCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first signalExit")
+	}
+	inner1.Disarm()
+
+	// Wait briefly for the first listener goroutine to finish its defer cleanup.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sigCoordMu.Lock()
+		cleared := globalSigCh == nil
+		sigCoordMu.Unlock()
+		if cleared {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Arming another guard while outer is still armed must ensure a live listener.
+	inner2.Arm()
+	defer inner2.Disarm()
+
+	sigCoordMu.Lock()
+	ch2 := globalSigCh
+	sigCoordMu.Unlock()
+	if ch2 == nil {
+		t.Fatal("expected live signal channel after re-arming")
+	}
+	ch2 <- syscall.SIGINT
+
+	select {
+	case <-exitCh:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("second signal was never handled because previous listener exited without clearing globalSigCh")
+	}
+}
