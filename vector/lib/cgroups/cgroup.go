@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 )
 
@@ -24,6 +25,7 @@ type workerCgroup struct {
 // WorkerPool manages a set of per-worker cgroups with memory limits.
 // A nil *WorkerPool is safe to call methods on (no-op).
 type WorkerPool struct {
+	mu        sync.RWMutex
 	parentDir string
 	workers   []*workerCgroup
 	opts      *WorkerPoolOptions
@@ -95,9 +97,10 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 		return nil, err
 	}
 
+	optsCopy := *opts
 	pool := &WorkerPool{
 		parentDir: parentDir,
-		opts: opts,
+		opts:      &optsCopy,
 		useCpuset: useCpuset,
 	}
 	for i := range opts.Parallelism {
@@ -260,7 +263,12 @@ func writeCpusetPinning(dir string, index int, opts *WorkerPoolOptions) error {
 }
 
 func (p *WorkerPool) setWorkerResources(workerIndex int, boosted bool) error {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) {
 		return nil
 	}
 	w := p.workers[workerIndex]
@@ -300,7 +308,12 @@ func (p *WorkerPool) UnboostWorker(workerIndex int) error {
 // directly into the given worker's cgroup via clone3(CLONE_INTO_CGROUP),
 // or nil if the pool is inactive.
 func (p *WorkerPool) SysProcAttr(workerIndex int) *syscall.SysProcAttr {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) || p.workers[workerIndex].fd < 0 {
 		return nil
 	}
 	return &syscall.SysProcAttr{
@@ -314,6 +327,8 @@ func (p *WorkerPool) Close() {
 	if p == nil {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, w := range p.workers {
 		if w.fd >= 0 {
 			syscall.Close(w.fd)
