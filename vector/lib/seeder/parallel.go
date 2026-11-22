@@ -138,6 +138,10 @@ func buildSeedGraph(
 	graph.descCount = computeDescendantCounts(graph.dependents, seeders)
 
 	// Seed the ready queue with seeders that have zero unsatisfied deps.
+	if len(seeders) == 0 {
+		close(graph.ready)
+		return graph
+	}
 	for _, info := range seeders {
 		if graph.depCount[info.Name] == 0 {
 			if graph.descCount[info.Name]+1 == graph.remaining {
