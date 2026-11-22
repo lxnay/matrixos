@@ -39,3 +39,22 @@ func TestCopyFile_ConcurrentSameDest(t *testing.T) {
 		t.Errorf("concurrent CopyFile failed: %v", err)
 	}
 }
+
+func TestCopyFile_PreservesSourceMode(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.pub")
+	dst := filepath.Join(tmp, "dst.pub")
+	if err := os.WriteFile(src, []byte("pubkey"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CopyFile(src, dst); err != nil {
+		t.Fatalf("CopyFile: %v", err)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Errorf("CopyFile mode = %04o, want 0644", got)
+	}
+}

@@ -21,6 +21,11 @@ func CopyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
+	srcInfo, err := sourceFile.Stat()
+	if err != nil {
+		return err
+	}
+
 	destFile, err := os.CreateTemp(filepath.Dir(dst), ".copy-*.tmp")
 	if err != nil {
 		return err
@@ -35,6 +40,9 @@ func CopyFile(src, dst string) error {
 	}()
 
 	if _, err = io.Copy(destFile, sourceFile); err != nil {
+		return err
+	}
+	if err = destFile.Chmod(srcInfo.Mode().Perm()); err != nil {
 		return err
 	}
 	if err = destFile.Sync(); err != nil {
