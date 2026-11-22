@@ -42,6 +42,8 @@ type VMDriver struct {
 	reader   *bufio.Reader
 	display  io.Writer // where to echo VM output (nil = discard)
 	pumpOnce sync.Once
+	waitOnce sync.Once
+	waitErr  error
 	mu       sync.Mutex
 	outBuf   string
 	eof      bool
@@ -91,9 +93,12 @@ func (vm *VMDriver) Start() error {
 func (vm *VMDriver) ensurePump() {
 	vm.pumpOnce.Do(func() {
 		vm.notify = make(chan struct{}, 1)
-		vm.pumpDone = make(chan struct{})
+		pumpDone := make(chan struct{})
+		vm.mu.Lock()
+		vm.pumpDone = pumpDone
+		vm.mu.Unlock()
 		go func() {
-			defer close(vm.pumpDone)
+			defer close(pumpDone)
 			buf := make([]byte, 1024)
 			for {
 				n, err := vm.reader.Read(buf)
@@ -173,9 +178,23 @@ func (vm *VMDriver) Close() error {
 	return vm.Wait()
 }
 
-// Wait waits for the VM process to exit
+// Wait waits for the VM process to exit and for any active stdout pump
+// goroutine to finish.  It is safe to call multiple times (e.g. an explicit
+// Wait followed by a deferred Close).
 func (vm *VMDriver) Wait() error {
-	return vm.cmd.Wait()
+	if vm == nil || vm.cmd == nil || vm.cmd.Process == nil {
+		return nil
+	}
+	vm.waitOnce.Do(func() {
+		vm.waitErr = vm.cmd.Wait()
+		vm.mu.Lock()
+		done := vm.pumpDone
+		vm.mu.Unlock()
+		if done != nil {
+			<-done
+		}
+	})
+	return vm.waitErr
 }
 
 // VMCommand checks matrixOS images via QEMU
@@ -439,7 +458,10 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 		return fmt.Errorf("failed to init VM: %w", err)
 	}
 	vm.display = os.Stdout
-	defer vm.Close()
+	defer func() {
+		cancel()
+		_ = vm.Close()
+	}()
 
 	if err := vm.Start(); err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)

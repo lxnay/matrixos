@@ -3,8 +3,10 @@ package commands
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -245,5 +247,67 @@ func TestAllCommand_FlushesAndClosesLogBeforeSendMail(t *testing.T) {
 	}
 	if !strings.Contains(string(finalLog), "partial-cdn-output") {
 		t.Errorf("final logFile missing flushed partial output (FlushPrinters ran after logF.Close); got:\n%s", string(finalLog))
+	}
+}
+
+func TestVMDriver_WaitAndCloseAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "sh", "-c", "echo ready")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := &VMDriver{
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		reader:  bufio.NewReader(stdout),
+		display: io.Discard,
+	}
+	if err := vm.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := vm.Expect("ready", 2*time.Second); err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	if err := vm.Wait(); err != nil {
+		t.Fatalf("first Wait: %v", err)
+	}
+	// Mirrors runInteractive/runTests calling vm.Wait() followed by defer vm.Close().
+	if err := vm.Close(); err != nil {
+		t.Fatalf("Close after Wait failed (double exec.Cmd.Wait): %v", err)
+	}
+}
+
+func TestVMCommand_RunTestsCancelsBeforeWaitingOnError(t *testing.T) {
+	binDir := t.TempDir()
+	fakeQemu := filepath.Join(binDir, qemuSystemBinary())
+	if err := os.WriteFile(fakeQemu, []byte("#!/bin/sh\nexec sleep 30\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewVMCommand()
+	c.StartUI()
+	c.SetupPrinters("vm")
+	defer c.FlushPrinters()
+	c.waitBoot = 60 * time.Millisecond
+	c.waitTests = 60 * time.Millisecond
+	c.maxRunTime = 3 * time.Second
+
+	start := time.Now()
+	err := c.runTests(nil)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected boot timeout error, got nil")
+	}
+	// With cancel() running before vm.Close(), sleep 30 is interrupted immediately
+	// (~60ms + process teardown) rather than blocking until maxRunTime (3s).
+	if elapsed > 1*time.Second {
+		t.Fatalf("runTests took %v after 60ms boot timeout (defer vm.Close ran before defer cancel)", elapsed)
 	}
 }
