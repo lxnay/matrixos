@@ -238,10 +238,13 @@ func (c *IniConfig) AddOverlay(overlay map[string][]string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.cfg == nil {
+		c.cfg = make(map[string][]string)
+	}
 	for k, v := range overlay {
 		vals, ok := c.cfg[k]
 		if !ok {
-			c.cfg[k] = v
+			c.cfg[k] = slices.Clone(v)
 			continue
 		}
 		vals = append(vals, v...)
@@ -530,7 +533,7 @@ func (c *IniConfig) GetItems(key string) ([]string, error) {
 	if !ok {
 		return vals, fmt.Errorf("invalid key %s", key)
 	}
-	return lst, nil
+	return slices.Clone(lst), nil
 }
 
 func (c *IniConfig) getVal(key string) (string, bool) {
