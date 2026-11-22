@@ -564,79 +564,40 @@ func (c *UpgradeCommand) formatEtcChanges(changes []ostree.EtcChange) string {
 	var b strings.Builder
 
 	// Group changes by action for a structured summary.
-	var conflicts, updates, adds, removes, userOnly []ostree.EtcChange
+	byAction := make(map[ostree.EtcChangeAction][]ostree.EtcChange)
 	for _, ch := range changes {
-		switch ch.Action {
-		case ostree.EtcActionConflict:
-			conflicts = append(conflicts, ch)
-		case ostree.EtcActionUpdate:
-			updates = append(updates, ch)
-		case ostree.EtcActionAdd:
-			adds = append(adds, ch)
-		case ostree.EtcActionRemove:
-			removes = append(removes, ch)
-		case ostree.EtcActionUserOnly:
-			userOnly = append(userOnly, ch)
-		}
+		byAction[ch.Action] = append(byAction[ch.Action], ch)
+	}
+
+	sections := []struct {
+		action      ostree.EtcChangeAction
+		title       string
+		color       string
+		headerIcon  string
+		itemIcon    string
+		showDetail  bool
+		verboseOnly bool
+	}{
+		{ostree.EtcActionConflict, "Conflicts (manual resolution required):", c.cRed, c.iconWarn, c.iconError, true, false},
+		{ostree.EtcActionUpdate, "Updated by upstream (will be applied):", c.cGreen, c.iconUpdate, c.iconUpdate, true, false},
+		{ostree.EtcActionAdd, "New files from upstream:", c.cGreen, c.iconNew, c.iconNew, true, false},
+		{ostree.EtcActionRemove, "Removed by upstream (will be deleted):", c.cYellow, c.iconError, c.iconError, false, false},
+		{ostree.EtcActionUserOnly, "User modifications (preserved):", c.cBlue, c.iconDoc, c.iconDoc, false, true},
 	}
 
 	somethingPrinted := false
-
-	// Conflicts first — they require attention.
-	if len(conflicts) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Conflicts (manual resolution required):%s\n",
-			c.cRed, c.iconWarn, c.cReset)
-		for _, ch := range conflicts {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconError, c.cRed, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
+	for _, sec := range sections {
+		items := byAction[sec.action]
+		if len(items) == 0 || (sec.verboseOnly && !c.verbose) {
+			continue
 		}
-	}
-
-	// Updates — clean upstream changes that will be applied.
-	if len(updates) > 0 {
 		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Updated by upstream (will be applied):%s\n",
-			c.cGreen, c.iconUpdate, c.cReset)
-		for _, ch := range updates {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconUpdate, c.cGreen, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
-		}
-	}
-
-	// Adds — new files from upstream.
-	if len(adds) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s New files from upstream:%s\n",
-			c.cGreen, c.iconNew, c.cReset)
-		for _, ch := range adds {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconNew, c.cGreen, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
-		}
-	}
-
-	// Removes — files removed upstream.
-	if len(removes) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Removed by upstream (will be deleted):%s\n",
-			c.cYellow, c.iconError, c.cReset)
-		for _, ch := range removes {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconError, c.cYellow, ch.Path, c.cReset)
-		}
-	}
-
-	// User-only — local changes preserved as-is.
-	if len(userOnly) > 0 && c.verbose {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s User modifications (preserved):%s\n",
-			c.cBlue, c.iconDoc, c.cReset)
-		for _, ch := range userOnly {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconDoc, c.cBlue, ch.Path, c.cReset)
+		fmt.Fprintf(&b, "\n   %s%s %s%s\n", sec.color, sec.headerIcon, sec.title, c.cReset)
+		for _, ch := range items {
+			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n", sec.itemIcon, sec.color, ch.Path, c.cReset)
+			if sec.showDetail {
+				c.writeChangeDetail(&b, ch)
+			}
 		}
 	}
 
@@ -648,7 +609,12 @@ func (c *UpgradeCommand) formatEtcChanges(changes []ostree.EtcChange) string {
 	// Summary line
 	fmt.Fprintf(&b, "\n   %sSummary:%s %d conflict(s), %d update(s), %d add(s), %d remove(s), %d user-only\n",
 		c.cBold, c.cReset,
-		len(conflicts), len(updates), len(adds), len(removes), len(userOnly))
+		len(byAction[ostree.EtcActionConflict]),
+		len(byAction[ostree.EtcActionUpdate]),
+		len(byAction[ostree.EtcActionAdd]),
+		len(byAction[ostree.EtcActionRemove]),
+		len(byAction[ostree.EtcActionUserOnly]),
+	)
 
 	return b.String()
 }
