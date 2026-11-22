@@ -71,13 +71,13 @@ GpgOfficialPublicKey=pubkeys/ostree.gpg
 	}
 	tmpFile.Close()
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    tmpFile.Name(),
 		DefaultRoot:   rootPath,
 		ConfRoot:      confRootPath,
 		ArtifactsRoot: artifactsRootPath,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -154,14 +154,14 @@ func TestIniConfig_Defaults(t *testing.T) {
 	defer os.Remove(tmpFile.Name())
 	tmpFile.Close()
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    tmpFile.Name(),
 		DefaultRoot:   filepath.Dir(tmpFile.Name()),
 		ConfRoot:      filepath.Dir(tmpFile.Name()),
 		ArtifactsRoot: filepath.Dir(tmpFile.Name()),
 	}
 
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -253,13 +253,13 @@ Key3=OverrideValue3
 		t.Fatalf("Failed to write ignored file: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    configPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -332,13 +332,13 @@ DownloadsDir=main-downloads
 		t.Fatalf("Failed to write main config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    mainPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -386,13 +386,13 @@ Root=/some/root
 		t.Fatalf("Failed to write main config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    mainPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -427,13 +427,13 @@ LogsDir=logs
 		t.Fatalf("Failed to write main config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    mainPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -512,13 +512,13 @@ DownloadsDir=sub-downloads
 		t.Fatalf("Failed to write sub config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    mainPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -590,13 +590,13 @@ DownloadsDir=from-main
 		t.Fatalf("Failed to write main config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    mainPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: tmpDir,
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -883,13 +883,13 @@ func TestIniConfig_Clone_Empty(t *testing.T) {
 
 func TestIniConfig_NewFromPath_Validation(t *testing.T) {
 	// nil params
-	_, err := NewIniConfigFromPath(nil)
+	_, err := newIniConfigFromPath(nil)
 	if err == nil {
 		t.Fatal("Expected error for nil params")
 	}
 
 	// missing ConfigPath
-	_, err = NewIniConfigFromPath(&ConfigFromPathParams{
+	_, err = newIniConfigFromPath(&configFromPathParams{
 		DefaultRoot:   "/r",
 		ConfRoot:      "/c",
 		ArtifactsRoot: "/a",
@@ -899,7 +899,7 @@ func TestIniConfig_NewFromPath_Validation(t *testing.T) {
 	}
 
 	// missing DefaultRoot
-	_, err = NewIniConfigFromPath(&ConfigFromPathParams{
+	_, err = newIniConfigFromPath(&configFromPathParams{
 		ConfigPath:    "/tmp/test.conf",
 		ConfRoot:      "/c",
 		ArtifactsRoot: "/a",
@@ -909,7 +909,7 @@ func TestIniConfig_NewFromPath_Validation(t *testing.T) {
 	}
 
 	// missing ConfRoot
-	_, err = NewIniConfigFromPath(&ConfigFromPathParams{
+	_, err = newIniConfigFromPath(&configFromPathParams{
 		ConfigPath:    "/tmp/test.conf",
 		DefaultRoot:   "/r",
 		ArtifactsRoot: "/a",
@@ -919,7 +919,7 @@ func TestIniConfig_NewFromPath_Validation(t *testing.T) {
 	}
 
 	// missing ArtifactsRoot
-	_, err = NewIniConfigFromPath(&ConfigFromPathParams{
+	_, err = newIniConfigFromPath(&configFromPathParams{
 		ConfigPath:  "/tmp/test.conf",
 		DefaultRoot: "/r",
 		ConfRoot:    "/c",
@@ -976,13 +976,13 @@ HooksDir=release/hooks
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    configPath,
 		DefaultRoot:   "/the/root",
 		ConfRoot:      "/the/confroot",
 		ArtifactsRoot: "/the/artifacts",
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -1052,13 +1052,13 @@ ImagesDir=images
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    configPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: "/fallback/artifacts",
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}
@@ -1106,13 +1106,13 @@ DownloadsDir=seeder/downloads
 		t.Fatalf("Failed to write config: %v", err)
 	}
 
-	params := ConfigFromPathParams{
+	params := configFromPathParams{
 		ConfigPath:    configPath,
 		DefaultRoot:   tmpDir,
 		ConfRoot:      tmpDir,
 		ArtifactsRoot: "/base/artifacts",
 	}
-	cfg, err := NewIniConfigFromPath(&params)
+	cfg, err := newIniConfigFromPath(&params)
 	if err != nil {
 		t.Fatalf("Failed to create config: %v", err)
 	}

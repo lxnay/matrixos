@@ -106,9 +106,3 @@ func NewMockRunner() *MockRunner {
 func NewMockRunnerFailOnCall(n int, err error) *MockRunner {
 	return &MockRunner{FailOn: n, Err: err}
 }
-
-// NewMockRunnerWithOutput creates a MockRunner that always succeeds and
-// returns the given output data for each call index.
-func NewMockRunnerWithOutput(data map[int][]byte) *MockRunner {
-	return &MockRunner{FailOn: -1, OutputData: data}
-}

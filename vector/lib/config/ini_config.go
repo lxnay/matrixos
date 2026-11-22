@@ -124,6 +124,9 @@ func searchPaths(cfgName string) []searchPath {
 	return sps
 }
 
+// Compile-time interface check.
+var _ IConfig = (*IniConfig)(nil)
+
 // IniConfig is a config reader that loads values from an INI file.
 type IniConfig struct {
 	mu  sync.RWMutex
@@ -164,16 +167,16 @@ func NewIniConfig(configName string) (*IniConfig, error) {
 	}, nil
 }
 
-// ConfigFromPathParams holds parameters for creating a config from a specific path.
-type ConfigFromPathParams struct {
+// configFromPathParams holds parameters for creating a config from a specific path.
+type configFromPathParams struct {
 	ConfigPath    string
 	DefaultRoot   string
 	ConfRoot      string
 	ArtifactsRoot string
 }
 
-// NewIniConfigFromPath creates a new IniConfig instance with the specified file path.
-func NewIniConfigFromPath(params *ConfigFromPathParams) (*IniConfig, error) {
+// newIniConfigFromPath creates a new IniConfig instance with the specified file path.
+func newIniConfigFromPath(params *configFromPathParams) (*IniConfig, error) {
 	if params == nil {
 		return nil, fmt.Errorf("params is nil")
 	}

@@ -28,10 +28,6 @@ type IConfig interface {
 	// and casts it to a bool value. This is a shortcut function for config values that
 	// are strictly boolean.
 	GetBool(key string) (bool, error)
-
-	// GetItems retrieves the config values associated to the provided config key.
-	// Config keys can be of type: category.name.
-	GetItems(key string) ([]string, error)
 }
 
 // FilterEnvKey returns a copy of env with all entries for the given key removed.

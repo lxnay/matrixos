@@ -58,7 +58,6 @@ func TestMockConfig_ConcurrentAccess(t *testing.T) {
 		defer wg.Done()
 		for range 200 {
 			_, _ = cfg.GetItem("A.Key")
-			_, _ = cfg.GetItems("A.Key")
 			_, _ = cfg.GetBool("A.Flag")
 		}
 	}()
@@ -79,7 +78,7 @@ func TestIniConfig_ReloadIsAtomicAndDoesNotDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg, err := NewIniConfigFromPath(&ConfigFromPathParams{
+	cfg, err := newIniConfigFromPath(&configFromPathParams{
 		ConfigPath:    cfgPath,
 		DefaultRoot:   tmp,
 		ConfRoot:      tmp,

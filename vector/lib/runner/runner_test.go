@@ -517,10 +517,13 @@ func TestMockRunner_FailOnCall(t *testing.T) {
 }
 
 func TestMockRunner_OutputWithData(t *testing.T) {
-	mr := NewMockRunnerWithOutput(map[int][]byte{
-		0: []byte("first"),
-		1: []byte("second"),
-	})
+	mr := &MockRunner{
+		FailOn: -1,
+		OutputData: map[int][]byte{
+			0: []byte("first"),
+			1: []byte("second"),
+		},
+	}
 
 	out0, err := mr.Output(&Cmd{Name: "cmd0"})
 	if err != nil {
