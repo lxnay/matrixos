@@ -12,6 +12,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/worker"
 )
 
 // luksMapperSeq generates unique per-worker suffixes for host-side LUKS
@@ -63,84 +64,25 @@ func ParallelImage(ctx context.Context, opts *ParallelImageOptions) error {
 	if opts.Parallelism < 1 {
 		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
 	}
-	return runImageWorkerPool(ctx, opts)
-}
-
-// runImageWorkerPool spawns a fixed pool of worker goroutines that
-// pull refs from a work channel.
-func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
-	poolCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var firstErr error
-	var errMu sync.Mutex
 
 	poolStderr := opts.NewStderrWriter("images")
 
-	setError := func(err error) {
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-		}
-		fmt.Fprintf(poolStderr, "%v\n", err)
-		errMu.Unlock()
-		cancel()
-	}
-
-	work := make(chan string, len(opts.Refs))
-	for _, ref := range opts.Refs {
-		work <- ref
-	}
-	close(work)
-
-	var wg sync.WaitGroup
-	for i := 0; i < opts.Parallelism; i++ {
-		wg.Go(func() {
-			for {
-				select {
-				case <-poolCtx.Done():
-					return
-				case ref, ok := <-work:
-					if !ok {
-						return
-					}
-
-					// Check for earlier failure.
-					errMu.Lock()
-					failed := firstErr != nil
-					if failed {
-						fmt.Fprintf(poolStderr,
-							"Skipping ref %s due to earlier failure.\n", ref)
-					}
-					errMu.Unlock()
-					if failed {
-						return
-					}
-
-					err := imageWorker(poolCtx, opts, ref)
-					if err != nil {
-						setError(fmt.Errorf(
-							"ref %s image failed: %w",
-							ref, err,
-						))
-						return
-					}
-				}
+	return worker.RunPool(ctx, worker.PoolOptions[string]{
+		Items:       opts.Refs,
+		Parallelism: opts.Parallelism,
+		Run: func(poolCtx context.Context, ref string) error {
+			if err := imageWorker(poolCtx, opts, ref); err != nil {
+				return fmt.Errorf("ref %s image failed: %w", ref, err)
 			}
-		})
-	}
-
-	wg.Wait()
-
-	// Drain any refs that were never picked up by a worker.
-	if firstErr != nil {
-		for ref := range work {
-			fmt.Fprintf(poolStderr,
-				"Skipping ref %s due to earlier failure.\n", ref)
-		}
-	}
-
-	return firstErr
+			return nil
+		},
+		OnError: func(err error) {
+			fmt.Fprintf(poolStderr, "%v\n", err)
+		},
+		OnSkip: func(ref string) {
+			fmt.Fprintf(poolStderr, "Skipping ref %s due to earlier failure.\n", ref)
+		},
+	})
 }
 
 // imageWorker processes a single image build.
@@ -185,12 +127,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 		fmt.Sprintf("image:%s", shortRef),
 	)
 	flushWriters := func() {
-		if f, ok := imgStdout.(interface{ Flush() }); ok {
-			f.Flush()
-		}
-		if f, ok := imgStderr.(interface{ Flush() }); ok {
-			f.Flush()
-		}
+		worker.FlushWriters(imgStdout, imgStderr)
 	}
 	defer flushWriters()
 

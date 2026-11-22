@@ -11,6 +11,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/seeder"
+	"matrixos/vector/lib/worker"
 )
 
 // mkdirAll is a package-level variable for os.MkdirAll, overridable
@@ -54,72 +55,17 @@ type ParallelReleaseOptions struct {
 // semaphore-based worker pool.  Unlike seed parallelism, releases
 // have no inter-dependencies so all seeders are immediately eligible.
 func ParallelRelease(ctx context.Context, opts *ParallelReleaseOptions) error {
-	if opts.Parallelism < 1 {
-		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
-	}
-	return runReleaseWorkerPool(ctx, opts)
-}
-
-// runReleaseWorkerPool spawns a fixed pool of worker goroutines that
-// pull seeders from a work channel.
-func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) error {
-	poolCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var firstErr error
-	var errMu sync.Mutex
 	var onReleaseDoneMu sync.Mutex
-
-	setError := func(err error) {
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-		}
-		errMu.Unlock()
-		cancel()
-	}
-
-	work := make(chan seeder.SeederInfo, len(opts.Seeders))
-	for _, info := range opts.Seeders {
-		work <- info
-	}
-	close(work)
-
-	var wg sync.WaitGroup
-	for i := 0; i < opts.Parallelism; i++ {
-		wg.Go(func() {
-			for {
-				select {
-				case <-poolCtx.Done():
-					return
-				case info, ok := <-work:
-					if !ok {
-						return
-					}
-
-					// Check for earlier failure.
-					errMu.Lock()
-					failed := firstErr != nil
-					errMu.Unlock()
-					if failed {
-						return
-					}
-
-					err := releaseWorker(poolCtx, opts, info, &onReleaseDoneMu)
-					if err != nil {
-						setError(fmt.Errorf(
-							"seeder %s release failed: %w",
-							info.Name, err,
-						))
-						return
-					}
-				}
+	return worker.RunPool(ctx, worker.PoolOptions[seeder.SeederInfo]{
+		Items:       opts.Seeders,
+		Parallelism: opts.Parallelism,
+		Run: func(poolCtx context.Context, info seeder.SeederInfo) error {
+			if err := releaseWorker(poolCtx, opts, info, &onReleaseDoneMu); err != nil {
+				return fmt.Errorf("seeder %s release failed: %w", info.Name, err)
 			}
-		})
-	}
-
-	wg.Wait()
-	return firstErr
+			return nil
+		},
+	})
 }
 
 // releaseWorker processes a single seeder release.
@@ -194,12 +140,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 		fmt.Sprintf("release:%s", shortRef),
 	)
 	flushWriters := func() {
-		if f, ok := relStdout.(interface{ Flush() }); ok {
-			f.Flush()
-		}
-		if f, ok := relStderr.(interface{ Flush() }); ok {
-			f.Flush()
-		}
+		worker.FlushWriters(relStdout, relStderr)
 	}
 	defer flushWriters()
 
