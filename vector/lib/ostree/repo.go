@@ -33,7 +33,6 @@ func (o *Ostree) InitRepo() error {
 	return o.ostreeRun("--repo="+repoDir, "config", "set", "--", "core.lock-timeout-secs", "-1")
 }
 
-
 // listRemotesFromRepo lists remotes using the instance runner.
 func (o *Ostree) listRemotesFromRepo(repoDir string) ([]string, error) {
 	if repoDir == "" {

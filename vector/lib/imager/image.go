@@ -68,23 +68,23 @@ type IImager interface {
 // Imager provides image creation and manipulation operations.
 type Imager struct {
 	*ImagerConfig
-	ostree              ostree.IOstree
-	fsenc               filesystems.IFsenc
-	runner              runner.Func
-	chrootRunner        runner.ChrootRunFunc
-	bootloader          Bootloader
-	stdout              io.Writer
-	stderr              io.Writer
-	efiDevice           string
-	bootDevice          string
-	rootDevice          string
-	realRootDevice      string // if encrypted, devicePath is replaced.
-	devicePath          string
-	imagePath           string
-	mode                ImageMode
-	rootfs              string
-	ref                 string
-	encrypted           bool
+	ostree         ostree.IOstree
+	fsenc          filesystems.IFsenc
+	runner         runner.Func
+	chrootRunner   runner.ChrootRunFunc
+	bootloader     Bootloader
+	stdout         io.Writer
+	stderr         io.Writer
+	efiDevice      string
+	bootDevice     string
+	rootDevice     string
+	realRootDevice string // if encrypted, devicePath is replaced.
+	devicePath     string
+	imagePath      string
+	mode           ImageMode
+	rootfs         string
+	ref            string
+	encrypted      bool
 
 	// Mount points, set by Mount* methods on success.
 	efifsMount  string

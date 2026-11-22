@@ -241,5 +241,3 @@ func (s *Seeder) SeedsVersioningCadence() (string, error) {
 		)
 	}
 }
-
-

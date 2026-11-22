@@ -110,15 +110,15 @@ func (m *MockOstree) CloneForRef(ref string) (IOstree, error) {
 }
 
 // Config accessors — return zero values (not used in branch/upgrade tests).
-func (m *MockOstree) SetStdout(_ io.Writer)                                   {}
-func (m *MockOstree) SetStderr(_ io.Writer)                                   {}
-func (m *MockOstree) Print(_ string, _ ...interface{})                        {}
-func (m *MockOstree) PrintError(_ string, _ ...interface{})                   {}
-func (m *MockOstree) Ref() string                                             { return m.Ref_ }
-func (m *MockOstree) SetRef(ref string)                                       { m.Ref_ = ref }
-func (m *MockOstree) FullBranchSuffix() (string, error)                       { return "-full", nil }
-func (m *MockOstree) IsBranchFullSuffixed() (bool, error) { return false, nil }
-func (m *MockOstree) BranchToFull() (string, error)       { return "", nil }
+func (m *MockOstree) SetStdout(_ io.Writer)                 {}
+func (m *MockOstree) SetStderr(_ io.Writer)                 {}
+func (m *MockOstree) Print(_ string, _ ...interface{})      {}
+func (m *MockOstree) PrintError(_ string, _ ...interface{}) {}
+func (m *MockOstree) Ref() string                           { return m.Ref_ }
+func (m *MockOstree) SetRef(ref string)                     { m.Ref_ = ref }
+func (m *MockOstree) FullBranchSuffix() (string, error)     { return "-full", nil }
+func (m *MockOstree) IsBranchFullSuffixed() (bool, error)   { return false, nil }
+func (m *MockOstree) BranchToFull() (string, error)         { return "", nil }
 func (m *MockOstree) RemoveFullFromBranch() (string, error) {
 	if m.RemoveFullErr != nil {
 		return "", m.RemoveFullErr
@@ -181,14 +181,14 @@ func (m *MockOstree) InitRepo() error {
 	m.InitRepoCalled = true
 	return m.InitRepoErr
 }
-func (m *MockOstree) ImportGpgKey(string) error { return nil }
-func (m *MockOstree) GpgSignFile(string) error       { return nil }
-func (m *MockOstree) GpgKeys() ([]string, error)     { return nil, nil }
-func (m *MockOstree) InitializeSigningGpg() error    { return nil }
-func (m *MockOstree) MaybeInitializeGpg() error      { return nil }
-func (m *MockOstree) KillGpgDaemons()                {}
-func (m *MockOstree) MaybeInitializeRemote() error   { return nil }
-func (m *MockOstree) Pull() error                    { return nil }
+func (m *MockOstree) ImportGpgKey(string) error    { return nil }
+func (m *MockOstree) GpgSignFile(string) error     { return nil }
+func (m *MockOstree) GpgKeys() ([]string, error)   { return nil, nil }
+func (m *MockOstree) InitializeSigningGpg() error  { return nil }
+func (m *MockOstree) MaybeInitializeGpg() error    { return nil }
+func (m *MockOstree) KillGpgDaemons()              {}
+func (m *MockOstree) MaybeInitializeRemote() error { return nil }
+func (m *MockOstree) Pull() error                  { return nil }
 func (m *MockOstree) Prune() error {
 	m.PruneCalled = true
 	return m.PruneErr
@@ -211,7 +211,7 @@ func (m *MockOstree) ListContents(string, string) (*[]filesystems.PathInfo, erro
 }
 func (m *MockOstree) ListEtcChanges(string, string) ([]EtcChange, error) { return nil, nil }
 func (m *MockOstree) DeployedRootfs() (string, error)                    { return "", nil }
-func (m *MockOstree) BootedRef() (string, error) { return "", nil }
+func (m *MockOstree) BootedRef() (string, error)                         { return "", nil }
 func (m *MockOstree) PostCopy() error {
 	m.PostCopyCalled = true
 	return m.PostCopyErr
