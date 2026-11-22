@@ -31,13 +31,9 @@ func qemuSystemBinary() string {
 }
 
 const (
-	rootPassword = "matrix"
+	rootPassword     = "matrix"
+	vmMaxBufferedOut = 1 << 20 // 1 MiB rolling buffer cap
 )
-
-type vmChunk struct {
-	data string
-	err  error
-}
 
 type VMDriver struct {
 	cmd      *exec.Cmd
@@ -46,7 +42,11 @@ type VMDriver struct {
 	reader   *bufio.Reader
 	display  io.Writer // where to echo VM output (nil = discard)
 	pumpOnce sync.Once
-	chunks   chan vmChunk
+	mu       sync.Mutex
+	outBuf   string
+	eof      bool
+	eofErr   error
+	notify   chan struct{}
 	pumpDone chan struct{}
 }
 
@@ -85,16 +85,15 @@ func (vm *VMDriver) Start() error {
 	return vm.cmd.Start()
 }
 
-// ensurePump starts a single background goroutine that reads vm.reader
-// sequentially, avoiding concurrent bufio.Reader access and goroutine leaks
-// when Expect times out.
+// ensurePump starts a single background goroutine that drains vm.reader
+// continuously without blocking on Expect callers, avoiding both concurrent
+// bufio.Reader access and pipe stalls after Expect returns.
 func (vm *VMDriver) ensurePump() {
 	vm.pumpOnce.Do(func() {
-		vm.chunks = make(chan vmChunk, 64)
+		vm.notify = make(chan struct{}, 1)
 		vm.pumpDone = make(chan struct{})
 		go func() {
 			defer close(vm.pumpDone)
-			defer close(vm.chunks)
 			buf := make([]byte, 1024)
 			for {
 				n, err := vm.reader.Read(buf)
@@ -103,10 +102,26 @@ func (vm *VMDriver) ensurePump() {
 					if vm.display != nil {
 						fmt.Fprint(vm.display, chunk)
 					}
-					vm.chunks <- vmChunk{data: chunk}
+					vm.mu.Lock()
+					vm.outBuf += chunk
+					if len(vm.outBuf) > vmMaxBufferedOut {
+						vm.outBuf = vm.outBuf[len(vm.outBuf)-vmMaxBufferedOut:]
+					}
+					vm.mu.Unlock()
+					select {
+					case vm.notify <- struct{}{}:
+					default:
+					}
 				}
 				if err != nil {
-					vm.chunks <- vmChunk{err: err}
+					vm.mu.Lock()
+					vm.eof = true
+					vm.eofErr = err
+					vm.mu.Unlock()
+					select {
+					case vm.notify <- struct{}{}:
+					default:
+					}
 					return
 				}
 			}
@@ -121,25 +136,27 @@ func (vm *VMDriver) Expect(target string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	var matchBuf strings.Builder
 	for {
-		select {
-		case chunk, ok := <-vm.chunks:
-			if !ok {
+		vm.mu.Lock()
+		if idx := strings.Index(vm.outBuf, target); idx >= 0 {
+			vm.outBuf = vm.outBuf[idx+len(target):]
+			vm.mu.Unlock()
+			return nil
+		}
+		eof := vm.eof
+		eofErr := vm.eofErr
+		vm.mu.Unlock()
+
+		if eof {
+			if eofErr == io.EOF {
 				return fmt.Errorf("EOF reached while waiting for pattern: %q", target)
 			}
-			if chunk.data != "" {
-				matchBuf.WriteString(chunk.data)
-				if strings.Contains(matchBuf.String(), target) {
-					return nil
-				}
-			}
-			if chunk.err != nil {
-				if chunk.err == io.EOF {
-					return fmt.Errorf("EOF reached while waiting for pattern: %q", target)
-				}
-				return chunk.err
-			}
+			return eofErr
+		}
+
+		select {
+		case <-vm.notify:
+		case <-vm.pumpDone:
 		case <-ctx.Done():
 			return fmt.Errorf("timeout waiting for pattern: %q", target)
 		}

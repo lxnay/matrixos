@@ -98,3 +98,44 @@ func TestVMDriver_ExpectTimeoutThenExpectRace(t *testing.T) {
 		t.Fatalf("second Expect failed: %v", err)
 	}
 }
+
+func TestVMDriver_ExpectDoesNotBlockWriterAfterReturn(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	vm := &VMDriver{
+		stdout:  pr,
+		reader:  bufio.NewReader(pr),
+		display: io.Discard,
+	}
+
+	writeDone := make(chan error, 1)
+	go func() {
+		if _, err := pw.Write([]byte("matrixos login:\n")); err != nil {
+			writeDone <- err
+			return
+		}
+		// Simulate >64 chunks of output emitted after Expect returns (e.g.
+		// systemd shutdown logs while caller is waiting in vm.Wait()).
+		for range 200 {
+			if _, err := pw.Write([]byte("shutting down service...\n")); err != nil {
+				writeDone <- err
+				return
+			}
+		}
+		writeDone <- pw.Close()
+	}()
+
+	if err := vm.Expect("matrixos login:", 500*time.Millisecond); err != nil {
+		t.Fatalf("Expect failed: %v", err)
+	}
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("writer failed: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("VMDriver pump stalled writer after Expect returned (deadlock risk during VM shutdown)")
+	}
+}
