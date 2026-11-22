@@ -4,13 +4,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
 )
+
+// luksMapperSeq generates unique per-worker suffixes for host-side LUKS
+// device-mapper names during parallel encrypted image builds.
+var luksMapperSeq atomic.Uint64
 
 // ParallelImageOptions configures the parallel image creation engine.
 type ParallelImageOptions struct {
@@ -182,6 +188,18 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 	// Clone the config so each worker has an isolated copy
 	// (Build mutates Ostree.Sysroot via AddOverlay).
 	workerCfg := opts.Config.Clone()
+
+	// Give each parallel worker a unique host-side LUKS device-mapper name so
+	// concurrent encrypted image builds do not collide on /dev/mapper/<name>.
+	// Guest boot arguments use rd.luks.uuid=<UUID>, not this mapper name.
+	if baseName, err := workerCfg.GetItem("Imager.EncryptedRootFsName"); err == nil && baseName != "" {
+		uniqueName := fmt.Sprintf("%s-%d-%d", baseName, os.Getpid(), luksMapperSeq.Add(1))
+		if err := workerCfg.AddOverlay(map[string][]string{
+			"Imager.EncryptedRootFsName": {uniqueName},
+		}); err != nil {
+			return fmt.Errorf("failed to set unique LUKS mapper name for ref %s: %w", ref, err)
+		}
+	}
 
 	// Create an isolated ostree instance for this worker using the
 	// cloned config.  We cannot use CloneForRef here because it
