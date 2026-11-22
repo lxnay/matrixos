@@ -24,8 +24,6 @@ type IFsenc interface {
 	// EncryptedRootFsName returns the configured LUKS device-mapper name for the
 	// encrypted root filesystem.
 	EncryptedRootFsName() (string, error)
-	// OsName returns the OS name as defined in the config.
-	OsName() (string, error)
 
 	// LuksEncrypt encrypts the given block device with LUKS and opens it as
 	// desiredLuksDevice (the full /dev/mapper/<name> path).
@@ -89,25 +87,7 @@ func (f *Fsenc) EncryptionKey() (string, error) {
 }
 
 func (f *Fsenc) EncryptedRootFsName() (string, error) {
-	name, err := f.cfg.GetItem("Imager.EncryptedRootFsName")
-	if err != nil {
-		return "", err
-	}
-	if name == "" {
-		return "", errors.New("invalid Imager.EncryptedRootFsName")
-	}
-	return name, nil
-}
-
-func (f *Fsenc) OsName() (string, error) {
-	name, err := f.cfg.GetItem("matrixOS.OsName")
-	if err != nil {
-		return "", err
-	}
-	if name == "" {
-		return "", errors.New("invalid matrixOS.OsName")
-	}
-	return name, nil
+	return config.GetRequiredItem(f.cfg, "Imager.EncryptedRootFsName")
 }
 
 func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
@@ -217,12 +197,8 @@ func (f *Fsenc) ValidateLuksVariables() error {
 		return errors.New("Imager.EncryptionKey not set: please set it to a passphrase")
 	}
 
-	rootfsName, err := f.EncryptedRootFsName()
-	if err != nil {
+	if _, err := f.EncryptedRootFsName(); err != nil {
 		return fmt.Errorf("failed to retrieve Imager.EncryptedRootFsName: %w", err)
-	}
-	if rootfsName == "" {
-		return errors.New("Imager.EncryptedRootFsName is unset: please set it to a devmapper name")
 	}
 
 	return nil

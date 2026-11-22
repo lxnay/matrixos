@@ -25,9 +25,7 @@ type OstreeObjectType int
 
 const (
 	OstreeObjectTypeFile    OstreeObjectType = 1
-	OstreeObjectTypeDirTree OstreeObjectType = 2
 	OstreeObjectTypeDirMeta OstreeObjectType = 3
-	OstreeObjectTypeCommit  OstreeObjectType = 4
 )
 
 // OstreeChecksumFlags controls checksum behaviour.
@@ -376,29 +374,4 @@ func OstreeChecksumFileAt(
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-func Main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <path> [--ignore-xattrs] [--canonical-perms]\n", os.Args[0])
-		os.Exit(1)
-	}
-
-	path := os.Args[1]
-	flags := OstreeChecksumFlagsNone
-	for _, a := range os.Args[2:] {
-		switch a {
-		case "--ignore-xattrs":
-			flags |= OstreeChecksumFlagsIgnoreXattrs
-		case "--canonical-perms":
-			flags |= OstreeChecksumFlagsCanonicalPermissions
-		}
-	}
-
-	checksum, err := OstreeChecksumFileAt(path, OstreeObjectTypeFile, flags)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(checksum)
 }

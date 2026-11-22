@@ -10,8 +10,6 @@ type MockFsenc struct {
 	EncryptionKeyErr       error
 	EncryptedRootFsName_   string
 	EncryptedRootFsNameErr error
-	OsName_                string
-	OsNameErr              error
 	ValidateLuksErr        error
 	LuksEncryptErr         error
 }
@@ -28,10 +26,6 @@ func (m *MockFsenc) EncryptionKey() (string, error) {
 
 func (m *MockFsenc) EncryptedRootFsName() (string, error) {
 	return m.EncryptedRootFsName_, m.EncryptedRootFsNameErr
-}
-
-func (m *MockFsenc) OsName() (string, error) {
-	return m.OsName_, m.OsNameErr
 }
 
 func (m *MockFsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
