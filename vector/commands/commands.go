@@ -118,7 +118,8 @@ func (sg *SignalGuard) Arm() {
 // cleanup stack.  It is safe to call multiple times.
 func (sg *SignalGuard) Disarm() {
 	sigCoordMu.Lock()
-	if sg.armed {
+	wasArmed := sg.armed
+	if wasArmed {
 		sg.armed = false
 		for i, g := range activeGuards {
 			if g == sg {
@@ -135,9 +136,11 @@ func (sg *SignalGuard) Disarm() {
 	}
 	sigCoordMu.Unlock()
 
-	sg.mu.Lock()
-	sg.cleanups = nil
-	sg.mu.Unlock()
+	if wasArmed {
+		sg.mu.Lock()
+		sg.cleanups = nil
+		sg.mu.Unlock()
+	}
 }
 
 // PushCleanup adds a cleanup function to the top of the LIFO stack.
