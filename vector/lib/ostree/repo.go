@@ -7,7 +7,30 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 )
+
+var (
+	repoLocksMu sync.Mutex
+	repoLocks   = make(map[string]*sync.Mutex)
+)
+
+// LockRepo acquires an exclusive in-process lock for repoDir and returns its
+// unlock function. This serializes ostree repository mutations (init, remote
+// setup, commit, prune, static-delta, summary) across concurrent workers.
+func LockRepo(repoDir string) func() {
+	key := filepath.Clean(repoDir)
+	repoLocksMu.Lock()
+	mu, ok := repoLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		repoLocks[key] = mu
+	}
+	repoLocksMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
 
 type AddRemoteOptions struct {
 	Remote    string
@@ -391,6 +414,9 @@ func (o *Ostree) MaybeInitializeRemote() error {
 		return err
 	}
 
+	unlock := LockRepo(repoDir)
+	defer unlock()
+
 	if !directoryExists(repoDir) {
 		if err := os.MkdirAll(repoDir, 0755); err != nil {
 			return err
@@ -420,10 +446,12 @@ func (o *Ostree) MaybeInitializeRemote() error {
 		if err != nil {
 			return err
 		}
-		args := []string{"--repo=" + repoDir, "remote", "add"}
-		args = append(args, gpgArgs...)
-		args = append(args, remote, remoteURL)
-		err = o.ostreeRun(args...)
+		err = o.addRemote(AddRemoteOptions{
+			Remote:    remote,
+			RemoteURL: remoteURL,
+			GpgArgs:   gpgArgs,
+			RepoDir:   repoDir,
+		})
 		if err != nil {
 			return err
 		}

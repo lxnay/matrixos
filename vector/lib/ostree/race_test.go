@@ -76,3 +76,91 @@ func TestOstree_GpgConcurrentSerialization(t *testing.T) {
 		t.Errorf("concurrent gpg invocations detected: maxInFlight = %d, want 1", got)
 	}
 }
+
+func TestOstree_MaybeInitializeRemoteConcurrentTOCTOU(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "ostree-repo")
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Ostree.RepoDir":   {repoDir},
+			"Ostree.Remote":    {"origin"},
+			"Ostree.RemoteUrl": {"http://example.com"},
+		},
+		Bools: map[string]bool{
+			"Ostree.Gpg": false,
+		},
+	}
+
+	var mu sync.Mutex
+	remotes := map[string]bool{}
+	var initCount atomic.Int32
+	var remoteAddCount atomic.Int32
+
+	mockRunner := func(cmd *runner.Cmd) error {
+		args := cmd.Args
+		for i, a := range args {
+			switch a {
+			case "init":
+				initCount.Add(1)
+				time.Sleep(15 * time.Millisecond)
+				return os.MkdirAll(filepath.Join(repoDir, "objects"), 0755)
+			case "remote":
+				if i+1 < len(args) && args[i+1] == "list" {
+					mu.Lock()
+					for r := range remotes {
+						fmt.Fprintln(cmd.Stdout, r)
+					}
+					mu.Unlock()
+					return nil
+				}
+				if i+1 < len(args) && args[i+1] == "add" {
+					remoteAddCount.Add(1)
+					time.Sleep(15 * time.Millisecond)
+					mu.Lock()
+					defer mu.Unlock()
+					force := false
+					for _, x := range args {
+						if x == "--force" {
+							force = true
+						}
+					}
+					if remotes["origin"] && !force {
+						return fmt.Errorf("remote origin already exists")
+					}
+					remotes["origin"] = true
+					return nil
+				}
+			}
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			o, err := NewOstree(NewOstreeOptions{Config: cfg})
+			if err != nil {
+				errs <- err
+				return
+			}
+			o.runner = mockRunner
+			if err := o.MaybeInitializeRemote(); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent MaybeInitializeRemote failed: %v", err)
+	}
+	if got := initCount.Load(); got != 1 {
+		t.Errorf("InitRepo ran %d times across concurrent callers, want 1", got)
+	}
+	if got := remoteAddCount.Load(); got != 1 {
+		t.Errorf("remote add ran %d times across concurrent callers, want 1", got)
+	}
+}

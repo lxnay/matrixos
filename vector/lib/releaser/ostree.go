@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -98,35 +97,13 @@ func (r *Releaser) OstreePrepare() error {
 	return r.ostree.ValidateFilesystemHierarchy(r.imageDir)
 }
 
-var (
-	ostreeRepoLocksMu sync.Mutex
-	ostreeRepoLocks   = make(map[string]*sync.Mutex)
-)
-
-// lockOstreeRepo acquires an exclusive in-process lock for repoDir and returns
-// its unlock function. This serializes ostree repository mutations (init,
-// commit, prune, static-delta, summary) across parallel release workers.
-func lockOstreeRepo(repoDir string) func() {
-	key := filepath.Clean(repoDir)
-	ostreeRepoLocksMu.Lock()
-	mu, ok := ostreeRepoLocks[key]
-	if !ok {
-		mu = &sync.Mutex{}
-		ostreeRepoLocks[key] = mu
-	}
-	ostreeRepoLocksMu.Unlock()
-
-	mu.Lock()
-	return mu.Unlock
-}
-
 func (r *Releaser) MaybeOstreeInit() error {
 	repoDir, err := r.ostree.RepoDir()
 	if err != nil {
 		return err
 	}
 
-	unlock := lockOstreeRepo(repoDir)
+	unlock := ostree.LockRepo(repoDir)
 	defer unlock()
 
 	objectsDir := filepath.Join(repoDir, "objects")
@@ -254,7 +231,7 @@ func (r *Releaser) Release(opts CommitOptions) error {
 	if err != nil {
 		return err
 	}
-	unlock := lockOstreeRepo(repoDir)
+	unlock := ostree.LockRepo(repoDir)
 	defer unlock()
 
 	// Build and run the ostree commit.
