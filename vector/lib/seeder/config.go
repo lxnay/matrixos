@@ -105,22 +105,6 @@ func (c *SeederConfig) CoresMultiplier() (float64, error) {
 
 // --- Internal config getters (only used by Seeder methods) ---
 
-func (s *Seeder) SeedersDir() (string, error) {
-	return s.configItem("Seeder.SeedersDir")
-}
-
-func (s *Seeder) ChrootSeedersDir() (string, error) {
-	return s.configItem("Seeder.ChrootSeedersDir")
-}
-
-func (s *Seeder) ChrootBuildArtifactsDir() (string, error) {
-	return s.configItem("Seeder.ChrootBuildArtifactsDir")
-}
-
-func (s *Seeder) DisabledSeederFile() (string, error) {
-	return s.configItem("Seeder.SeederDisabledFileName")
-}
-
 func (s *Seeder) UseLocalGitRepoInsideChroot() (bool, error) {
 	return s.cfg.GetBool("Seeder.UseLocalGitRepoInsideChroot")
 }
@@ -131,18 +115,6 @@ func (s *Seeder) DeleteDotGitFromGitRepo() (bool, error) {
 
 func (s *Seeder) GitCloneArgs() (string, error) {
 	return s.configItem("Seeder.GitCloneArgs")
-}
-
-func (s *Seeder) ChrootExecName() (string, error) {
-	return s.configItem("Seeder.ChrootExecutableName")
-}
-
-func (s *Seeder) PrepperExecName() (string, error) {
-	return s.configItem("Seeder.PrepperExecutableName")
-}
-
-func (s *Seeder) PostBuildExecName() (string, error) {
-	return s.configItem("Seeder.PostBuildExecutableName")
 }
 
 func (s *Seeder) ChrootMetadataDir() (string, error) {
