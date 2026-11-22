@@ -1,5 +1,7 @@
 package runner
 
+import "sync"
+
 // MockRunnerCall records a single command invocation.
 type MockRunnerCall struct {
 	Name      string
@@ -13,6 +15,7 @@ type MockRunnerCall struct {
 // Use NewMockRunner for a runner that always succeeds, or
 // NewMockRunnerFailOnCall to fail on a specific invocation index.
 type MockRunner struct {
+	mu     sync.Mutex
 	Calls  []MockRunnerCall
 	Err    error
 	FailOn int // Fail on this call index (0-based), -1 means always fail if Err != nil
@@ -38,6 +41,8 @@ func (mr *MockRunner) recordChrootCmd(c *ChrootCmd) {
 
 // Run implements the Func signature.
 func (mr *MockRunner) Run(c *Cmd) error {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
 	mr.recordCmd(c)
 	return mr.errForCall()
 }
@@ -64,6 +69,8 @@ func (mr *MockRunner) outputForCall() []byte {
 
 // Output implements the OutputFunc signature.
 func (mr *MockRunner) Output(c *Cmd) ([]byte, error) {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
 	mr.recordCmd(c)
 	return mr.outputForCall(), mr.errForCall()
 }
@@ -75,12 +82,16 @@ func (mr *MockRunner) CombinedOutput(c *Cmd) ([]byte, error) {
 
 // ChrootRun implements the ChrootRunFunc signature.
 func (mr *MockRunner) ChrootRun(c *ChrootCmd) error {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
 	mr.recordChrootCmd(c)
 	return mr.errForCall()
 }
 
 // ChrootOutput implements the ChrootOutputFunc signature.
 func (mr *MockRunner) ChrootOutput(c *ChrootCmd) ([]byte, error) {
+	mr.mu.Lock()
+	defer mr.mu.Unlock()
 	mr.recordChrootCmd(c)
 	return mr.outputForCall(), mr.errForCall()
 }
