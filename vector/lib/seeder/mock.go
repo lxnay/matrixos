@@ -1,10 +1,6 @@
 package seeder
 
-import (
-	"fmt"
-	"io"
-	"os"
-)
+import "matrixos/vector/lib/worker"
 
 // Compile-time interface check.
 var _ ISeeder = (*MockSeeder)(nil)
@@ -13,8 +9,7 @@ var _ ISeeder = (*MockSeeder)(nil)
 // Only the fields/methods relevant to each test need to be configured;
 // everything else returns safe zero values.
 type MockSeeder struct {
-	stdout io.Writer
-	stderr io.Writer
+	worker.IO
 
 	// Params
 	ParseSeederParams_   *SeederParams
@@ -55,31 +50,6 @@ type MockSeeder struct {
 // DefaultMockSeeder returns a MockSeeder with sensible defaults for tests.
 func DefaultMockSeeder() *MockSeeder {
 	return &MockSeeder{}
-}
-
-func (m *MockSeeder) SetStdout(w io.Writer) { m.stdout = w }
-func (m *MockSeeder) SetStderr(w io.Writer) { m.stderr = w }
-func (m *MockSeeder) Stdout() io.Writer {
-	if m.stdout == nil {
-		return os.Stdout
-	}
-	return m.stdout
-}
-func (m *MockSeeder) Stderr() io.Writer {
-	if m.stderr == nil {
-		return os.Stderr
-	}
-	return m.stderr
-}
-
-func (m *MockSeeder) Print(format string, args ...any) {
-	fmt.Fprintf(m.Stdout(), format, args...)
-}
-func (m *MockSeeder) PrintWarning(format string, args ...any) {
-	fmt.Fprintf(m.Stderr(), format, args...)
-}
-func (m *MockSeeder) PrintError(format string, args ...any) {
-	fmt.Fprintf(m.Stderr(), format, args...)
 }
 
 func (m *MockSeeder) ParseSeederParams(

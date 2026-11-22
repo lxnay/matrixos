@@ -179,8 +179,8 @@ func (im *Imager) CompressImage() error {
 	cmd := &runner.Cmd{
 		Name:   parts[0],
 		Args:   args,
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}
 	if err := im.runner(cmd); err != nil {
 		return fmt.Errorf("compression failed: %w", err)
@@ -215,8 +215,8 @@ func (im *Imager) CreateQcow2Image() error {
 			im.imagePath,
 			qcow2Path,
 		},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -244,17 +244,17 @@ func (im *Imager) ShowFinalFilesystemInfo() error {
 	}
 
 	im.Print("Final boot partition directory tree:\n")
-	if err := filesystems.PrintDirectoryTree(im.stdout, im.bootfsMount); err != nil {
+	if err := filesystems.PrintDirectoryTree(im.Stdout(), im.bootfsMount); err != nil {
 		im.PrintWarning("WARNING: failed to list boot directory tree: %v\n", err)
 	}
 
 	im.Print("Final EFI partition directory tree:\n")
-	if err := filesystems.PrintDirectoryTree(im.stdout, im.efifsMount); err != nil {
+	if err := filesystems.PrintDirectoryTree(im.Stdout(), im.efifsMount); err != nil {
 		im.PrintWarning("WARNING: failed to list EFI directory tree: %v\n", err)
 	}
 
 	im.Print("Block devices on %s:\n", im.devicePath)
-	if err := filesystems.PrintBlockDeviceInfo(im.stdout, im.devicePath); err != nil {
+	if err := filesystems.PrintBlockDeviceInfo(im.Stdout(), im.devicePath); err != nil {
 		im.PrintWarning("WARNING: failed to get block device info: %v\n", err)
 	}
 

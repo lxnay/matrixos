@@ -126,8 +126,8 @@ func (im *Imager) InstallSecurebootCerts() error {
 				"-outform", "DER",
 				"-out", filepath.Join(im.efifsMount, c.derName),
 			},
-			Stdout: im.stdout,
-			Stderr: im.stderr,
+			Stdout: im.Stdout(),
+			Stderr: im.Stderr(),
 		}); err != nil {
 			return fmt.Errorf("openssl DER conversion failed for %s: %w", c.errLabel, err)
 		}

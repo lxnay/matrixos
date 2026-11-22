@@ -11,10 +11,10 @@ import (
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
+	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/validation"
-
-	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/worker"
 )
 
 type ImageMode int
@@ -68,13 +68,12 @@ type IImager interface {
 // Imager provides image creation and manipulation operations.
 type Imager struct {
 	*ImagerConfig
+	worker.IO
 	ostree         ostree.IOstree
 	fsenc          filesystems.IFsenc
 	runner         runner.Func
 	chrootRunner   runner.ChrootRunFunc
 	bootloader     Bootloader
-	stdout         io.Writer
-	stderr         io.Writer
 	efiDevice      string
 	bootDevice     string
 	rootDevice     string
@@ -102,26 +101,6 @@ type Imager struct {
 	trackedTmpDirs       []string
 	trackedLoopDevicesMu sync.Mutex
 	trackedLoopDevices   []*filesystems.Loop
-}
-
-func (im *Imager) SetStdout(w io.Writer) { im.stdout = w }
-
-func (im *Imager) SetStderr(w io.Writer) { im.stderr = w }
-
-func (im *Imager) Stdout() io.Writer { return im.stdout }
-
-func (im *Imager) Stderr() io.Writer { return im.stderr }
-
-func (im *Imager) Print(format string, args ...any) {
-	fmt.Fprintf(im.stdout, format, args...)
-}
-
-func (im *Imager) PrintWarning(format string, args ...any) {
-	fmt.Fprintf(im.stderr, format, args...)
-}
-
-func (im *Imager) PrintError(format string, args ...any) {
-	fmt.Fprintf(im.stderr, format, args...)
 }
 
 // trackMount appends a single mount point to the tracked list.
@@ -152,8 +131,8 @@ func (im *Imager) Cleanup() {
 	im.trackedMountsMu.Unlock()
 
 	copts := filesystems.CleanupMountsOptions{
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 		Mounts: mounts,
 	}
 	filesystems.CleanupMounts(copts)
@@ -172,8 +151,7 @@ func (im *Imager) Cleanup() {
 	for _, loop := range loops {
 		dev := loop.DevicePath()
 		if err := loop.Detach(); err != nil {
-			fmt.Fprintf(
-				im.stderr,
+			im.PrintWarning(
 				"warning: failed to detach loop device %s (path: %s): %v\n",
 				dev,
 				loop.Path,
@@ -191,9 +169,9 @@ func (im *Imager) Cleanup() {
 	im.trackedTmpDirsMu.Unlock()
 
 	for _, tmpDir := range tmpDirs {
-		fmt.Fprintf(im.stdout, "Removing temp dir %s\n", tmpDir)
+		im.Print("Removing temp dir %s\n", tmpDir)
 		if err := os.RemoveAll(tmpDir); err != nil {
-			fmt.Fprintf(im.stderr, "Warning: failed to remove temp dir %s: %v\n", tmpDir, err)
+			im.PrintWarning("Warning: failed to remove temp dir %s: %v\n", tmpDir, err)
 		}
 	}
 }
@@ -226,8 +204,6 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		qa:           qa,
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       os.Stdout,
-		stderr:       os.Stderr,
 		encrypted:    encrypted,
 	}
 	bootloaderName, err := im.Bootloader()

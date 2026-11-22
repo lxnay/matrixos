@@ -89,7 +89,7 @@ func TestPrint_WritesToStdout(t *testing.T) {
 
 	r.Print("hello %s %d", "world", 42)
 
-	got := r.stdout.(*bytes.Buffer).String()
+	got := r.Stdout().(*bytes.Buffer).String()
 	want := "hello world 42"
 	if got != want {
 		t.Fatalf("Print output = %q, want %q", got, want)
@@ -101,7 +101,7 @@ func TestPrintWarning_WritesToStderr(t *testing.T) {
 
 	r.PrintWarning("warn: %s", "oops")
 
-	got := r.stderr.(*bytes.Buffer).String()
+	got := r.Stderr().(*bytes.Buffer).String()
 	want := "warn: oops"
 	if got != want {
 		t.Fatalf("PrintWarning output = %q, want %q", got, want)
@@ -113,7 +113,7 @@ func TestPrintError_WritesToStderr(t *testing.T) {
 
 	r.PrintError("err: %d", 404)
 
-	got := r.stderr.(*bytes.Buffer).String()
+	got := r.Stderr().(*bytes.Buffer).String()
 	want := "err: 404"
 	if got != want {
 		t.Fatalf("PrintError output = %q, want %q", got, want)

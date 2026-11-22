@@ -65,16 +65,16 @@ func (im *Imager) ClearPartitionTable() error {
 	if err := im.runner(&runner.Cmd{
 		Name:   "sgdisk",
 		Args:   []string{"-g", "-o", im.devicePath},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("sgdisk -g -o failed on %s: %w", im.devicePath, err)
 	}
 	return im.runner(&runner.Cmd{
 		Name:   "sgdisk",
 		Args:   []string{"-Z", im.devicePath},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -124,8 +124,8 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   epArgs[0],
 		Args:   epArgs[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("sgdisk EFI partition failed: %w", err)
 	}
@@ -140,8 +140,8 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   bpArgs[0],
 		Args:   bpArgs[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("sgdisk boot partition failed: %w", err)
 	}
@@ -156,8 +156,8 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   rpArgs[0],
 		Args:   rpArgs[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("sgdisk root partition failed: %w", err)
 	}
@@ -169,8 +169,8 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   agArgs[0],
 		Args:   agArgs[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("sgdisk set auto-grow flag failed: %w", err)
 	}
@@ -182,8 +182,8 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   args[0],
 		Args:   args[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("partprobe failed: %w", err)
 	}
@@ -208,8 +208,8 @@ func (im *Imager) FormatEfifs() error {
 	return im.runner(&runner.Cmd{
 		Name:   args[0],
 		Args:   args[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -233,8 +233,8 @@ func (im *Imager) MountEfifs(mountEfifs string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   "mount",
 		Args:   []string{"-t", "vfat", im.efiDevice, mountEfifs},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
 	}
@@ -278,8 +278,8 @@ func (im *Imager) formatBootfsBtrfs(label string) error {
 	return im.runner(&runner.Cmd{
 		Name:   "mkfs.btrfs",
 		Args:   []string{"-f", "-L", label, im.bootDevice},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -288,8 +288,8 @@ func (im *Imager) formatBootfsVfat(label string) error {
 	return im.runner(&runner.Cmd{
 		Name:   "mkfs.vfat",
 		Args:   []string{"-F", "32", "-n", label, im.bootDevice},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -322,8 +322,8 @@ func (im *Imager) MountBootfs(mountBootfs string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   "mount",
 		Args:   mountArgs,
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
 	}
@@ -372,8 +372,8 @@ func (im *Imager) FormatRootfs() error {
 	return im.runner(&runner.Cmd{
 		Name:   args[0],
 		Args:   args[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -410,8 +410,8 @@ func (im *Imager) MountRootfs(mountRootfs string) error {
 	if err := im.runner(&runner.Cmd{
 		Name:   args[0],
 		Args:   args[1:],
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}); err != nil {
 		return err
 	}
@@ -433,7 +433,7 @@ func (im *Imager) FinalizeFilesystems() error {
 
 	// fstrim may fail on USB sticks, so errors are intentionally ignored.
 	filesystems.FstrimAll(
-		im.runner, im.stdout, im.stderr,
+		im.runner, im.Stdout(), im.Stderr(),
 		im.rootfsMount, im.bootfsMount,
 	)
 

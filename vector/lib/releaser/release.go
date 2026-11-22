@@ -4,14 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"sync"
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/validation"
+	"matrixos/vector/lib/worker"
 )
 
 // Compile-time interface check.
@@ -78,12 +77,10 @@ type IRelease interface {
 // Releaser provides release creation and manipulation operations.
 type Releaser struct {
 	*ReleaserConfig
+	worker.IO
 	ostree       ostree.IOstree
 	runner       runner.Func
 	chrootRunner runner.ChrootRunFunc
-	ioMu         sync.Mutex
-	stdout       io.Writer
-	stderr       io.Writer
 
 	chrootDir string // source chroot directory
 	imageDir  string // destination image directory
@@ -119,8 +116,6 @@ func NewReleaser(cfg config.IConfig, ot ostree.IOstree, opts *NewReleaserOptions
 		runner:         runner.Run,
 		chrootRunner:   runner.ChrootRun,
 		qa:             qa,
-		stdout:         os.Stdout,
-		stderr:         os.Stderr,
 		chrootDir:      opts.ChrootDir,
 		imageDir:       opts.ImageDir,
 		ref:            opts.Ref,

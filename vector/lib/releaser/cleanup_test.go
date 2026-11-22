@@ -13,7 +13,7 @@ import (
 // newTestReleaser builds a Releaser with mock dependencies for unit tests.
 // It bypasses NewReleaser to avoid validation side-effects.
 func newTestReleaser() *Releaser {
-	return &Releaser{
+	r := &Releaser{
 		ReleaserConfig: &ReleaserConfig{cfg: &config.MockConfig{Items: map[string][]string{
 			"Seeder.ChrootBuildArtifactsDir":      {"/build-artifacts"},
 			"Seeder.ChrootPreppersPhasesStateDir": {"/preppers-state"},
@@ -21,9 +21,10 @@ func newTestReleaser() *Releaser {
 		ostree:       &ostree.MockOstree{},
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	r.SetStdout(&bytes.Buffer{})
+	r.SetStderr(&bytes.Buffer{})
+	return r
 }
 
 // mockMountSyscalls replaces filesystems.Mount/Unmount

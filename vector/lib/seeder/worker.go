@@ -138,7 +138,7 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 		Args:   []string{"-c", script},
 		Env:    env,
 		Stdout: &stdout,
-		Stderr: s.stderr,
+		Stderr: s.Stderr(),
 	}
 	if err := s.runner(cmd); err != nil {
 		return nil, fmt.Errorf(
@@ -254,8 +254,8 @@ func (s *Seeder) ImportGentooGpgKeys() error {
 			"--locate-key",
 			"releng@gentoo.org",
 		},
-		Stdout: s.stdout,
-		Stderr: s.stderr,
+		Stdout: s.Stdout(),
+		Stderr: s.Stderr(),
 	})
 }
 
@@ -267,7 +267,7 @@ func (s *Seeder) KillGpgDaemons() {
 		return
 	}
 	s.Print("Killing GPG daemons for %s ...\n", homedir)
-	ostree.KillGpgDaemons(s.runner, homedir, s.stdout, s.stderr)
+	ostree.KillGpgDaemons(s.runner, homedir, s.Stdout(), s.Stderr())
 }
 
 // generateSharedEnvVars generates the environment variables that need to be shared
@@ -427,8 +427,8 @@ func (s *Seeder) ExecutePrepper(info SeederInfo, params *SeederParams, opts *Pre
 	cmd := &runner.Cmd{
 		Name:   info.PrepperExec,
 		Env:    env,
-		Stdout: s.stdout,
-		Stderr: s.stderr,
+		Stdout: s.Stdout(),
+		Stderr: s.Stderr(),
 	}
 	return s.runner(cmd)
 }
@@ -480,8 +480,8 @@ func (s *Seeder) setupDevDir(chrootDevDir string) error {
 		if err := s.runner(&runner.Cmd{
 			Name:   "git",
 			Args:   args,
-			Stdout: s.stdout,
-			Stderr: s.stderr,
+			Stdout: s.Stdout(),
+			Stderr: s.Stderr(),
 		}); err != nil {
 			return fmt.Errorf("error cloning git repo (local): %w", err)
 		}
@@ -634,11 +634,11 @@ func (s *Seeder) runInChroot(opts *SeedOptions, execName string, args []string) 
 	}
 	stdout := opts.Stdout
 	if stdout == nil {
-		stdout = s.stdout
+		stdout = s.Stdout()
 	}
 	stderr := opts.Stderr
 	if stderr == nil {
-		stderr = s.stderr
+		stderr = s.Stderr()
 	}
 	dir := opts.Dir
 	if dir == "" {

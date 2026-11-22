@@ -5,12 +5,11 @@ package seeder
 import (
 	"errors"
 	"io"
-	"os"
-	"sync"
 	"syscall"
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 )
 
 // Compile-time interface check.
@@ -127,12 +126,10 @@ type ISeeder interface {
 // Seeder provides seed detection and manipulation operations.
 type Seeder struct {
 	*SeederConfig
+	worker.IO
 	runner       runner.Func
 	chrootRunner runner.ChrootRunFunc
-	ioMu         sync.Mutex
 	stdin        io.Reader
-	stdout       io.Writer
-	stderr       io.Writer
 }
 
 // NewSeeder creates a new Seeder instance.
@@ -144,25 +141,15 @@ func NewSeeder(cfg config.IConfig, opts *NewSeederOptions) (*Seeder, error) {
 		opts = &NewSeederOptions{}
 	}
 
-	stdin := opts.Stdin
-	// keep nil.
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdin:        stdin,
-		stdout:       stdout,
-		stderr:       stderr,
-	}, nil
+		stdin:        opts.Stdin,
+	}
+	s.SetStdout(opts.Stdout)
+	s.SetStderr(opts.Stderr)
+	return s, nil
 }
 
 // Cleanup releases any resources held by this Seeder instance.

@@ -155,8 +155,8 @@ func (im *Imager) SetupHooks() error {
 	}
 
 	cmd := exec.Command(hookExec)
-	cmd.Stdout = im.stdout
-	cmd.Stderr = im.stderr
+	cmd.Stdout = im.Stdout()
+	cmd.Stderr = im.Stderr()
 
 	env := os.Environ()
 	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
@@ -251,8 +251,8 @@ func (im *Imager) TestImage() error {
 
 		im.Print("Running test script %s ...\n", ts)
 		cmd := exec.Command(ts)
-		cmd.Stdout = im.stdout
-		cmd.Stderr = im.stderr
+		cmd.Stdout = im.Stdout()
+		cmd.Stderr = im.Stderr()
 
 		env := os.Environ()
 		env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")

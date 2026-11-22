@@ -1,10 +1,6 @@
 package releaser
 
-import (
-	"fmt"
-	"io"
-	"os"
-)
+import "matrixos/vector/lib/worker"
 
 // Compile-time interface check.
 var _ IRelease = (*MockReleaser)(nil)
@@ -13,8 +9,7 @@ var _ IRelease = (*MockReleaser)(nil)
 // Only the fields/methods relevant to each test need to be configured;
 // everything else returns safe zero values.
 type MockReleaser struct {
-	stdout io.Writer
-	stderr io.Writer
+	worker.IO
 
 	// Build / Cleanup
 	BuildErr    error
@@ -29,17 +24,6 @@ type MockReleaser struct {
 // DefaultMockReleaser returns a MockReleaser with sensible defaults for tests.
 func DefaultMockReleaser() *MockReleaser {
 	return &MockReleaser{}
-}
-
-func (m *MockReleaser) SetStdout(w io.Writer) { m.stdout = w }
-func (m *MockReleaser) SetStderr(w io.Writer) { m.stderr = w }
-
-func (m *MockReleaser) Print(format string, args ...any) {
-	w := m.stdout
-	if w == nil {
-		w = os.Stdout
-	}
-	fmt.Fprintf(w, format, args...)
 }
 
 func (m *MockReleaser) ExecuteWithReleaseLock(fn func() error) error {

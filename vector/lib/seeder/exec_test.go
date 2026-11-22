@@ -232,10 +232,10 @@ func TestNewSeeder_DefaultWriters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if s.stdout != os.Stdout {
+	if s.Stdout() != os.Stdout {
 		t.Error("expected default stdout")
 	}
-	if s.stderr != os.Stderr {
+	if s.Stderr() != os.Stderr {
 		t.Error("expected default stderr")
 	}
 }
@@ -247,7 +247,7 @@ func TestPrint_WritesToStdout(t *testing.T) {
 
 	s.Print("hello %s %d", "world", 42)
 
-	got := s.stdout.(*bytes.Buffer).String()
+	got := s.Stdout().(*bytes.Buffer).String()
 	want := "hello world 42"
 	if got != want {
 		t.Fatalf("Print output = %q, want %q", got, want)
@@ -259,7 +259,7 @@ func TestPrintWarning_WritesToStderr(t *testing.T) {
 
 	s.PrintWarning("warn: %s", "oops")
 
-	got := s.stderr.(*bytes.Buffer).String()
+	got := s.Stderr().(*bytes.Buffer).String()
 	want := "warn: oops"
 	if got != want {
 		t.Fatalf("PrintWarning output = %q, want %q", got, want)
@@ -271,7 +271,7 @@ func TestPrintError_WritesToStderr(t *testing.T) {
 
 	s.PrintError("err: %d", 404)
 
-	got := s.stderr.(*bytes.Buffer).String()
+	got := s.Stderr().(*bytes.Buffer).String()
 	want := "err: 404"
 	if got != want {
 		t.Fatalf("PrintError output = %q, want %q", got, want)

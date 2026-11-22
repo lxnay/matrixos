@@ -19,12 +19,12 @@ func newOstreeTestReleaser(tb testing.TB) (*Releaser, *ostree.MockOstree) {
 	tb.Helper()
 	mock := &ostree.MockOstree{}
 	r := &Releaser{
-		ReleaserConfig: &ReleaserConfig{cfg:          &config.MockConfig{Items: map[string][]string{}, Bools: map[string]bool{}}},
-		ostree:       mock,
-		chrootRunner: runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
+		ReleaserConfig: &ReleaserConfig{cfg: &config.MockConfig{Items: map[string][]string{}, Bools: map[string]bool{}}},
+		ostree:         mock,
+		chrootRunner:   runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
 	}
+	r.SetStdout(&bytes.Buffer{})
+	r.SetStderr(&bytes.Buffer{})
 	r.imageDir = tb.(*testing.T).TempDir()
 	return r, mock
 }

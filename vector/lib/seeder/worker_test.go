@@ -16,13 +16,14 @@ import (
 // the provided config, suitable for worker unit tests.
 func newTestSeederWithConfig(cfg *config.MockConfig) *Seeder {
 	mr := runner.NewMockRunner()
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	s.SetStdout(&bytes.Buffer{})
+	s.SetStderr(&bytes.Buffer{})
+	return s
 }
 
 func workerTestConfig() *config.MockConfig {
@@ -231,13 +232,14 @@ func newRealSeeder(devDir string) *Seeder {
 		},
 		Bools: map[string]bool{},
 	}
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	s.SetStdout(&bytes.Buffer{})
+	s.SetStderr(&bytes.Buffer{})
+	return s
 }
 
 func TestParseSeederParams_Success(t *testing.T) {
@@ -713,7 +715,7 @@ func TestParseSeederParams_DevDirError(t *testing.T) {
 
 	cfg := &config.MockConfig{
 		Items: map[string][]string{
-			"matrixOS.Root":              {""},
+			"matrixOS.Root":               {""},
 			"Seeder.ParamsExecutableName": {"params.sh"},
 		},
 		Bools: map[string]bool{},
@@ -722,9 +724,9 @@ func TestParseSeederParams_DevDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	_, err := sd.ParseSeederParams(SeederInfo{Name: "00-bedrock", Dir: tmp})
 	if err == nil {
@@ -792,13 +794,14 @@ func newPrepperSeeder(devDir, downloadsDir, stage3URL string) *Seeder {
 		},
 		Bools: map[string]bool{},
 	}
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	s.SetStdout(&bytes.Buffer{})
+	s.SetStderr(&bytes.Buffer{})
+	return s
 }
 
 // readEnvFile parses a KEY=VALUE file into a map.
@@ -950,9 +953,9 @@ func TestExecutePrepper_DevDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.ExecutePrepper(
 		SeederInfo{PrepperExec: "/fake"},
@@ -983,9 +986,9 @@ func TestExecutePrepper_DownloadsDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.ExecutePrepper(
 		SeederInfo{PrepperExec: "/fake"},
@@ -1016,9 +1019,9 @@ func TestExecutePrepper_Stage3URLError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.ExecutePrepper(
 		SeederInfo{PrepperExec: "/fake"},
@@ -1051,9 +1054,9 @@ func TestSeed_Success(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	info := SeederInfo{
 		Name:             "00-bedrock",
@@ -1108,9 +1111,9 @@ func TestSeed_DefaultDevDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.Seed(&SeedOptions{ChrootDir: "/mnt/chroot", Info: SeederInfo{ChrootExec: "/x"}})
 	if err == nil {
@@ -1128,9 +1131,9 @@ func TestSeed_PhasesStateDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.Seed(&SeedOptions{ChrootDir: "/mnt/chroot", Info: SeederInfo{ChrootExec: "/x"}})
 	if err == nil {
@@ -1150,9 +1153,9 @@ func TestSeed_SeedsVersioningCadenceError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.Seed(&SeedOptions{ChrootDir: "/mnt/chroot", Info: SeederInfo{ChrootExec: "/x"}})
 	if err == nil {
@@ -1191,9 +1194,9 @@ func TestSeed_FiltersExistingEnvVars(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	info := SeederInfo{ChrootChrootExec: "/matrixos/build/seeders/00-bedrock/chroot.sh"}
 	if err := sd.Seed(&SeedOptions{ChrootDir: "/mnt/chroot", Info: info}); err != nil {
@@ -1312,9 +1315,9 @@ func TestSeed_ChrootRunnerError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.Seed(&SeedOptions{ChrootDir: "/mnt/chroot", Info: SeederInfo{ChrootExec: "/x"}})
 	if err == nil {
@@ -1521,9 +1524,9 @@ func TestImportGentooGpgKeys_Success(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.ImportGentooGpgKeys(); err != nil {
 		t.Fatalf("ImportGentooGpgKeys: %v", err)
@@ -1564,9 +1567,9 @@ func TestImportGentooGpgKeys_FixesFilePermissions(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.ImportGentooGpgKeys(); err != nil {
 		t.Fatalf("ImportGentooGpgKeys: %v", err)
@@ -1590,9 +1593,9 @@ func TestImportGentooGpgKeys_GpgKeysDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.ImportGentooGpgKeys(); err == nil {
 		t.Fatal("expected error for empty GpgKeysDir")
@@ -1611,9 +1614,9 @@ func TestImportGentooGpgKeys_RunnerError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.ImportGentooGpgKeys()
 	if err == nil {
@@ -1636,9 +1639,9 @@ func TestKillGpgDaemons_Success(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	sd.KillGpgDaemons() // should not panic
 
@@ -1663,9 +1666,9 @@ func TestKillGpgDaemons_BadConfig(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	sd.KillGpgDaemons() // should not panic, should be a no-op
 
@@ -1747,9 +1750,9 @@ func TestSetupChrootDirs_CreatesPhasesDirAndCallsSetupDevDir(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.SetupChrootDirs(tmp); err != nil {
 		t.Fatalf("SetupChrootDirs: %v", err)
@@ -1792,9 +1795,9 @@ func TestSetupChrootDirs_SkipsCloneIfDevDirExists(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.SetupChrootDirs(tmp); err != nil {
 		t.Fatalf("SetupChrootDirs: %v", err)
@@ -1824,9 +1827,9 @@ func TestSetupChrootDirs_RemoteClone(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	if err := sd.SetupChrootDirs(tmp); err != nil {
 		t.Fatalf("SetupChrootDirs: %v", err)
@@ -1864,9 +1867,9 @@ func TestSetupChrootDirs_PhasesStateDirError(t *testing.T) {
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	sd.SetStdout(&bytes.Buffer{})
+	sd.SetStderr(&bytes.Buffer{})
 
 	err := sd.SetupChrootDirs("/tmp/fake")
 	if err == nil {

@@ -81,24 +81,24 @@ func (r *Releaser) CleanRootfs() error {
 	}
 
 	rdOpts := filesystems.RemoveDirOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, d := range removeDirs {
 		_ = filesystems.RemoveDir(filepath.Join(r.imageDir, d), rdOpts)
 	}
 
 	edOpts := filesystems.EmptyDirOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, d := range emptyDirs {
 		_ = filesystems.EmptyDir(filepath.Join(r.imageDir, d), edOpts)
 	}
 
 	rfgOpts := filesystems.RemoveFileWithGlobOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, p := range removeFiles {
 		_ = filesystems.RemoveFileWithGlob(
@@ -138,8 +138,8 @@ func (r *Releaser) chroot(env []string, name string, args []string) error {
 			Name:   name,
 			Args:   args,
 			Env:    env,
-			Stdout: r.stdout,
-			Stderr: r.stderr,
+			Stdout: r.Stdout(),
+			Stderr: r.Stderr(),
 		},
 		ChrootExec: initScript,
 		ChrootDir:  r.imageDir,
@@ -191,15 +191,15 @@ func (r *Releaser) PostCleanShrink() error {
 
 	for _, d := range removeDirs {
 		opts := filesystems.RemoveDirOptions{
-			Stdout: r.stdout,
-			Stderr: r.stderr,
+			Stdout: r.Stdout(),
+			Stderr: r.Stderr(),
 		}
 		_ = filesystems.RemoveDir(filepath.Join(r.imageDir, d), opts)
 	}
 	for _, d := range emptyDirs {
 		opts := filesystems.EmptyDirOptions{
-			Stdout: r.stdout,
-			Stderr: r.stderr,
+			Stdout: r.Stdout(),
+			Stderr: r.Stderr(),
 		}
 		_ = filesystems.EmptyDir(filepath.Join(r.imageDir, d), opts)
 	}
