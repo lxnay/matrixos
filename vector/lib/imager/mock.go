@@ -2,6 +2,12 @@ package imager
 
 import "matrixos/vector/lib/worker"
 
+// Compile-time interface checks.
+var (
+	_ Bootloader = (*MockBootloader)(nil)
+	_ IImager    = (*MockImager)(nil)
+)
+
 // MockBootloader implements Bootloader for testing.
 type MockBootloader struct {
 	ConfigureCalled        bool

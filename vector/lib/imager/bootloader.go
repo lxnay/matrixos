@@ -56,6 +56,150 @@ func (im *Imager) SetupVmtestConfig() error {
 	return im.bootloader.ConfigureVmtest()
 }
 
+type bootloaderConfigInfo struct {
+	efibootDir     string
+	efiDeviceUUID  string
+	bootDeviceUUID string
+}
+
+// prepareBootloaderConfig validates the preconditions shared by bootloader
+// Configure() implementations, resolves partition UUIDs and the ostree boot
+// commit, and ensures the EFI boot directory exists.
+func (im *Imager) prepareBootloaderConfig() (*bootloaderConfigInfo, error) {
+	if im.rootfs == "" {
+		return nil, errors.New("rootfs not set, call SetRootfs first")
+	}
+	if im.efiDevice == "" {
+		return nil, errors.New("missing efiDevice, not set in NewImagerOptions")
+	}
+	if im.bootDevice == "" {
+		return nil, errors.New("missing bootDevice, not set in NewImagerOptions")
+	}
+	if im.efifsMount == "" {
+		return nil, errors.New("missing efifsMount, call MountEfifs first")
+	}
+	if im.bootfsMount == "" {
+		return nil, errors.New("missing bootfsMount, call MountBootfs first")
+	}
+	if im.rootfsMount == "" {
+		return nil, errors.New("missing rootfsMount, call MountRootfs first")
+	}
+
+	efibootDir, err := im.EfiBootDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI boot directory: %w", err)
+	}
+
+	efiDeviceUUID, err := filesystems.DeviceUUID(im.efiDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get UUID for %s: %w", im.efiDevice, err)
+	}
+	bootDeviceUUID, err := filesystems.DeviceUUID(im.bootDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get UUID for %s: %w", im.bootDevice, err)
+	}
+
+	// Verify kernel exists.
+	if _, err := im.GetKernelPath(); err != nil {
+		return nil, fmt.Errorf("failed to determine kernel version: %w", err)
+	}
+
+	// Get the boot commit.
+	bootCommit, err := im.ostree.BootCommit(im.rootfsMount)
+	if err != nil || bootCommit == "" {
+		return nil, fmt.Errorf("cannot determine ostree boot commit: %w", err)
+	}
+	im.Print("Found boot commit: %s\n", bootCommit)
+
+	if err := os.MkdirAll(efibootDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create efibootDir %s: %w", efibootDir, err)
+	}
+
+	return &bootloaderConfigInfo{
+		efibootDir:     efibootDir,
+		efiDeviceUUID:  efiDeviceUUID,
+		bootDeviceUUID: bootDeviceUUID,
+	}, nil
+}
+
+// writeBootloaderEnvFile creates an environment.d drop-in file inside rootfs.
+func (im *Imager) writeBootloaderEnvFile(filename, content string) error {
+	envDir := filepath.Join(im.rootfs, "etc", "environment.d")
+	if err := os.MkdirAll(envDir, 0755); err != nil {
+		return fmt.Errorf("failed to create environment.d dir: %w", err)
+	}
+	envPath := filepath.Join(envDir, filename)
+	if err := os.WriteFile(envPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", filename, err)
+	}
+	return nil
+}
+
+type bootloaderInstallInfo struct {
+	efibootDir string
+	efiRoot    string
+	bootRoot   string
+	efiExe     string
+	chrootEnv  []string
+}
+
+// prepareBootloaderInstall validates the preconditions shared by bootloader
+// Install() implementations and builds the chroot mount environment.
+func (im *Imager) prepareBootloaderInstall() (*bootloaderInstallInfo, error) {
+	if im.rootfs == "" {
+		return nil, errors.New("rootfs not set, call SetRootfs first")
+	}
+	if im.efifsMount == "" {
+		return nil, errors.New("missing efifsMount, call MountEfifs first")
+	}
+	if im.bootfsMount == "" {
+		return nil, errors.New("missing bootfsMount, call MountBootfs first")
+	}
+	if im.devicePath == "" {
+		return nil, errors.New("missing devicePath, not set in NewImagerOptions")
+	}
+
+	efibootDir, err := im.EfiBootDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI boot directory: %w", err)
+	}
+	efiRoot, err := im.EfiRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI root: %w", err)
+	}
+	bootRoot, err := im.BootRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine boot root: %w", err)
+	}
+	efiExe, err := im.EfiExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI executable: %w", err)
+	}
+
+	return &bootloaderInstallInfo{
+		efibootDir: efibootDir,
+		efiRoot:    efiRoot,
+		bootRoot:   bootRoot,
+		efiExe:     efiExe,
+		chrootEnv: []string{
+			"IMAGER_EFI_MOUNT=" + im.efifsMount,
+			"IMAGER_BOOT_MOUNT=" + im.bootfsMount,
+			"IMAGER_EFI_ROOT=" + efiRoot,
+			"IMAGER_BOOT_ROOT=" + bootRoot,
+		},
+	}, nil
+}
+
+// verifyEfiExecutable confirms that the bootloader installer created the
+// expected EFI fallback executable inside efibootDir.
+func verifyEfiExecutable(efibootDir, efiExe, toolName string) (string, error) {
+	bootx64efi := filepath.Join(efibootDir, efiExe)
+	if !filesystems.PathExists(bootx64efi) {
+		return "", fmt.Errorf("%s does not exist after %s", bootx64efi, toolName)
+	}
+	return bootx64efi, nil
+}
+
 func (im *Imager) InstallSecurebootCerts() error {
 	if im.rootfs == "" {
 		return errors.New("rootfs not set, call SetRootfs first")

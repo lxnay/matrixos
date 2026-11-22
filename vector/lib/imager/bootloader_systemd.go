@@ -9,6 +9,9 @@ import (
 	"matrixos/vector/lib/filesystems"
 )
 
+// Compile-time interface check.
+var _ Bootloader = (*SystemdBootBootloader)(nil)
+
 // SystemdBootBootloader implements Bootloader for systemd-boot.
 type SystemdBootBootloader struct {
 	im *Imager
@@ -22,54 +25,11 @@ func NewSystemdBootBootloader(im *Imager) *SystemdBootBootloader {
 func (s *SystemdBootBootloader) Configure() error {
 	im := s.im
 
-	if im.rootfs == "" {
-		return errors.New("rootfs not set, call SetRootfs first")
-	}
-	if im.efiDevice == "" {
-		return errors.New("missing efiDevice, not set in NewImagerOptions")
-	}
-	if im.bootDevice == "" {
-		return errors.New("missing bootDevice, not set in NewImagerOptions")
-	}
-	if im.bootfsMount == "" {
-		return errors.New("missing bootfsMount, call MountBootfs first")
-	}
-	if im.rootfsMount == "" {
-		return errors.New("missing rootfsMount, call MountRootfs first")
+	if _, err := im.prepareBootloaderConfig(); err != nil {
+		return err
 	}
 
-	efibootDir, err := im.EfiBootDir()
-	if err != nil {
-		return fmt.Errorf("failed to determine EFI boot directory: %w", err)
-	}
-
-	_, err = filesystems.DeviceUUID(im.efiDevice)
-	if err != nil {
-		return fmt.Errorf("unable to get UUID for %s: %w", im.efiDevice, err)
-	}
-	_, err = filesystems.DeviceUUID(im.bootDevice)
-	if err != nil {
-		return fmt.Errorf("unable to get UUID for %s: %w", im.bootDevice, err)
-	}
-
-	// Verify kernel exists.
-	if _, err := im.GetKernelPath(); err != nil {
-		return fmt.Errorf("failed to determine kernel version: %w", err)
-	}
-
-	// Get the boot commit.
-	bootCommit, err := im.ostree.BootCommit(im.rootfsMount)
-	if err != nil || bootCommit == "" {
-		return fmt.Errorf("cannot determine ostree boot commit: %w", err)
-	}
-	im.Print("Found boot commit: %s\n", bootCommit)
-
-	// Ensure efibootDir exists.
-	if err := os.MkdirAll(efibootDir, 0755); err != nil {
-		return fmt.Errorf("failed to create efibootDir %s: %w", efibootDir, err)
-	}
-
-	// Write loader/loader.conf onto the boot partition.
+	// Write loader/loader.conf onto the EFI partition.
 	loaderDir := filepath.Join(im.efifsMount, "loader")
 	if err := os.MkdirAll(loaderDir, 0755); err != nil {
 		return fmt.Errorf("failed to create loader dir %s: %w", loaderDir, err)
@@ -86,17 +46,8 @@ func (s *SystemdBootBootloader) Configure() error {
 	if err != nil {
 		return err
 	}
-	envDir := filepath.Join(im.rootfs, "etc", "environment.d")
-	if err := os.MkdirAll(envDir, 0755); err != nil {
-		return fmt.Errorf("failed to create environment.d dir: %w", err)
-	}
 	envContent := fmt.Sprintf("SYSTEMD_BOOT_ESP=%s/\n", efiRoot)
-	envPath := filepath.Join(envDir, "99-matrixos-imager-systemd-boot.conf")
-	if err := os.WriteFile(envPath, []byte(envContent), 0644); err != nil {
-		return fmt.Errorf("failed to write systemd-boot env config: %w", err)
-	}
-
-	return nil
+	return im.writeBootloaderEnvFile("99-matrixos-imager-systemd-boot.conf", envContent)
 }
 
 func (s *SystemdBootBootloader) BootArgs() ([]string, error) {
@@ -110,49 +61,20 @@ func (s *SystemdBootBootloader) BootArgs() ([]string, error) {
 func (s *SystemdBootBootloader) Install() error {
 	im := s.im
 
-	if im.rootfs == "" {
-		return errors.New("rootfs not set, call SetRootfs first")
-	}
-	if im.efifsMount == "" {
-		return errors.New("missing efifsMount, call MountEfifs first")
-	}
-	if im.bootfsMount == "" {
-		return errors.New("missing bootfsMount, call MountBootfs first")
-	}
-	if im.devicePath == "" {
-		return errors.New("missing devicePath, not set in NewImagerOptions")
-	}
-
-	efibootDir, err := im.EfiBootDir()
+	info, err := im.prepareBootloaderInstall()
 	if err != nil {
-		return fmt.Errorf("failed to determine EFI boot directory: %w", err)
+		return err
 	}
 
 	im.Print("Installing systemd-boot ...\n")
 
-	efiRoot, err := im.EfiRoot()
-	if err != nil {
-		return fmt.Errorf("failed to determine EFI root: %w", err)
-	}
-	bootRoot, err := im.BootRoot()
-	if err != nil {
-		return fmt.Errorf("failed to determine boot root: %w", err)
-	}
-
-	env := []string{
-		"IMAGER_EFI_MOUNT=" + im.efifsMount,
-		"IMAGER_BOOT_MOUNT=" + im.bootfsMount,
-		"IMAGER_EFI_ROOT=" + efiRoot,
-		"IMAGER_BOOT_ROOT=" + bootRoot,
-	}
-
 	err = im.chroot(
-		env,
+		info.chrootEnv,
 		"/usr/bin/bootctl",
 		[]string{
 			"install",
-			"--esp-path=" + efiRoot,
-			"--boot-path=" + bootRoot,
+			"--esp-path=" + info.efiRoot,
+			"--boot-path=" + info.bootRoot,
 			"--variables=no",
 			"--all-architectures",
 		},
@@ -162,13 +84,9 @@ func (s *SystemdBootBootloader) Install() error {
 	}
 
 	// Verify BOOTX64.EFI was created.
-	efiExe, err := im.EfiExecutable()
+	bootx64efi, err := verifyEfiExecutable(info.efibootDir, info.efiExe, "bootctl install")
 	if err != nil {
-		return fmt.Errorf("failed to determine EFI executable: %w", err)
-	}
-	bootx64efi := filepath.Join(efibootDir, efiExe)
-	if !filesystems.PathExists(bootx64efi) {
-		return fmt.Errorf("%s does not exist after bootctl install", bootx64efi)
+		return err
 	}
 
 	// Replace the unsigned systemd-boot EFI binary with the signed one.

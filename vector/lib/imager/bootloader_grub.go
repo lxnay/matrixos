@@ -10,6 +10,9 @@ import (
 	"matrixos/vector/lib/filesystems"
 )
 
+// Compile-time interface check.
+var _ Bootloader = (*GrubBootloader)(nil)
+
 // GrubBootloader implements Bootloader for the GRUB bootloader.
 type GrubBootloader struct {
 	im *Imager
@@ -23,55 +26,15 @@ func NewGrubBootloader(im *Imager) *GrubBootloader {
 func (g *GrubBootloader) Configure() error {
 	im := g.im
 
-	if im.rootfs == "" {
-		return errors.New("rootfs not set, call SetRootfs first")
-	}
-
-	if im.efiDevice == "" {
-		return errors.New("missing efiDevice, not set in NewImagerOptions")
-	}
-	if im.bootDevice == "" {
-		return errors.New("missing bootDevice, not set in NewImagerOptions")
-	}
-
-	if im.bootfsMount == "" {
-		return errors.New("missing bootfsMount, call MountBootfs first")
-	}
-	if im.rootfsMount == "" {
-		return errors.New("missing rootfsMount, call MountRootfs first")
+	info, err := im.prepareBootloaderConfig()
+	if err != nil {
+		return err
 	}
 
 	ref, err := im.cleanAndStripRef()
 	if err != nil {
 		return fmt.Errorf("failed to clean ref: %w", err)
 	}
-
-	efibootDir, err := im.EfiBootDir()
-	if err != nil {
-		return fmt.Errorf("failed to determine EFI boot directory: %w", err)
-	}
-
-	efiDeviceUUID, err := filesystems.DeviceUUID(im.efiDevice)
-	if err != nil {
-		return fmt.Errorf("unable to get UUID for %s: %w", im.efiDevice, err)
-	}
-
-	bootDeviceUUID, err := filesystems.DeviceUUID(im.bootDevice)
-	if err != nil {
-		return fmt.Errorf("unable to get UUID for %s: %w", im.bootDevice, err)
-	}
-
-	// Verify kernel exists.
-	if _, err := im.GetKernelPath(); err != nil {
-		return fmt.Errorf("failed to determine kernel version: %w", err)
-	}
-
-	// Get the boot commit.
-	bootCommit, err := im.ostree.BootCommit(im.rootfsMount)
-	if err != nil || bootCommit == "" {
-		return fmt.Errorf("cannot determine ostree boot commit: %w", err)
-	}
-	im.Print("Found boot commit: %s\n", bootCommit)
 
 	devDir, err := im.DevDir()
 	if err != nil {
@@ -90,12 +53,7 @@ func (g *GrubBootloader) Configure() error {
 	}
 	im.Print("Using grub config from %s\n", srcGrubCfg)
 
-	// Ensure efibootDir exists.
-	if err := os.MkdirAll(efibootDir, 0755); err != nil {
-		return fmt.Errorf("failed to create efibootDir %s: %w", efibootDir, err)
-	}
-
-	dstGrubCfg := filepath.Join(efibootDir, "grub.cfg")
+	dstGrubCfg := filepath.Join(info.efibootDir, "grub.cfg")
 	im.Print("Copying grub: %s -> %s\n", srcGrubCfg, dstGrubCfg)
 	if err := filesystems.CopyFile(srcGrubCfg, dstGrubCfg); err != nil {
 		return fmt.Errorf("failed to copy grub config: %w", err)
@@ -136,15 +94,9 @@ func (g *GrubBootloader) Configure() error {
 		return err
 	}
 
-	envDir := filepath.Join(im.rootfs, "etc", "environment.d")
-	if err := os.MkdirAll(envDir, 0755); err != nil {
-		return fmt.Errorf("failed to create environment.d dir: %w", err)
-	}
-
 	grubCfgEnv := fmt.Sprintf("GRUB_CFG=%s/%s/grub.cfg\n", efiRoot, relEfiBootPath)
-	grubCfgEnvPath := filepath.Join(envDir, "99-matrixos-imager-grub.conf")
-	if err := os.WriteFile(grubCfgEnvPath, []byte(grubCfgEnv), 0644); err != nil {
-		return fmt.Errorf("failed to write grub env config: %w", err)
+	if err := im.writeBootloaderEnvFile("99-matrixos-imager-grub.conf", grubCfgEnv); err != nil {
+		return err
 	}
 
 	// Perform template substitutions in grub.cfg.
@@ -153,8 +105,8 @@ func (g *GrubBootloader) Configure() error {
 		return fmt.Errorf("failed to read grub config for substitution: %w", err)
 	}
 	grubContent := string(grubData)
-	grubContent = strings.ReplaceAll(grubContent, "%BOOTUUID%", bootDeviceUUID)
-	grubContent = strings.ReplaceAll(grubContent, "%EFIUUID%", efiDeviceUUID)
+	grubContent = strings.ReplaceAll(grubContent, "%BOOTUUID%", info.bootDeviceUUID)
+	grubContent = strings.ReplaceAll(grubContent, "%EFIUUID%", info.efiDeviceUUID)
 	grubContent = strings.ReplaceAll(grubContent, "%OSNAME%", osName)
 	if err := os.WriteFile(dstGrubCfg, []byte(grubContent), 0644); err != nil {
 		return fmt.Errorf("failed to write substituted grub config: %w", err)
@@ -203,57 +155,26 @@ func (g *GrubBootloader) BootArgs() ([]string, error) {
 func (g *GrubBootloader) Install() error {
 	im := g.im
 
-	if im.rootfs == "" {
-		return errors.New("rootfs not set, call SetRootfs first")
-	}
-	if im.efifsMount == "" {
-		return errors.New("missing efifsMount, call MountEfifs first")
-	}
-	if im.bootfsMount == "" {
-		return errors.New("missing bootfsMount, call MountBootfs first")
-	}
-	if im.devicePath == "" {
-		return errors.New("missing devicePath, not set in NewImagerOptions")
-	}
-	efibootDir, err := im.EfiBootDir()
+	info, err := im.prepareBootloaderInstall()
 	if err != nil {
-		return fmt.Errorf("failed to determine EFI boot directory: %w", err)
+		return err
 	}
 
 	im.Print("Installing bootloader ...\n")
 
-	efiRoot, err := im.EfiRoot()
-	if err != nil {
-		return fmt.Errorf("failed to determine EFI root: %w", err)
-	}
-	bootRoot, err := im.BootRoot()
-	if err != nil {
-		return fmt.Errorf("failed to determine boot root: %w", err)
-	}
 	osName, err := im.OsName()
 	if err != nil {
 		return fmt.Errorf("failed to determine OS name: %w", err)
 	}
-	efiExe, err := im.EfiExecutable()
-	if err != nil {
-		return fmt.Errorf("failed to determine EFI executable: %w", err)
-	}
-
-	env := []string{
-		"IMAGER_EFI_MOUNT=" + im.efifsMount,
-		"IMAGER_BOOT_MOUNT=" + im.bootfsMount,
-		"IMAGER_EFI_ROOT=" + efiRoot,
-		"IMAGER_BOOT_ROOT=" + bootRoot,
-	}
 
 	err = im.chroot(
-		env,
+		info.chrootEnv,
 		"/usr/bin/grub-install",
 		[]string{
 			"--target=x86_64-efi",
 			"--directory=/usr/lib/grub/x86_64-efi",
-			"--efi-directory=" + efiRoot,
-			"--boot-directory=" + bootRoot,
+			"--efi-directory=" + info.efiRoot,
+			"--boot-directory=" + info.bootRoot,
 			"--themes=" + osName + "-theme",
 			"--removable",
 			"--modules=ext2 btrfs gzio part_gpt fat part_msdos all_video",
@@ -265,13 +186,12 @@ func (g *GrubBootloader) Install() error {
 	}
 
 	// Verify BOOTX64.EFI was created.
-	bootx64efi := filepath.Join(efibootDir, efiExe)
-	if !filesystems.PathExists(bootx64efi) {
-		return fmt.Errorf("%s does not exist after grub-install", bootx64efi)
+	if _, err := verifyEfiExecutable(info.efibootDir, info.efiExe, "grub-install"); err != nil {
+		return err
 	}
 
 	// Replace unsigned GRUBX64.EFI with the signed one.
-	grubx64efi := filepath.Join(efibootDir, "GRUBX64.EFI")
+	grubx64efi := filepath.Join(info.efibootDir, "GRUBX64.EFI")
 	im.Print("Removing existing %s as it's not signed ...\n", grubx64efi)
 	os.Remove(grubx64efi)
 
@@ -286,8 +206,8 @@ func (g *GrubBootloader) Install() error {
 	// shim which in turn chain-loads grubx64.efi. Other bootloaders (e.g.
 	// systemd-boot) must NOT have shim copied over their own BOOTX64.EFI.
 	shimDir := filepath.Join(im.rootfs, "usr", "share", "shim")
-	im.Print("Copying shim for Secureboot from %s to %s ...\n", shimDir, efibootDir)
-	if err := filesystems.CopyDirPreserve(shimDir, efibootDir); err != nil {
+	im.Print("Copying shim for Secureboot from %s to %s ...\n", shimDir, info.efibootDir)
+	if err := filesystems.CopyDirPreserve(shimDir, info.efibootDir); err != nil {
 		return fmt.Errorf("failed to copy shim binaries from %s: %w", shimDir, err)
 	}
 

@@ -65,6 +65,9 @@ type IImager interface {
 	ExecuteWithImageLock(fn func() error) error
 }
 
+// Compile-time interface check.
+var _ IImager = (*Imager)(nil)
+
 // Imager provides image creation and manipulation operations.
 type Imager struct {
 	*ImagerConfig
