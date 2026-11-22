@@ -8,7 +8,6 @@ import (
 	"slices"
 
 	"matrixos/vector/lib/filesystems"
-	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/seeder"
 )
 
@@ -23,9 +22,6 @@ type EnterCommand struct {
 	det      seeder.ISeederDetector
 	detected []seeder.SeederInfo
 
-	// Replaceable for testing
-	chrootRunner runner.ChrootRunFunc
-
 	// Flags
 	skipLock bool
 
@@ -35,9 +31,7 @@ type EnterCommand struct {
 
 // NewEnterCommand creates a new EnterCommand.
 func NewEnterCommand() *EnterCommand {
-	return &EnterCommand{
-		chrootRunner: runner.ChrootRun,
-	}
+	return &EnterCommand{}
 }
 
 func (c *EnterCommand) Name() string {

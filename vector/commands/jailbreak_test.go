@@ -78,7 +78,6 @@ func testRunner() *jailbreakRunner {
 		removeFile: func(path string) error { return nil },
 		removeAll:  func(path string) error { return nil },
 		rename:     func(src, dst string) error { return nil },
-		realpath:   func(path string) (string, error) { return path, nil },
 		copyFile:   func(src, dst string) error { return nil },
 		getMountInfo: func(mnt string) (*mountInfo, error) {
 			return &mountInfo{UUID: "test-uuid", FSType: "ext4"}, nil

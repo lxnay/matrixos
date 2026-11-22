@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"matrixos/vector/lib/config"
-	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/seeder"
 )
 
@@ -18,7 +17,6 @@ import (
 // command uses the provided MockSeeder instead of a real one.
 func newTestEnterCommand(
 	det *seeder.MockSeederDetector,
-	chrootRunner runner.ChrootRunFunc,
 	args []string,
 ) (*EnterCommand, error) {
 	origEuid := getEuid
@@ -33,9 +31,6 @@ func newTestEnterCommand(
 			return nil, fmt.Errorf("seeder detection failed: %w", err)
 		}
 		cmd.detected = detected
-	}
-	if chrootRunner != nil {
-		cmd.chrootRunner = chrootRunner
 	}
 
 	if err := cmd.parseArgs(args); err != nil {
@@ -100,9 +95,6 @@ func TestNewEnterCommand(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("NewEnterCommand returned nil")
 	}
-	if cmd.chrootRunner == nil {
-		t.Fatal("chrootRunner should be set to default")
-	}
 }
 
 func TestEnterParseArgsNotRoot(t *testing.T) {
@@ -162,7 +154,7 @@ func TestEnterRunWithDirectoryTarget(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -231,7 +223,7 @@ func TestEnterRunWithNamedTarget(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"bedrock"})
+	cmd, err := newTestEnterCommand(det, []string{"bedrock"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -256,7 +248,7 @@ func TestEnterRunNoMatchingNames(t *testing.T) {
 		Detect_: nil, // no seeders detected
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"nonexistent"})
+	cmd, err := newTestEnterCommand(det, []string{"nonexistent"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -278,7 +270,7 @@ func TestEnterRunSeedError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -303,7 +295,7 @@ func TestEnterRunChrootError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -357,7 +349,7 @@ func TestEnterRunUnrecognizedPath(t *testing.T) {
 
 	det := &seeder.MockSeederDetector{}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"/nonexistent/path/to/chroot"})
+	cmd, err := newTestEnterCommand(det, []string{"/nonexistent/path/to/chroot"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -379,7 +371,7 @@ func TestEnterRunMultipleDirectories(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir1, chrootDir2})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir1, chrootDir2})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -406,7 +398,7 @@ func TestEnterDetectionError(t *testing.T) {
 
 	// Detection now happens during Init (simulated by newTestEnterCommand),
 	// so the error is returned at construction time.
-	_, err := newTestEnterCommand(det, nil, []string{"somename"})
+	_, err := newTestEnterCommand(det, []string{"somename"})
 	if err == nil {
 		t.Fatal("Expected error, got nil")
 	}
@@ -429,7 +421,7 @@ func TestEnterParamsExecNameError(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -484,7 +476,7 @@ func TestEnterRunAcquiresLockByDefault(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -507,7 +499,7 @@ func TestEnterRunSkipsLockWithFlag(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -534,7 +526,7 @@ func TestEnterRunLockAcquisitionError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -559,7 +551,7 @@ func TestEnterRunSkipLockWithMultipleDirectories(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir1, chrootDir2})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir1, chrootDir2})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -615,7 +607,7 @@ func TestEnterRunLockUsesSeederName(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -667,7 +659,7 @@ func TestEnterRunLockNoMatchingSeeder(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -698,7 +690,7 @@ func TestEnterRunNewSeederError(t *testing.T) {
 	defer func() { newSeeder = orig }()
 
 	det := &seeder.MockSeederDetector{}
-	cmd, err := newTestEnterCommand(det, nil, []string{"/some/dir"})
+	cmd, err := newTestEnterCommand(det, []string{"/some/dir"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -732,7 +724,7 @@ func TestEnterRunMakeSeederParamsSkipsErrors(t *testing.T) {
 			{Name: "00-broken", Dir: seederDir},
 		},
 	}
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -772,7 +764,7 @@ func TestEnterMakeSeederParamsSkipsUnparseable(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -807,7 +799,7 @@ func TestEnterMakeSeederParamsSkipsMissingParamsFile(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -862,7 +854,7 @@ func TestEnterRunSeederNameTargetPreferredChrootDir(t *testing.T) {
 
 	// Target contains '/' and is NOT an existing directory, so it hits the
 	// seedersParams lookup. The seeder name "sub/00-bedrock" matches.
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-bedrock"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-bedrock"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -915,7 +907,7 @@ func TestEnterRunSeederNameTargetLatestAvailableChrootDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-server"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-server"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -961,7 +953,7 @@ func TestEnterRunSeederNameTargetNoChrootDirs(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-empty"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-empty"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -984,7 +976,7 @@ func TestEnterRunSeederNameTargetNotInParams(t *testing.T) {
 
 	det := &seeder.MockSeederDetector{} // no seeders detected
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/nonexistent"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/nonexistent"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1032,7 +1024,7 @@ func TestEnterRunLockWithPreferredChrootDirMatch(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1061,7 +1053,7 @@ func TestEnterRunSkipLockWorkerError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1106,7 +1098,7 @@ func TestEnterResolveNamesEmptyChrootsDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1145,7 +1137,7 @@ func TestEnterResolveNamesSeederNotInSps(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1199,7 +1191,7 @@ func TestEnterRunMixedTargetsSeederNameAndDirectory(t *testing.T) {
 	}
 
 	// First target is a real dir, second is a seeder name (resolved via params).
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir1, "sub/00-server"})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir1, "sub/00-server"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1249,7 +1241,7 @@ func TestEnterRunWithPartialChrootDirTarget(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1310,7 +1302,7 @@ func TestEnterRunLockResolvesPartialChrootDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1362,7 +1354,7 @@ func TestEnterRunPartialAndCompleteMixed(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{completeDir, partialDir})
+	cmd, err := newTestEnterCommand(det, []string{completeDir, partialDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}

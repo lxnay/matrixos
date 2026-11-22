@@ -52,13 +52,9 @@ func (c *KargsCommand) Name() string {
 	return "kargs"
 }
 
-// Init parses flags, loads config and prepares the UI.
+// Init parses flags and prepares the UI.
 func (c *KargsCommand) Init(args []string) error {
 	if err := c.parseArgs(args); err != nil {
-		return err
-	}
-
-	if err := c.initClientConfig(); err != nil {
 		return err
 	}
 

@@ -286,12 +286,6 @@ func (c *ReleasesCommand) findChrootDir(info seeder.SeederInfo) (string, error) 
 	return chrootDir, nil
 }
 
-// chrootDirForImageDir computes the image directory path from a chroot
-// directory.  Delegates to the releaser library.
-func chrootDirForImageDir(chrootDir string) string {
-	return releaser.ChrootDirForImageDir(chrootDir)
-}
-
 // skipFilter returns a SeederFilterFunc that skips seeders present in
 // --skip-seeders.  Returns nil when no skip list is configured.
 func (c *ReleasesCommand) skipFilter() seeder.SeederFilterFunc {

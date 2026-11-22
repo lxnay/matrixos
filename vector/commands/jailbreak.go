@@ -38,8 +38,6 @@ type jailbreakRunner struct {
 	removeAll func(path string) error
 	// rename renames a file.
 	rename func(src, dst string) error
-	// realpath resolves a path to its real absolute form.
-	realpath func(path string) (string, error)
 	// copyFile copies src to dst.
 	copyFile func(src, dst string) error
 	// getMountInfo returns UUID and filesystem type for a mountpoint.
@@ -103,7 +101,6 @@ func defaultRunner() *jailbreakRunner {
 		removeFile:   os.Remove,
 		removeAll:    os.RemoveAll,
 		rename:       filesystems.Move,
-		realpath:     filepath.EvalSymlinks,
 		copyFile:     filesystems.CopyFile,
 		getMountInfo: getMountInfoFromSystem,
 		remountRW:    filesystems.RemountReadWrite,
