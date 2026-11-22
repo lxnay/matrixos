@@ -1,6 +1,7 @@
 package filesystems
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -676,20 +677,21 @@ func AcquireFileLock(path string, timeout time.Duration) (func(), error) {
 		return nil, fmt.Errorf("failed to open lock file %s: %w", path, err)
 	}
 
-	locked := make(chan error, 1)
-	go func() {
-		locked <- syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
-	}()
-
-	select {
-	case err := <-locked:
-		if err != nil {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			f.Close()
 			return nil, fmt.Errorf("failed to acquire lock on %s: %w", path, err)
 		}
-	case <-time.After(timeout):
-		f.Close()
-		return nil, fmt.Errorf("timed out waiting for lock on %s", path)
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("timed out waiting for lock on %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return func() {
