@@ -240,29 +240,13 @@ func (o *Ostree) GenerateStaticDelta() error {
 
 	o.Print("Generating static delta for %s and ref %s ...\n", repoDir, ref)
 
-	stdout, err := o.ostreeRunCapture(
-		"--repo="+repoDir,
-		"rev-parse",
-		ref,
-	)
+	revNew, err := o.lastCommitFromRepo(repoDir, ref)
 	if err != nil {
 		return err
 	}
 
-	revNew, err := readerToFirstNonEmptyLine(stdout)
-	if err != nil {
-		return err
-	}
-
-	stdout, err = o.ostreeRunCapture(
-		"--repo="+repoDir,
-		"rev-parse",
-		ref+"^",
-	)
-	if err != nil {
-		// This is not a fatal error, the branch might not have a previous commit.
-	}
-	revOld, _ := readerToFirstNonEmptyLine(stdout)
+	// Non-fatal: the branch might not have a previous commit.
+	revOld, _ := o.lastCommitFromRepo(repoDir, ref+"^")
 
 	if revOld != "" {
 		err := o.runCmd(

@@ -21,43 +21,25 @@ func (o *Ostree) SetupEtc(rootfs string) error {
 func (o *Ostree) prepareVarHome(imageDir, homeName, varHomeName string) error {
 	homeDir := filepath.Join(imageDir, homeName)
 	varHomeDir := filepath.Join(imageDir, "var", varHomeName)
+	symlinkTarget := "var/" + varHomeName
 
-	homeInfo, err := os.Lstat(homeDir)
-	homeExists := err == nil
-
-	if homeExists && (homeInfo.Mode()&os.ModeSymlink != 0) {
+	if homeInfo, err := os.Lstat(homeDir); err == nil && homeInfo.Mode()&os.ModeSymlink != 0 {
 		if info, err := os.Stat(varHomeDir); err == nil && info.IsDir() {
 			link, _ := os.Readlink(homeDir)
-			if strings.HasSuffix(link, "var/"+varHomeName) {
+			if strings.HasSuffix(link, symlinkTarget) {
 				o.Print("%s is a symlink and %s is a directory. All good.\n", homeDir, varHomeDir)
-			} else {
-				o.PrintError("%s symlink points to an unexpected path: %s\n", homeDir, link)
-				return fmt.Errorf("home symlink invalid")
+				return nil
 			}
+			o.PrintError("%s symlink points to an unexpected path: %s\n", homeDir, link)
+			return fmt.Errorf("home symlink invalid")
 		}
-	} else if homeExists && homeInfo.IsDir() {
-		if pathExists(varHomeDir) { // path exists is correct.
-			o.PrintError("WARNING: removing %s\n", varHomeDir)
-			os.RemoveAll(varHomeDir)
-		}
-		if err := filesystems.Move(homeDir, varHomeDir); err != nil {
-			return fmt.Errorf("failed to move home: %w", err)
-		}
-	} else if homeExists {
-		if err := os.Remove(homeDir); err != nil {
-			return fmt.Errorf("failed to remove home: %w", err)
-		}
-	}
-	if _, err := os.Stat(varHomeDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(varHomeDir, 0755); err != nil {
 			return fmt.Errorf("failed to create %v: %w", varHomeDir, err)
 		}
+		return nil
 	}
-	// && !os.IsExist(err) done because of the complexity of the conditions above.
-	if err := os.Symlink("var/"+varHomeName, homeDir); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("failed to symlink %v: %w", homeDir, err)
-	}
-	return nil
+
+	return o.moveDirToTargetAndSymlink(homeDir, varHomeDir, symlinkTarget)
 }
 
 // moveDirToTargetAndSymlink moves srcDir to targetDir (if srcDir exists as a real
@@ -201,21 +183,12 @@ func (o *Ostree) prepareStaticDirs(imageDir string) error {
 // prepareUsrLocal moves /usr/local to /var/usrlocal and symlinks it.
 func (o *Ostree) prepareUsrLocal(imageDir string) error {
 	o.Print("Setting up /usr/local...\n")
-	usrLocalDir := filepath.Join(imageDir, "usr", "local")
 	relUsrLocal := "var/usrlocal"
-	imageUsrLocal := filepath.Join(imageDir, relUsrLocal)
-
-	if pathExists(usrLocalDir) {
-		if err := filesystems.Move(usrLocalDir, imageUsrLocal); err != nil {
-			return fmt.Errorf("failed to move usr/local: %w", err)
-		}
-	} else {
-		os.MkdirAll(imageUsrLocal, 0755)
-	}
-	if err := os.Symlink(filepath.Join("..", relUsrLocal), usrLocalDir); err != nil {
-		return fmt.Errorf("failed to symlink usr/local: %w", err)
-	}
-	return nil
+	return o.moveDirToTargetAndSymlink(
+		filepath.Join(imageDir, "usr", "local"),
+		filepath.Join(imageDir, relUsrLocal),
+		filepath.Join("..", relUsrLocal),
+	)
 }
 
 func (o *Ostree) PrepareFilesystemHierarchy(rootfs string) error {

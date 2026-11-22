@@ -15,6 +15,13 @@ import (
 // file first, syncs it, then renames to the final destination. This ensures the
 // destination is never left in a partial state.
 func CopyFile(src, dst string) error {
+	return copyFileAtomic(src, dst, ".copy-*.tmp")
+}
+
+// copyFileAtomic copies src to a temporary file in dst's directory, preserves
+// source permissions (including special mode bits), fsyncs, and atomically
+// renames to dst.
+func copyFileAtomic(src, dst, tmpPattern string) error {
 	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -26,7 +33,7 @@ func CopyFile(src, dst string) error {
 		return err
 	}
 
-	destFile, err := os.CreateTemp(filepath.Dir(dst), ".copy-*.tmp")
+	destFile, err := os.CreateTemp(filepath.Dir(dst), tmpPattern)
 	if err != nil {
 		return err
 	}
@@ -42,7 +49,7 @@ func CopyFile(src, dst string) error {
 	if _, err = io.Copy(destFile, sourceFile); err != nil {
 		return err
 	}
-	if err = destFile.Chmod(srcInfo.Mode().Perm()); err != nil {
+	if err = destFile.Chmod(srcInfo.Mode()); err != nil {
 		return err
 	}
 	if err = destFile.Sync(); err != nil {
@@ -144,32 +151,14 @@ func CopyFilePreserveXattrs(src, dst string) error {
 		return err
 	}
 
-	// Copy extended attributes (includes security.capability)
-	attrs, err := sysLlistxattr(src, nil)
-	if err != nil || attrs == 0 {
-		return nil // no xattrs or not supported
-	}
-	buf := make([]byte, attrs)
-	attrs, err = sysLlistxattr(src, buf)
-	if err != nil {
+	// Copy extended attributes (includes security.capability).
+	xattrs, err := readXattrs(src, false)
+	if err != nil || len(xattrs) == 0 {
 		return nil
 	}
-
-	// xattr names are null-terminated strings packed together
-	for _, name := range strings.Split(strings.TrimRight(string(buf[:attrs]), "\x00"), "\x00") {
-		if name == "" {
-			continue
-		}
-		sz, err := sysLgetxattr(src, name, nil)
-		if err != nil {
-			continue
-		}
-		val := make([]byte, sz)
-		_, err = sysLgetxattr(src, name, val)
-		if err != nil {
-			continue
-		}
-		if err := sysLsetxattr(dst, name, val, 0); err != nil {
+	for _, xa := range xattrs {
+		name := strings.TrimSuffix(string(xa.Name), "\x00")
+		if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
 			return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
 		}
 	}

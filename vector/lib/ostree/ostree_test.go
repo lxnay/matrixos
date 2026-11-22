@@ -66,21 +66,6 @@ func TestReaderHelpers(t *testing.T) {
 	if err == nil {
 		t.Error("readerToList should fail with errorReader")
 	}
-
-	// readerToFirstNonEmptyLine
-	r = strings.NewReader("\n  \n  first  \nsecond")
-	line, err := readerToFirstNonEmptyLine(r)
-	if err != nil {
-		t.Errorf("readerToFirstNonEmptyLine failed: %v", err)
-	}
-	if line != "first" {
-		t.Errorf("readerToFirstNonEmptyLine = %q, want 'first'", line)
-	}
-
-	_, err = readerToFirstNonEmptyLine(&errorReader{})
-	if err == nil {
-		t.Error("readerToFirstNonEmptyLine should fail with errorReader")
-	}
 }
 
 func TestFileHelpers(t *testing.T) {

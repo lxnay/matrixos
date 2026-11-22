@@ -67,57 +67,9 @@ func moveFileCrossDevice(src, dst string) error {
 		return fmt.Errorf("failed to create destination directory %s: %w", dstDir, err)
 	}
 
-	// Write to a temp file in the same directory as dst so the final
-	// os.Rename is guaranteed to be on the same filesystem (atomic).
-	tmp, err := os.CreateTemp(dstDir, ".move-*.tmp")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file in %s: %w", dstDir, err)
+	if err := copyFileAtomic(src, dst, ".move-*.tmp"); err != nil {
+		return fmt.Errorf("failed to copy %s to %s: %w", src, dst, err)
 	}
-	tmpPath := tmp.Name()
-
-	// Clean up the temp file on any error path.
-	success := false
-	defer func() {
-		if !success {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to open source %s: %w", src, err)
-	}
-
-	if _, err := tmp.ReadFrom(srcFile); err != nil {
-		srcFile.Close()
-		tmp.Close()
-		return fmt.Errorf("failed to copy %s to temp file: %w", src, err)
-	}
-	srcFile.Close()
-
-	// Preserve permissions from the source.
-	srcInfo, err := os.Lstat(src)
-	if err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to stat source %s: %w", src, err)
-	}
-	if err := tmp.Chmod(srcInfo.Mode()); err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to chmod temp file: %w", err)
-	}
-
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to sync temp file: %w", err)
-	}
-	tmp.Close()
-
-	// Atomic rename within the same filesystem.
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return fmt.Errorf("failed to rename temp file to %s: %w", dst, err)
-	}
-	success = true
 
 	// Source removal – best effort after a successful copy.
 	if err := os.Remove(src); err != nil {

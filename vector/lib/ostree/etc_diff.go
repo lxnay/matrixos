@@ -37,6 +37,14 @@ type EtcChange struct {
 	User   *filesystems.PathInfo // Current live state (nil if absent)
 }
 
+func addIndexedPathInfo(m map[string]*filesystems.PathInfo, pi *filesystems.PathInfo, prefix string) {
+	rel := strings.TrimPrefix(pi.Path, prefix)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel != "" {
+		m[rel] = pi
+	}
+}
+
 // indexPathInfoSlice builds a map from relative path to *PathInfo.
 // It strips the given prefix from each entry's Path and skips the root
 // directory itself (empty relative path after stripping).
@@ -46,13 +54,7 @@ func indexPathInfoSlice(items *[]filesystems.PathInfo, prefix string) map[string
 	}
 	m := make(map[string]*filesystems.PathInfo, len(*items))
 	for i := range *items {
-		pi := &(*items)[i]
-		rel := strings.TrimPrefix(pi.Path, prefix)
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
-			continue
-		}
-		m[rel] = pi
+		addIndexedPathInfo(m, &(*items)[i], prefix)
 	}
 	return m
 }
@@ -61,12 +63,7 @@ func indexPathInfoSlice(items *[]filesystems.PathInfo, prefix string) map[string
 func indexPathInfoPtrSlice(items []*filesystems.PathInfo, prefix string) map[string]*filesystems.PathInfo {
 	m := make(map[string]*filesystems.PathInfo, len(items))
 	for _, pi := range items {
-		rel := strings.TrimPrefix(pi.Path, prefix)
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
-			continue
-		}
-		m[rel] = pi
+		addIndexedPathInfo(m, pi, prefix)
 	}
 	return m
 }

@@ -3,7 +3,6 @@ package seeder
 import (
 	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -227,22 +226,9 @@ func (s *Seeder) ImportGentooGpgKeys() error {
 		return err
 	}
 
-	if err := os.MkdirAll(homedir, 0700); err != nil {
-		return fmt.Errorf("mkdir GPG homedir %s: %w", homedir, err)
+	if err := ostree.PatchGpgHomeDir(homedir); err != nil {
+		return fmt.Errorf("patch GPG homedir %s: %w", homedir, err)
 	}
-	if err := os.Chmod(homedir, 0700); err != nil {
-		return fmt.Errorf("chmod GPG homedir: %w", err)
-	}
-
-	// Fix permissions on existing files inside the GPG homedir.
-	_ = filepath.WalkDir(homedir,
-		func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			return os.Chmod(path, 0600)
-		},
-	)
 
 	s.Print("Importing Gentoo GPG keys (--homedir=%s) ...\n", homedir)
 	return s.runner(&runner.Cmd{

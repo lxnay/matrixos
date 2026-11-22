@@ -16,8 +16,6 @@ import (
 	"sort"
 	"strings"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // OstreeObjectType mirrors OstreeObjectType from the C library.
@@ -232,11 +230,14 @@ func buildDirMeta(uid, gid, mode uint32, xattrs []Xattr) ([]byte, error) {
 // Extended-attribute helpers
 // ---------------------------------------------------------------------------
 
-func readXattrs(path string) ([]Xattr, error) {
-	sz, err := unix.Llistxattr(path, nil)
+// readXattrs reads all extended attributes of path using sysLlistxattr and
+// sysLgetxattr. When strict is true, unexpected llistxattr/lgetxattr errors
+// are returned; when false, unsupported or unreadable attributes are skipped.
+func readXattrs(path string, strict bool) ([]Xattr, error) {
+	sz, err := sysLlistxattr(path, nil)
 	if err != nil {
 		// No xattr support or no data - treat as empty.
-		if err == syscall.ENOTSUP || err == syscall.ENODATA || err == syscall.ERANGE {
+		if !strict || err == syscall.ENOTSUP || err == syscall.ENODATA || err == syscall.ERANGE {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("llistxattr %s: %w", path, err)
@@ -246,15 +247,18 @@ func readXattrs(path string) ([]Xattr, error) {
 	}
 
 	buf := make([]byte, sz)
-	sz, err = unix.Llistxattr(path, buf)
+	sz, err = sysLlistxattr(path, buf)
 	if err != nil {
+		if !strict {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("llistxattr %s: %w", path, err)
 	}
 
 	// Names are NUL-separated with a trailing NUL.
-	raw := string(buf[:sz])
-	if len(raw) > 0 && raw[len(raw)-1] == 0 {
-		raw = raw[:len(raw)-1]
+	raw := strings.TrimRight(string(buf[:sz]), "\x00")
+	if raw == "" {
+		return nil, nil
 	}
 	names := strings.Split(raw, "\x00")
 
@@ -263,13 +267,19 @@ func readXattrs(path string) ([]Xattr, error) {
 		if name == "" {
 			continue
 		}
-		vsz, err := unix.Lgetxattr(path, name, nil)
+		vsz, err := sysLgetxattr(path, name, nil)
 		if err != nil {
+			if !strict {
+				continue
+			}
 			return nil, fmt.Errorf("lgetxattr %s %q: %w", path, name, err)
 		}
 		value := make([]byte, vsz)
 		if vsz > 0 {
-			if _, err = unix.Lgetxattr(path, name, value); err != nil {
+			if _, err = sysLgetxattr(path, name, value); err != nil {
+				if !strict {
+					continue
+				}
 				return nil, fmt.Errorf("lgetxattr %s %q: %w", path, name, err)
 			}
 		}
@@ -322,7 +332,7 @@ func OstreeChecksumFileAt(
 		var xattrs []Xattr
 		if !ignoreXattrs {
 			var err error
-			if xattrs, err = readXattrs(path); err != nil {
+			if xattrs, err = readXattrs(path, true); err != nil {
 				return "", err
 			}
 		}
@@ -351,7 +361,7 @@ func OstreeChecksumFileAt(
 	var xattrs []Xattr
 	if !ignoreXattrs && objtype == OstreeObjectTypeFile {
 		var err error
-		if xattrs, err = readXattrs(path); err != nil {
+		if xattrs, err = readXattrs(path, true); err != nil {
 			return "", err
 		}
 	}

@@ -171,14 +171,6 @@ func readerToList(reader io.Reader) ([]string, error) {
 	return elements, nil
 }
 
-func readerToFirstNonEmptyLine(reader io.Reader) (string, error) {
-	lines, err := readerToList(reader)
-	if err != nil || len(lines) == 0 {
-		return "", err
-	}
-	return lines[0], nil
-}
-
 // SetupEnvironment sets the LC_TIME environment variable to "C".
 // This is to ensure that Cloudflare can correctly process requests
 // without throwing HTTP 400 errors.

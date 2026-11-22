@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -194,12 +195,13 @@ func TestOstree_WarningsAndValidationUseInjectedStderr(t *testing.T) {
 	// GenerateStaticDelta warning fallback should also write to o.stderr.
 	stderrBuf.Reset()
 	o.runner = func(cmd *runner.Cmd) error {
-		if len(cmd.Args) >= 3 && cmd.Args[1] == "rev-parse" {
-			if cmd.Args[2] == "matrixos/amd64/dev/test" {
+		if len(cmd.Args) >= 3 && slices.Contains(cmd.Args, "rev-parse") {
+			target := cmd.Args[len(cmd.Args)-1]
+			if target == "matrixos/amd64/dev/test" {
 				fmt.Fprintln(cmd.Stdout, "newrev")
 				return nil
 			}
-			if cmd.Args[2] == "matrixos/amd64/dev/test^" {
+			if target == "matrixos/amd64/dev/test^" {
 				fmt.Fprintln(cmd.Stdout, "oldrev")
 				return nil
 			}
