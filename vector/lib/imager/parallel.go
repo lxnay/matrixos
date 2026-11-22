@@ -95,10 +95,12 @@ func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
 					// Check for earlier failure.
 					errMu.Lock()
 					failed := firstErr != nil
-					errMu.Unlock()
 					if failed {
 						fmt.Fprintf(poolStderr,
 							"Skipping ref %s due to earlier failure.\n", ref)
+					}
+					errMu.Unlock()
+					if failed {
 						return
 					}
 
