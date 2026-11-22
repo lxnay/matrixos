@@ -70,6 +70,7 @@ func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, err
 	}
 
@@ -82,9 +83,13 @@ func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
 	}, nil
 }
 
-// Start starts the VM process
+// Start starts the VM process and immediately begins draining stdout.
 func (vm *VMDriver) Start() error {
-	return vm.cmd.Start()
+	if err := vm.cmd.Start(); err != nil {
+		return err
+	}
+	vm.ensurePump()
+	return nil
 }
 
 // ensurePump starts a single background goroutine that drains vm.reader
@@ -175,24 +180,38 @@ func (vm *VMDriver) Send(cmd string) error {
 }
 
 func (vm *VMDriver) Close() error {
+	if vm == nil {
+		return nil
+	}
+	if vm.stdin != nil {
+		_ = vm.stdin.Close()
+	}
+	if vm.cmd == nil || vm.cmd.Process == nil {
+		if vm.stdout != nil {
+			_ = vm.stdout.Close()
+		}
+		return nil
+	}
 	return vm.Wait()
 }
 
-// Wait waits for the VM process to exit and for any active stdout pump
-// goroutine to finish.  It is safe to call multiple times (e.g. an explicit
-// Wait followed by a deferred Close).
+// Wait waits for the stdout pump goroutine to finish draining and then reaps
+// the VM process. Waiting for the pump before cmd.Wait() honours os/exec's
+// StdoutPipe contract so trailing output is never truncated.
+// It is safe to call multiple times (e.g. an explicit Wait followed by a
+// deferred Close).
 func (vm *VMDriver) Wait() error {
 	if vm == nil || vm.cmd == nil || vm.cmd.Process == nil {
 		return nil
 	}
 	vm.waitOnce.Do(func() {
-		vm.waitErr = vm.cmd.Wait()
 		vm.mu.Lock()
 		done := vm.pumpDone
 		vm.mu.Unlock()
 		if done != nil {
 			<-done
 		}
+		vm.waitErr = vm.cmd.Wait()
 	})
 	return vm.waitErr
 }
@@ -201,6 +220,7 @@ func (vm *VMDriver) Wait() error {
 type VMCommand struct {
 	BaseCommand
 	UI
+	SignalGuard
 	fs            *flag.FlagSet
 	imagePath     string
 	memory        string
@@ -272,16 +292,21 @@ func (c *VMCommand) Run() error {
 		c.fs.Usage()
 		return fmt.Errorf("missing required flag: --image")
 	}
+	return c.RunWithGuard(c.run)
+}
 
+func (c *VMCommand) run() error {
 	// Set up styled writers for output.
 	c.SetupPrinters("vm")
 	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
 
 	tempDir, err := os.MkdirTemp("", "matrixos-vm-")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
+	c.PushCleanup(func() { _ = os.RemoveAll(tempDir) })
 
 	mroot, err := c.cfg.GetItem("matrixOS.Root")
 	if err != nil {
@@ -306,19 +331,22 @@ func (c *VMCommand) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(testImageFile.Name())
-	truncCmd := exec.Command("truncate", "-s", "64M", testImageFile.Name())
+	testImagePath := testImageFile.Name()
+	_ = testImageFile.Close()
+	defer os.Remove(testImagePath)
+	c.PushCleanup(func() { _ = os.Remove(testImagePath) })
+
+	truncCmd := exec.Command("truncate", "-s", "64M", testImagePath)
 	if err := truncCmd.Run(); err != nil {
 		return fmt.Errorf("failed to truncate test image: %w", err)
 	}
-	testImageFile.Close()
 
 	mkfsTestImgArgs := []string{
 		"mkfs.ext4",
 		"-L", "TESTDATA",
 		"-F",
 		"-d", "tests/vm-suite",
-		testImageFile.Name(),
+		testImagePath,
 	}
 	c.Printf("Generating test filesystem with command: %v\n", mkfsTestImgArgs)
 	if err := exec.Command(mkfsTestImgArgs[0], mkfsTestImgArgs[1:]...).Run(); err != nil {
@@ -326,21 +354,22 @@ func (c *VMCommand) Run() error {
 	}
 
 	// Optionally create an extra block device.
-	var extraDiskFile *os.File
+	var extraDiskPath string
 	if c.extraDisk {
-		var err error
-		extraDiskFile, err = os.CreateTemp("", "vm-extra-disk-*.img")
+		extraDiskFile, err := os.CreateTemp("", "vm-extra-disk-*.img")
 		if err != nil {
 			return fmt.Errorf("failed to create extra disk temp file: %w", err)
 		}
-		defer os.Remove(extraDiskFile.Name())
-		extraDiskFile.Close()
+		extraDiskPath = extraDiskFile.Name()
+		_ = extraDiskFile.Close()
+		defer os.Remove(extraDiskPath)
+		c.PushCleanup(func() { _ = os.Remove(extraDiskPath) })
 
-		truncExtraCmd := exec.Command("truncate", "-s", c.extraDiskSize, extraDiskFile.Name())
+		truncExtraCmd := exec.Command("truncate", "-s", c.extraDiskSize, extraDiskPath)
 		if out, err := truncExtraCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to truncate extra disk to %s: %s: %w", c.extraDiskSize, string(out), err)
 		}
-		c.Printf("Created extra block device: %s (%s)\n", extraDiskFile.Name(), c.extraDiskSize)
+		c.Printf("Created extra block device: %s (%s)\n", extraDiskPath, c.extraDiskSize)
 	}
 
 	format := "raw"
@@ -360,12 +389,12 @@ func (c *VMCommand) Run() error {
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + codeDst,
 		"-drive", "if=pflash,format=raw,file=" + varsDst,
 		"-drive", fmt.Sprintf("file=%s,format=%s,if=virtio", c.imagePath, format),
-		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", testImageFile.Name()),
+		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", testImagePath),
 	}
 
-	if extraDiskFile != nil {
+	if extraDiskPath != "" {
 		qemuArgs = append(qemuArgs,
-			"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", extraDiskFile.Name()),
+			"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", extraDiskPath),
 		)
 	}
 
@@ -425,17 +454,15 @@ func (c *VMCommand) displayArgs() []string {
 
 func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	c.Println("Starting VM in interactive mode...")
-	vm, err := NewVMDriver(context.Background(), qemuArgs)
-	if err != nil {
-		return fmt.Errorf("failed to init VM: %w", err)
-	}
-	vm.display = os.Stdout
-	defer vm.Close()
+	c.FlushPrinters()
 
-	if err := vm.Start(); err != nil {
-		return fmt.Errorf("failed to start VM: %w", err)
-	}
-	if err := vm.Wait(); err != nil {
+	// Wire QEMU directly to stdio so interactive input works and large serial
+	// output never deadlocks on an unread pipe.
+	cmd := exec.Command(qemuSystemBinary(), qemuArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("VM exited with error: %w", err)
 	}
 	return nil

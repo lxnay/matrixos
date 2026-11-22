@@ -493,3 +493,98 @@ func TestSignalGuard_PreCleanupRunsBeforeLaterCleanups(t *testing.T) {
 		}
 	}
 }
+
+func TestVMCommand_RunInteractiveDoesNotDeadlockOnLargeOutput(t *testing.T) {
+	binDir := t.TempDir()
+	fakeQemu := filepath.Join(binDir, qemuSystemBinary())
+	// Emit 256 KiB (> 64 KiB Linux pipe buffer) and exit 0.
+	script := "#!/bin/sh\ndd if=/dev/zero bs=1024 count=256 2>/dev/null | tr '\\0' 'A'\n"
+	if err := os.WriteFile(fakeQemu, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Redirect os.Stdout temporarily so test output isn't flooded with 256 KiB.
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	origStdout := os.Stdout
+	os.Stdout = devNull
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	c := NewVMCommand()
+	c.StartUI()
+	c.SetupPrinters("vm")
+	defer c.FlushPrinters()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.runInteractive(nil)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runInteractive failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runInteractive deadlocked when QEMU emitted >64 KiB to stdout")
+	}
+}
+
+type slowSyncBuffer struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	delay time.Duration
+}
+
+func (s *slowSyncBuffer) Write(p []byte) (int, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *slowSyncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func TestVMDriver_WaitDrainsAllStdoutBeforeClosingPipe(t *testing.T) {
+	// Emit >10 KiB (>10 pump reads of 1024 bytes) and exit immediately so
+	// cmd.Wait() races ahead of the pump goroutine if called before <-pumpDone.
+	cmd := exec.Command("sh", "-c", "echo ready; seq 1 3000; echo FINAL_MARKER_END")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	disp := &slowSyncBuffer{delay: 5 * time.Millisecond}
+	vm := &VMDriver{
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		reader:  bufio.NewReader(stdout),
+		display: disp,
+	}
+	if err := vm.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := vm.Expect("ready", 2*time.Second); err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+	if err := vm.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if !strings.Contains(disp.String(), "FINAL_MARKER_END") {
+		t.Fatal("Wait closed StdoutPipe before pump drained trailing output (missing FINAL_MARKER_END)")
+	}
+}
