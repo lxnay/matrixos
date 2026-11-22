@@ -201,14 +201,7 @@ func (c *SetupOSCommand) parseArgs(args []string) error {
 }
 
 func (c *SetupOSCommand) configStr(key string) (string, error) {
-	val, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("config key %s: %w", key, err)
-	}
-	if val == "" {
-		return "", fmt.Errorf("config key %s is empty", key)
-	}
-	return val, nil
+	return c.configItem(key)
 }
 
 func (c *SetupOSCommand) Run() error {
@@ -777,9 +770,7 @@ func (c *SetupOSCommand) checkPartitionForWindows(part, grubCfg, msblPath string
 	}
 
 	var mountPoint string
-	wasMounted := false
 	if existingMount != "" {
-		wasMounted = true
 		mountPoint = existingMount
 	} else {
 		// Create temp mount point and mount.
@@ -827,7 +818,6 @@ menuentry "%s" --class windows {
 	}
 
 	// If we mounted it, unmount happens via defer.
-	_ = wasMounted
 	return nil
 }
 

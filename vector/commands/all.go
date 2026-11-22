@@ -442,19 +442,6 @@ func (c *AllCommand) seederFilterArgs() []string {
 	return args
 }
 
-// configItem returns the config value for key, returning an
-// error if the lookup fails or the value is empty.
-func (c *AllCommand) configItem(key string) (string, error) {
-	v, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("failed to get %s: %w", key, err)
-	}
-	if v == "" {
-		return "", fmt.Errorf("%s is not set", key)
-	}
-	return v, nil
-}
-
 // acquireBuildLock creates the locks directory and acquires an
 // exclusive file lock. The caller must defer the returned unlock
 // function.

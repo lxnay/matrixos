@@ -453,28 +453,14 @@ func (c *SeedsCommand) parseSeedersParams(seeders []seeder.SeederInfo) (map[stri
 // skipFilter returns a SeederFilterFunc that skips seeders present in
 // --skip-seeders.  Returns nil when no skip list is configured.
 func (c *SeedsCommand) skipFilter() seeder.SeederFilterFunc {
-	if len(c.skipSeeders) == 0 {
-		return nil
-	}
-	set := make(map[string]bool, len(c.skipSeeders))
-	for _, s := range c.skipSeeders {
-		set[s] = true
-	}
-	return func(name string) bool { return set[name] }
+	return makeSkipFilter(c.skipSeeders)
 }
 
 // onlyFilter returns a SeederFilterFunc that accepts only seeders in
 // --only-seeders.  Returns nil when no allow-list is configured
 // (all seeders pass).
 func (c *SeedsCommand) onlyFilter() seeder.SeederFilterFunc {
-	if len(c.onlySeeders) == 0 {
-		return nil
-	}
-	set := make(map[string]bool, len(c.onlySeeders))
-	for _, s := range c.onlySeeders {
-		set[s] = true
-	}
-	return func(name string) bool { return set[name] }
+	return makeOnlyFilter(c.onlySeeders)
 }
 
 // initOutputFiles truncates the built-rootfs and built-seeders output

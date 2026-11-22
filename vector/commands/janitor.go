@@ -47,36 +47,17 @@ func (c *JanitorCommand) Run() error {
 		return fmt.Errorf("error reading config: %w", err)
 	}
 
-	c.Println("Initializing seeds cleaner ...")
-	scln := &cleaners.SeedsCleaner{}
-	if err := scln.Init(c.cfg, c.printer, c.errPrinter); err != nil {
-		return fmt.Errorf("error initializing seeds cleaner: %w", err)
-	}
-
-	c.Println("Initializing images cleaner ...")
-	icln := &cleaners.ImagesCleaner{}
-	if err := icln.Init(c.cfg, c.printer, c.errPrinter); err != nil {
-		return fmt.Errorf("error initializing images cleaner: %w", err)
-	}
-
-	c.Println("Initializing downloads cleaner ...")
-	dcln := &cleaners.DownloadsCleaner{}
-	if err := dcln.Init(c.cfg, c.printer, c.errPrinter); err != nil {
-		return fmt.Errorf("error initializing downloads cleaner: %w", err)
-	}
-
-	c.Println("Initializing logs cleaner ...")
-	lcln := &cleaners.LogsCleaner{}
-	if err := lcln.Init(c.cfg, c.printer, c.errPrinter); err != nil {
-		return fmt.Errorf("error initializing logs cleaner: %w", err)
-	}
-
-	c.Println("Initializing all cleaners ...")
 	clnrs := []cleaners.ICleaner{
-		scln,
-		icln,
-		dcln,
-		lcln,
+		&cleaners.SeedsCleaner{},
+		&cleaners.ImagesCleaner{},
+		&cleaners.DownloadsCleaner{},
+		&cleaners.LogsCleaner{},
+	}
+	for _, cln := range clnrs {
+		c.Printf("Initializing %s cleaner ...\n", cln.Name())
+		if err := cln.Init(c.cfg, c.printer, c.errPrinter); err != nil {
+			return fmt.Errorf("error initializing %s cleaner: %w", cln.Name(), err)
+		}
 	}
 
 	var errors []error

@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"regexp"
@@ -106,8 +107,8 @@ func (w *styledWriter) Write(p []byte) (int, error) {
 	total := len(p)
 
 	for {
-		nlIdx := indexByte(w.buf, '\n')
-		crIdx := indexByte(w.buf, '\r')
+		nlIdx := bytes.IndexByte(w.buf, '\n')
+		crIdx := bytes.IndexByte(w.buf, '\r')
 
 		if nlIdx < 0 && crIdx < 0 {
 			break
@@ -259,14 +260,4 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 	formatted := fmt.Sprintf("%s%s %s%s%s", w.style, w.prefix, line, w.reset, nl)
 	w.writeToLog(formatted)
 	_, _ = io.WriteString(w.dest, formatted)
-}
-
-// indexByte returns the index of the first occurrence of b in data, or -1.
-func indexByte(data []byte, b byte) int {
-	for i, v := range data {
-		if v == b {
-			return i
-		}
-	}
-	return -1
 }

@@ -45,7 +45,7 @@ func TestDownloadsCleaner_isDryRun(t *testing.T) {
 			if tt.dryRun != "" {
 				mockCfg.Items["DownloadsCleaner.DryRun"] = []string{tt.dryRun}
 			}
-			cleaner := &DownloadsCleaner{cfg: mockCfg}
+			cleaner := &DownloadsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.isDryRun()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isDryRun() error = %v, wantErr %v", err, tt.wantErr)
@@ -75,7 +75,7 @@ func TestDownloadsCleaner_getDownloadsDir(t *testing.T) {
 			if tt.dir != "" {
 				mockCfg.Items["Seeder.DownloadsDir"] = []string{tt.dir}
 			}
-			cleaner := &DownloadsCleaner{cfg: mockCfg}
+			cleaner := &DownloadsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.getDownloadsDir()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getDownloadsDir() error = %v, wantErr %v", err, tt.wantErr)

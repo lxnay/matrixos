@@ -20,6 +20,28 @@ type ICleaner interface {
 	Run() error
 }
 
+// baseCleaner holds the shared state and helpers embedded by all cleaners.
+type baseCleaner struct {
+	cfg    config.IConfig
+	stdout io.Writer
+	stderr io.Writer
+}
+
+func (c *baseCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
+	c.cfg = cfg
+	c.stdout = stdout
+	c.stderr = stderr
+	return nil
+}
+
+func (c *baseCleaner) isDryRunKey(key string) (bool, error) {
+	val, err := c.cfg.GetItem(key)
+	if err != nil {
+		return false, err
+	}
+	return val == "true", nil
+}
+
 func deletePaths(paths []string, stdout, stderr io.Writer) error {
 	for _, path := range paths {
 		fmt.Fprintf(stdout, "Deleting: %s\n", path)

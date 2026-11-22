@@ -542,15 +542,7 @@ func (c *FlashCommand) showSummary(opts *imager.BuildOptions) {
 
 // showLocalRefs lists the locally available ostree refs.
 func (c *FlashCommand) showLocalRefs() error {
-	refs, err := c.ot.LocalRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list local refs: %w", err)
-	}
-	c.im.Print("Local refs:\n")
-	for _, r := range refs {
-		c.im.Print("  %s\n", r)
-	}
-	return nil
+	return showLocalRefs(c.ot, c.im.Print)
 }
 
 // getPrompter returns the interactive prompter, creating one if needed.

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"matrixos/vector/lib/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,28 +19,15 @@ const (
 )
 
 type ImagesCleaner struct {
-	cfg    config.IConfig
-	stdout io.Writer
-	stderr io.Writer
+	baseCleaner
 }
 
 func (c *ImagesCleaner) Name() string {
 	return "images"
 }
 
-func (c *ImagesCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
-	c.cfg = cfg
-	c.stdout = stdout
-	c.stderr = stderr
-	return nil
-}
-
 func (c *ImagesCleaner) isDryRun() (bool, error) {
-	val, err := c.cfg.GetItem("ImagesCleaner.DryRun")
-	if err != nil {
-		return false, err
-	}
-	return val == "true", nil
+	return c.isDryRunKey("ImagesCleaner.DryRun")
 }
 
 func (c *ImagesCleaner) MinAmountOfImages() (int, error) {

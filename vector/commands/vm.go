@@ -156,10 +156,6 @@ type VMCommand struct {
 	cpus          string
 	extraDisk     bool
 	extraDiskSize string
-
-	// Styled I/O writers
-	stdout *styledWriter
-	stderr *styledWriter
 }
 
 // NewVMCommand creates a new VMCommand
@@ -215,12 +211,8 @@ func (c *VMCommand) Run() error {
 	}
 
 	// Set up styled writers for output.
-	c.stdout = c.NewStdoutWriter("vm")
-	c.stderr = c.NewStderrWriter("vm")
 	c.SetupPrinters("vm")
 	defer c.FlushPrinters()
-	defer c.stdout.Flush()
-	defer c.stderr.Flush()
 
 	tempDir, err := os.MkdirTemp("", "matrixos-vm-")
 	if err != nil {

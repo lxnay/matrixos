@@ -189,14 +189,7 @@ func (c *JailbreakCommand) parseArgs(args []string) error {
 
 // configStr fetches a mandatory string value from config, returning an error if missing.
 func (c *JailbreakCommand) configStr(key string) (string, error) {
-	val, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("config key %s: %w", key, err)
-	}
-	if val == "" {
-		return "", fmt.Errorf("config key %s is empty", key)
-	}
-	return val, nil
+	return c.configItem(key)
 }
 
 func (c *JailbreakCommand) Run() error {

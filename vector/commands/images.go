@@ -340,27 +340,11 @@ func (c *ImagesCommand) initializeRemoteOstree(ot ostree.IOstree, im imager.IIma
 // showLocalRefs prints the local ostree refs to the provided printf function.
 // The ot parameter is the per-worker ostree instance.
 func (c *ImagesCommand) showLocalRefs(ot ostree.IOstree, im imager.IImager) error {
-	refs, err := ot.LocalRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list local refs: %w", err)
-	}
-	im.Print("Local refs:\n")
-	for _, r := range refs {
-		im.Print("  %s\n", r)
-	}
-	return nil
+	return showLocalRefs(ot, im.Print)
 }
 
 // showRemoteRefs prints the remote ostree refs to the provided printf function.
 // The ot parameter is the per-worker ostree instance.
 func (c *ImagesCommand) showRemoteRefs(ot ostree.IOstree, im imager.IImager) error {
-	refs, err := ot.RemoteRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list remote refs: %w", err)
-	}
-	im.Print("Remote refs:\n")
-	for _, r := range refs {
-		im.Print("  %s\n", r)
-	}
-	return nil
+	return showRemoteRefs(ot, im.Print)
 }

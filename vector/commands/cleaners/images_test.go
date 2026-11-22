@@ -45,7 +45,7 @@ func TestImagesCleaner_isDryRun(t *testing.T) {
 			if tt.dryRun != "" {
 				mockCfg.Items["ImagesCleaner.DryRun"] = []string{tt.dryRun}
 			}
-			cleaner := &ImagesCleaner{cfg: mockCfg}
+			cleaner := &ImagesCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.isDryRun()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isDryRun() error = %v, wantErr %v", err, tt.wantErr)
@@ -76,7 +76,7 @@ func TestImagesCleaner_MinAmountOfImages(t *testing.T) {
 			if tt.name != "NotSet" {
 				mockCfg.Items["ImagesCleaner.MinAmountOfImages"] = []string{tt.val}
 			}
-			cleaner := &ImagesCleaner{cfg: mockCfg}
+			cleaner := &ImagesCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.MinAmountOfImages()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("MinAmountOfImages() error = %v, wantErr %v", err, tt.wantErr)

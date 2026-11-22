@@ -2,8 +2,6 @@ package cleaners
 
 import (
 	"fmt"
-	"io"
-	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"path"
 	"time"
@@ -14,28 +12,15 @@ const (
 )
 
 type LogsCleaner struct {
-	cfg    config.IConfig
-	stdout io.Writer
-	stderr io.Writer
+	baseCleaner
 }
 
 func (c *LogsCleaner) Name() string {
 	return "logs"
 }
 
-func (c *LogsCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
-	c.cfg = cfg
-	c.stdout = stdout
-	c.stderr = stderr
-	return nil
-}
-
 func (c *LogsCleaner) isDryRun() (bool, error) {
-	val, err := c.cfg.GetItem("LogsCleaner.DryRun")
-	if err != nil {
-		return false, err
-	}
-	return val == "true", nil
+	return c.isDryRunKey("LogsCleaner.DryRun")
 }
 
 func (c *LogsCleaner) getLogsDir() (string, error) {
@@ -70,8 +55,7 @@ func (c *LogsCleaner) Run() error {
 		path.Join(logsDir, "weekly-builder"),
 	}
 	for _, dir := range dirs {
-		err := cleanDirectoryBasedOnMtime(dir, logsCutoffAge, dryRun, c.stdout, c.stderr)
-		if err != nil {
+		if err := cleanDirectoryBasedOnMtime(dir, logsCutoffAge, dryRun, c.stdout, c.stderr); err != nil {
 			return err
 		}
 	}

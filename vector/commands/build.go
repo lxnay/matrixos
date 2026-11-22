@@ -6,47 +6,37 @@ import (
 	"strings"
 )
 
-// BuildCommand is an uber command for orchestrating build workflow and tools
-// (image, seed, release, etc.).
-type BuildCommand struct {
+// groupCommand is a reusable subcommand router embedded by uber-commands
+// such as BuildCommand and DevCommand.
+type groupCommand struct {
 	fs          *flag.FlagSet
 	subcommands map[string]func() ICommand
 	sub         string
 	args        []string
 }
 
-// NewBuildCommand creates a new BuildCommand
-func NewBuildCommand() *BuildCommand {
-	subcommands := map[string]func() ICommand{
-		"all":      func() ICommand { return NewAllCommand() },
-		"image":    func() ICommand { return NewImageCommand() },
-		"images":   func() ICommand { return NewImagesCommand() },
-		"release":  func() ICommand { return NewReleaseCommand() },
-		"releases": func() ICommand { return NewReleasesCommand() },
-		"seeds":    func() ICommand { return NewSeedsCommand() },
-	}
-	return &BuildCommand{
-		fs:          flag.NewFlagSet("build", flag.ExitOnError),
+func newGroupCommand(name string, subcommands map[string]func() ICommand) groupCommand {
+	return groupCommand{
+		fs:          flag.NewFlagSet(name, flag.ExitOnError),
 		subcommands: subcommands,
 	}
 }
 
-func (c *BuildCommand) Name() string {
+func (c *groupCommand) Name() string {
 	return c.fs.Name()
 }
 
-func (c *BuildCommand) Init(args []string) error {
+func (c *groupCommand) Init(args []string) error {
 	var names []string
 	for name := range c.subcommands {
 		names = append(names, name)
 	}
 	c.fs.Usage = func() {
-		fmt.Printf("Usage: vector build <subcommand>\n")
+		fmt.Printf("Usage: vector %s <subcommand>\n", c.fs.Name())
 		fmt.Println("Subcommands: " + strings.Join(names, ", "))
 		c.fs.PrintDefaults()
 	}
-	err := c.fs.Parse(args)
-	if err != nil {
+	if err := c.fs.Parse(args); err != nil {
 		return err
 	}
 	if c.fs.NArg() < 1 {
@@ -58,7 +48,7 @@ func (c *BuildCommand) Init(args []string) error {
 	return nil
 }
 
-func (c *BuildCommand) Run() error {
+func (c *groupCommand) Run() error {
 	sf, ok := c.subcommands[c.sub]
 	if !ok {
 		return fmt.Errorf("unknown subcommand: %s", c.sub)
@@ -73,4 +63,24 @@ func (c *BuildCommand) Run() error {
 	}
 
 	return nil
+}
+
+// BuildCommand is an uber command for orchestrating build workflow and tools
+// (image, seed, release, etc.).
+type BuildCommand struct {
+	groupCommand
+}
+
+// NewBuildCommand creates a new BuildCommand
+func NewBuildCommand() *BuildCommand {
+	return &BuildCommand{
+		groupCommand: newGroupCommand("build", map[string]func() ICommand{
+			"all":      func() ICommand { return NewAllCommand() },
+			"image":    func() ICommand { return NewImageCommand() },
+			"images":   func() ICommand { return NewImagesCommand() },
+			"release":  func() ICommand { return NewReleaseCommand() },
+			"releases": func() ICommand { return NewReleasesCommand() },
+			"seeds":    func() ICommand { return NewSeedsCommand() },
+		}),
+	}
 }

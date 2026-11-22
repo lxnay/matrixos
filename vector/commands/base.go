@@ -156,31 +156,61 @@ func SplitCSV(s string) []string {
 	return result
 }
 
-// makeSkipFilter returns a filter function that returns true for names
-// present in the skip list.  Returns nil when the list is empty.
-func makeSkipFilter(skip []string) func(string) bool {
-	if len(skip) == 0 {
+// makeNameFilter returns a predicate that returns true for names present in
+// the list, or nil when the list is empty.
+func makeNameFilter(names []string) func(string) bool {
+	if len(names) == 0 {
 		return nil
 	}
-	set := make(map[string]bool, len(skip))
-	for _, s := range skip {
+	set := make(map[string]bool, len(names))
+	for _, s := range names {
 		set[s] = true
 	}
 	return func(name string) bool { return set[name] }
+}
+
+// makeSkipFilter returns a filter function that returns true for names
+// present in the skip list.  Returns nil when the list is empty.
+func makeSkipFilter(skip []string) func(string) bool {
+	return makeNameFilter(skip)
 }
 
 // makeOnlyFilter returns a filter function that returns true for names
 // present in the allow list.  Returns nil when the list is empty
 // (meaning all names pass).
 func makeOnlyFilter(only []string) func(string) bool {
-	if len(only) == 0 {
-		return nil
+	return makeNameFilter(only)
+}
+
+// showLocalRefs prints the local ostree refs using printFn.
+func showLocalRefs(ot ostree.IOstree, printFn func(string, ...any)) error {
+	refs, err := ot.LocalRefs()
+	if err != nil {
+		return fmt.Errorf("failed to list local refs: %w", err)
 	}
-	set := make(map[string]bool, len(only))
-	for _, s := range only {
-		set[s] = true
+	printFn("Local refs:\n")
+	for _, r := range refs {
+		printFn("  %s\n", r)
 	}
-	return func(name string) bool { return set[name] }
+	return nil
+}
+
+// showRemoteRefs prints the remote ostree refs using printFn.
+func showRemoteRefs(ot ostree.IOstree, printFn func(string, ...any)) error {
+	refs, err := ot.RemoteRefs()
+	if err != nil {
+		return fmt.Errorf("failed to list remote refs: %w", err)
+	}
+	printFn("Remote refs:\n")
+	for _, r := range refs {
+		printFn("  %s\n", r)
+	}
+	return nil
+}
+
+// configItem retrieves a required non-empty string from c.cfg.
+func (c *BaseCommand) configItem(key string) (string, error) {
+	return config.GetRequiredItem(c.cfg, key)
 }
 
 // initBaseConfig initializes the base configuration for the command.

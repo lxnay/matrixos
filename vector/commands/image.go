@@ -317,26 +317,10 @@ func (c *ImageCommand) initializeRemoteOstree() error {
 
 // showLocalRefs prints the local ostree refs to the provided printf function.
 func (c *ImageCommand) showLocalRefs() error {
-	refs, err := c.ot.LocalRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list local refs: %w", err)
-	}
-	c.im.Print("Local refs:\n")
-	for _, r := range refs {
-		c.im.Print("  %s\n", r)
-	}
-	return nil
+	return showLocalRefs(c.ot, c.im.Print)
 }
 
 // showRemoteRefs prints the remote ostree refs to the provided printf function.
 func (c *ImageCommand) showRemoteRefs() error {
-	refs, err := c.ot.RemoteRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list remote refs: %w", err)
-	}
-	c.im.Print("Remote refs:\n")
-	for _, r := range refs {
-		c.im.Print("  %s\n", r)
-	}
-	return nil
+	return showRemoteRefs(c.ot, c.im.Print)
 }

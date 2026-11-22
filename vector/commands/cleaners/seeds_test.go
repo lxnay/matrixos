@@ -48,7 +48,7 @@ func TestSeedsCleaner_isDryRun(t *testing.T) {
 			if tt.dryRun != "" {
 				mockCfg.Items["SeedsCleaner.DryRun"] = []string{tt.dryRun}
 			}
-			cleaner := &SeedsCleaner{cfg: mockCfg}
+			cleaner := &SeedsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.isDryRun()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isDryRun() error = %v, wantErr %v", err, tt.wantErr)
@@ -63,7 +63,7 @@ func TestSeedsCleaner_isDryRun(t *testing.T) {
 
 func TestSeedsCleaner_isDryRun_Error(t *testing.T) {
 	errCfg := &config.ErrConfig{Err: errors.New("config error")}
-	cleaner := &SeedsCleaner{cfg: errCfg}
+	cleaner := &SeedsCleaner{baseCleaner: baseCleaner{cfg: errCfg}}
 	_, err := cleaner.isDryRun()
 	if err == nil {
 		t.Error("isDryRun() should return an error when config fails")
@@ -90,7 +90,7 @@ func TestSeedsCleaner_MinAmountOfSeeds(t *testing.T) {
 			if tt.name != "NotSet" {
 				mockCfg.Items["SeedsCleaner.MinAmountOfSeeds"] = []string{tt.val}
 			}
-			cleaner := &SeedsCleaner{cfg: mockCfg}
+			cleaner := &SeedsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.MinAmountOfSeeds()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("MinAmountOfSeeds() error = %v, wantErr %v", err, tt.wantErr)
@@ -105,7 +105,7 @@ func TestSeedsCleaner_MinAmountOfSeeds(t *testing.T) {
 
 func TestSeedsCleaner_MinAmountOfSeeds_Error(t *testing.T) {
 	errCfg := &config.ErrConfig{Err: errors.New("config error")}
-	cleaner := &SeedsCleaner{cfg: errCfg}
+	cleaner := &SeedsCleaner{baseCleaner: baseCleaner{cfg: errCfg}}
 	_, err := cleaner.MinAmountOfSeeds()
 	if err == nil {
 		t.Error("MinAmountOfSeeds() should return an error when config fails")
@@ -252,137 +252,6 @@ func TestSortChrootDirs(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestFilterChrootEntry(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "test-filter-chroot-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create a regular file that matches the pattern.
-	matchingFile := "bedrock-20260101.img.xz"
-	matchingPath := filepath.Join(tempDir, matchingFile)
-	if err := os.WriteFile(matchingPath, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create matching file: %v", err)
-	}
-
-	// Create a regular file that does NOT match the pattern.
-	nonMatchingFile := "random.txt"
-	nonMatchingPath := filepath.Join(tempDir, nonMatchingFile)
-	if err := os.WriteFile(nonMatchingPath, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create non-matching file: %v", err)
-	}
-
-	// Create a directory.
-	subDir := "bedrock-20260102.img.xz"
-	subDirPath := filepath.Join(tempDir, subDir)
-	if err := os.Mkdir(subDirPath, 0755); err != nil {
-		t.Fatalf("Failed to create subdir: %v", err)
-	}
-
-	entries, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to read temp dir: %v", err)
-	}
-
-	entryMap := make(map[string]os.DirEntry)
-	for _, e := range entries {
-		entryMap[e.Name()] = e
-	}
-
-	tests := []struct {
-		name     string
-		fileName string
-		expected bool
-	}{
-		{"MatchingRegularFile", matchingFile, true},
-		{"NonMatchingFile", nonMatchingFile, false},
-		{"Directory", subDir, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			entry, ok := entryMap[tt.fileName]
-			if !ok {
-				t.Fatalf("Entry %s not found in temp dir", tt.fileName)
-			}
-			path := filepath.Join(tempDir, tt.fileName)
-			got := filterChrootEntry(ChrootDirNamePattern, path, entry, os.Stdout, os.Stderr)
-			if got != tt.expected {
-				t.Errorf("filterChrootEntry(%q) = %v, want %v", tt.fileName, got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestFilterChrootEntry_NonExistent(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "test-filter-nonexistent-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create a temp file so we can get a valid DirEntry, then delete it.
-	tmpFile := filepath.Join(tempDir, "gone-20260101.img.xz")
-	if err := os.WriteFile(tmpFile, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create file: %v", err)
-	}
-	entries, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to read dir: %v", err)
-	}
-	// Remove the file so Lstat will fail.
-	os.Remove(tmpFile)
-
-	got := filterChrootEntry(ChrootDirNamePattern, tmpFile, entries[0], os.Stdout, os.Stderr)
-	if got {
-		t.Error("filterChrootEntry should return false for non-existent path")
-	}
-}
-
-func TestFilterChrootEntry_Symlink(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "test-filter-symlink-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Create a target file.
-	target := filepath.Join(tempDir, "target.img.xz")
-	if err := os.WriteFile(target, []byte("test"), 0644); err != nil {
-		t.Fatalf("Failed to create target file: %v", err)
-	}
-
-	// Create a symlink with a matching name.
-	symlinkName := "bedrock-20260101.img.xz"
-	symlinkPath := filepath.Join(tempDir, symlinkName)
-	if err := os.Symlink(target, symlinkPath); err != nil {
-		t.Fatalf("Failed to create symlink: %v", err)
-	}
-
-	entries, err := os.ReadDir(tempDir)
-	if err != nil {
-		t.Fatalf("Failed to read dir: %v", err)
-	}
-
-	var symlinkEntry os.DirEntry
-	for _, e := range entries {
-		if e.Name() == symlinkName {
-			symlinkEntry = e
-			break
-		}
-	}
-	if symlinkEntry == nil {
-		t.Fatal("Symlink entry not found in directory listing")
-	}
-
-	// Lstat on a symlink returns the symlink itself, which is not a regular file.
-	got := filterChrootEntry(ChrootDirNamePattern, symlinkPath, symlinkEntry, os.Stdout, os.Stderr)
-	if got {
-		t.Error("filterChrootEntry should return false for symlinks (Lstat reports non-regular)")
 	}
 }
 

@@ -25,28 +25,6 @@ func TestNewStyledWriter(t *testing.T) {
 	}
 }
 
-// --- indexByte ---
-
-func TestIndexByte(t *testing.T) {
-	tests := []struct {
-		data []byte
-		b    byte
-		want int
-	}{
-		{[]byte("hello\nworld"), '\n', 5},
-		{[]byte("no newline"), '\n', -1},
-		{[]byte(""), '\n', -1},
-		{[]byte("\n"), '\n', 0},
-		{[]byte("abc\rdef"), '\r', 3},
-	}
-	for _, tt := range tests {
-		got := indexByte(tt.data, tt.b)
-		if got != tt.want {
-			t.Errorf("indexByte(%q, %q) = %d, want %d", tt.data, tt.b, got, tt.want)
-		}
-	}
-}
-
 // --- cleanLine ---
 
 func TestCleanLineTTY(t *testing.T) {

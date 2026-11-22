@@ -1,46 +1,25 @@
 package cleaners
 
-import (
-	"io"
-	"matrixos/vector/lib/config"
-	"time"
-)
+import "time"
 
 const (
 	downloadsCutoffAge = 30 * 24 * time.Hour
 )
 
 type DownloadsCleaner struct {
-	cfg    config.IConfig
-	stdout io.Writer
-	stderr io.Writer
+	baseCleaner
 }
 
 func (c *DownloadsCleaner) Name() string {
 	return "downloads"
 }
 
-func (c *DownloadsCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
-	c.cfg = cfg
-	c.stdout = stdout
-	c.stderr = stderr
-	return nil
-}
-
 func (c *DownloadsCleaner) isDryRun() (bool, error) {
-	val, err := c.cfg.GetItem("DownloadsCleaner.DryRun")
-	if err != nil {
-		return false, err
-	}
-	return val == "true", nil
+	return c.isDryRunKey("DownloadsCleaner.DryRun")
 }
 
 func (c *DownloadsCleaner) getDownloadsDir() (string, error) {
-	val, err := c.cfg.GetItem("Seeder.DownloadsDir")
-	if err != nil {
-		return "", err
-	}
-	return val, nil
+	return c.cfg.GetItem("Seeder.DownloadsDir")
 }
 
 func (c *DownloadsCleaner) Run() error {

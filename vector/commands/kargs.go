@@ -106,6 +106,7 @@ func (c *KargsCommand) subcommands() map[string]func() error {
 
 // Run dispatches to the appropriate subcommand.
 func (c *KargsCommand) Run() error {
+	defer c.FlushPrinters()
 	scs := c.subcommands()
 	cmd, ok := scs[c.sub]
 	if !ok {
@@ -114,10 +115,9 @@ func (c *KargsCommand) Run() error {
 	return cmd()
 }
 
-// add appends kernel arguments to all BLS configs (if not already present).
-func (c *KargsCommand) add() error {
+func (c *KargsCommand) updateEntries(op string, fn func(string, []string) error) error {
 	if len(c.args) == 0 {
-		return fmt.Errorf("add requires at least one kernel argument")
+		return fmt.Errorf("%s requires at least one kernel argument", op)
 	}
 
 	if c.run.getEuid() != 0 {
@@ -130,7 +130,7 @@ func (c *KargsCommand) add() error {
 	}
 
 	for _, entry := range entries {
-		if err := c.addKargsToEntry(entry, c.args); err != nil {
+		if err := fn(entry, c.args); err != nil {
 			return fmt.Errorf("failed to update %s: %w", filepath.Base(entry), err)
 		}
 	}
@@ -138,28 +138,14 @@ func (c *KargsCommand) add() error {
 	return c.printAllEntries(entries)
 }
 
+// add appends kernel arguments to all BLS configs (if not already present).
+func (c *KargsCommand) add() error {
+	return c.updateEntries("add", c.addKargsToEntry)
+}
+
 // rm removes kernel arguments from all BLS configs.
 func (c *KargsCommand) rm() error {
-	if len(c.args) == 0 {
-		return fmt.Errorf("rm requires at least one kernel argument")
-	}
-
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
-	}
-
-	entries, err := c.listBLSEntries()
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if err := c.rmKargsFromEntry(entry, c.args); err != nil {
-			return fmt.Errorf("failed to update %s: %w", filepath.Base(entry), err)
-		}
-	}
-
-	return c.printAllEntries(entries)
+	return c.updateEntries("rm", c.rmKargsFromEntry)
 }
 
 // listBLSEntries returns all .conf files in the BLS entries directory.
