@@ -34,34 +34,6 @@ func (o *Ostree) InitRepo() error {
 }
 
 
-// LastCommit returns the commit hash of the latest commit in the given ref.
-func LastCommit(repoDir, ref string, verbose bool) (string, error) {
-	if repoDir == "" {
-		return "", errors.New("invalid repoDir parameter")
-	}
-	if ref == "" {
-		return "", errors.New("invalid ref parameter")
-	}
-
-	stdout, err := RunWithStdoutCapture(
-		verbose,
-		"rev-parse",
-		"--repo="+repoDir,
-		ref,
-	)
-	if err != nil {
-		return "", err
-	}
-	lines, err := readerToList(stdout)
-	if err != nil {
-		return "", err
-	}
-	if len(lines) == 0 {
-		return "", fmt.Errorf("no commit found for ref %s", ref)
-	}
-	return lines[0], nil
-}
-
 // listRemotesFromRepo lists remotes using the instance runner.
 func (o *Ostree) listRemotesFromRepo(repoDir string) ([]string, error) {
 	if repoDir == "" {
@@ -193,14 +165,6 @@ func (o *Ostree) pruneFromRepo(repoDir, ref, keepObjectsYoungerThan string) erro
 	)
 }
 
-func (o *Ostree) ListRemotes() ([]string, error) {
-	repoDir, err := o.RepoDir()
-	if err != nil {
-		return nil, err
-	}
-	return o.listRemotesFromRepo(repoDir)
-}
-
 func (o *Ostree) LastCommit() (string, error) {
 	repoDir, err := o.RepoDir()
 	if err != nil {
@@ -282,6 +246,7 @@ func (o *Ostree) GenerateStaticDelta() error {
 		err := o.runCmd(
 			io.Discard,
 			os.Stderr,
+			o.verbose,
 			"--repo="+repoDir,
 			"rev-parse",
 			revOld,
@@ -300,6 +265,7 @@ func (o *Ostree) GenerateStaticDelta() error {
 		err := o.runCmd(
 			io.Discard,
 			os.Stderr,
+			o.verbose,
 			"show",
 			"--repo="+repoDir,
 			revOld,
@@ -356,57 +322,38 @@ func (o *Ostree) UpdateSummary() error {
 	return o.ostreeRun(args...)
 }
 
+func (o *Ostree) addRemoteForTarget(repoDir, sysroot string) error {
+	gpgArgs, err := o.ClientSideGpgArgs()
+	if err != nil {
+		return err
+	}
+	remote, err := o.Remote()
+	if err != nil {
+		return err
+	}
+	remoteURL, err := o.RemoteURL()
+	if err != nil {
+		return err
+	}
+	return o.addRemote(AddRemoteOptions{
+		Remote:    remote,
+		RemoteURL: remoteURL,
+		GpgArgs:   gpgArgs,
+		RepoDir:   repoDir,
+		Sysroot:   sysroot,
+	})
+}
+
 func (o *Ostree) AddRemote() error {
 	repoDir, err := o.RepoDir()
 	if err != nil {
 		return err
 	}
-
-	gpgArgs, err := o.ClientSideGpgArgs()
-	if err != nil {
-		return err
-	}
-
-	remote, err := o.Remote()
-	if err != nil {
-		return err
-	}
-	remoteURL, err := o.RemoteURL()
-	if err != nil {
-		return err
-	}
-
-	opts := AddRemoteOptions{
-		Remote:    remote,
-		RemoteURL: remoteURL,
-		GpgArgs:   gpgArgs,
-		RepoDir:   repoDir,
-	}
-	return o.addRemote(opts)
+	return o.addRemoteForTarget(repoDir, "")
 }
 
 func (o *Ostree) AddRemoteToRootfs(rootfs string) error {
-	gpgArgs, err := o.ClientSideGpgArgs()
-	if err != nil {
-		return err
-	}
-
-	remote, err := o.Remote()
-	if err != nil {
-		return err
-	}
-	remoteURL, err := o.RemoteURL()
-	if err != nil {
-		return err
-	}
-
-	opts := AddRemoteOptions{
-		Remote:    remote,
-		RemoteURL: remoteURL,
-		GpgArgs:   gpgArgs,
-		Sysroot:   rootfs,
-	}
-	return o.addRemote(opts)
+	return o.addRemoteForTarget("", rootfs)
 }
 
 func (o *Ostree) LocalRefs() ([]string, error) {

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/runner"
 )
 
@@ -112,10 +114,14 @@ func TestFileHelpers(t *testing.T) {
 }
 
 func TestRunVerbose(t *testing.T) {
-	origRunCommand := runCommand
-	defer func() { runCommand = origRunCommand }()
-
-	runCommand = func(cmd *runner.Cmd) error {
+	o, err := NewOstree(NewOstreeOptions{
+		Config:  &config.MockConfig{},
+		Verbose: true,
+	})
+	if err != nil {
+		t.Fatalf("NewOstree failed: %v", err)
+	}
+	o.runner = func(cmd *runner.Cmd) error {
 		args := cmd.Args
 		if len(args) > 0 && args[0] == "--verbose" {
 			return nil
@@ -123,7 +129,7 @@ func TestRunVerbose(t *testing.T) {
 		return fmt.Errorf("expected --verbose")
 	}
 
-	if err := Run(true, "arg"); err != nil {
-		t.Errorf("Run(true) failed: %v", err)
+	if err := o.ostreeRun("arg"); err != nil {
+		t.Errorf("ostreeRun failed: %v", err)
 	}
 }

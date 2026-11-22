@@ -185,15 +185,7 @@ func (o *Ostree) listPackagesFromPath(root, path, commit string) ([]string, erro
 	repoDir := filepath.Join(root, "ostree", "repo")
 	vardbpkg := filepath.Join(root, path)
 
-	stdout, err := o.ostreeRunCapture(
-		"--repo="+repoDir,
-		"ls",
-		"-C",
-		"-R",
-		commit,
-		"--",
-		vardbpkg,
-	)
+	pis, err := o.listContentsOfPath(commit, repoDir, vardbpkg)
 	if err != nil {
 		return nil, err
 	}
@@ -205,15 +197,7 @@ func (o *Ostree) listPackagesFromPath(root, path, commit string) ([]string, erro
 		prefix += "/"
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		pi, err := ParseOstreeLsChecksumLine(line)
-		if err != nil {
-			return nil, err
-		}
-
+	for _, pi := range *pis {
 		if pi.Mode.Type != "d" {
 			continue
 		}
@@ -227,10 +211,6 @@ func (o *Ostree) listPackagesFromPath(root, path, commit string) ([]string, erro
 		if strings.Count(relPath, "/") == 1 {
 			pkgs = append(pkgs, relPath)
 		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
 	}
 
 	sort.Strings(pkgs)

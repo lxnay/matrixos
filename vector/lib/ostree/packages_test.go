@@ -51,15 +51,6 @@ func TestCommitAndListPackages(t *testing.T) {
 		t.Fatalf("ostree commit failed: %v, output: %s", err, out)
 	}
 
-	// Get Commit Hash
-	commit, err := LastCommit(repoDir, branch, false)
-	if err != nil {
-		t.Fatalf("LastCommit failed: %v", err)
-	}
-	if commit == "" {
-		t.Fatal("commit hash is empty")
-	}
-
 	// Setup Ostree struct
 	cfg := &config.MockConfig{
 		Items: map[string][]string{
@@ -70,6 +61,15 @@ func TestCommitAndListPackages(t *testing.T) {
 	o, err := NewOstree(NewOstreeOptions{Config: cfg})
 	if err != nil {
 		t.Fatalf("NewOstree failed: %v", err)
+	}
+
+	// Get Commit Hash
+	commit, err := o.lastCommitFromRepo(repoDir, branch)
+	if err != nil {
+		t.Fatalf("lastCommitFromRepo failed: %v", err)
+	}
+	if commit == "" {
+		t.Fatal("commit hash is empty")
 	}
 
 	rootRepo := filepath.Join(root, "ostree", "repo")

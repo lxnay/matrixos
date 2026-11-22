@@ -38,8 +38,6 @@ type IOstree interface {
 	FullBranchSuffix() (string, error)
 	// IsBranchFullSuffixed checks if the instance ref is a "full" branch.
 	IsBranchFullSuffixed() (bool, error)
-	// BranchShortnameToFull converts a short branch name to a full one.
-	BranchShortnameToFull(shortName, relStage, osName, arch string) (string, error)
 	// BranchToFull converts a normal branch name to a full one.
 	BranchToFull() (string, error)
 	// RemoveFullFromBranch removes the "-full" suffix from a branch name.
@@ -102,8 +100,6 @@ type IOstree interface {
 	InitRepo() error
 	// BootCommit returns the boot commit from an ostree sysroot.
 	BootCommit(sysroot string) (string, error)
-	// ListRemotes lists all the remote refs in the configuration's ostree repository.
-	ListRemotes() ([]string, error)
 	// LastCommit returns the last commit for the instance ref.
 	LastCommit() (string, error)
 	// ImportGpgKey imports a GPG key into the GPG homedir.
@@ -142,8 +138,6 @@ type IOstree interface {
 	DeployedRootfs() (string, error)
 	// BootedRef returns the ref of the booted deployment.
 	BootedRef() (string, error)
-	// BootedHash returns the commit hash of the booted deployment.
-	BootedHash() (string, error)
 	// Switch runs `ostree admin switch` to switch to the instance ref.
 	Switch() error
 	// PostCopy runs `ostree admin post-copy` to perform post-copy operations
@@ -204,20 +198,11 @@ func readerToList(reader io.Reader) ([]string, error) {
 }
 
 func readerToFirstNonEmptyLine(reader io.Reader) (string, error) {
-	scanner := bufio.NewScanner(reader)
-	var line string
-	for scanner.Scan() {
-		line = scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		break
-	}
-	if err := scanner.Err(); err != nil {
+	lines, err := readerToList(reader)
+	if err != nil || len(lines) == 0 {
 		return "", err
 	}
-	return line, nil
+	return lines[0], nil
 }
 
 // SetupEnvironment sets the LC_TIME environment variable to "C".
@@ -236,7 +221,7 @@ type Ostree struct {
 	ref     string
 }
 
-// NewOstreeWithRunner creates a new Ostree instance with a custom command runner (for testing).
+// NewOstreeOptions holds configuration for NewOstree.
 type NewOstreeOptions struct {
 	Config  config.IConfig
 	Stdout  io.Writer
@@ -306,11 +291,11 @@ func (o *Ostree) SetRef(ref string) {
 	o.ref = ref
 }
 
-// runCmd runs a command via the instance's command runner, adding --verbose
-// and the "ostree" binary name automatically.
-func (o *Ostree) runCmd(stdout, stderr io.Writer, args ...string) error {
+// runCmd runs a command via the instance's command runner, optionally adding
+// --verbose and the "ostree" binary name automatically.
+func (o *Ostree) runCmd(stdout, stderr io.Writer, verbose bool, args ...string) error {
 	var finalArgs []string
-	if o.verbose {
+	if verbose {
 		finalArgs = append(finalArgs, "--verbose")
 		o.PrintError(">> Executing: ostree --verbose %s\n", strings.Join(args, " "))
 	}
@@ -320,7 +305,7 @@ func (o *Ostree) runCmd(stdout, stderr io.Writer, args ...string) error {
 
 // ostreeRun runs an ostree command with stdout/stderr directed to the instance's stdout/stderr.
 func (o *Ostree) ostreeRun(args ...string) error {
-	return o.runCmd(o.stdout, o.stderr, args...)
+	return o.runCmd(o.stdout, o.stderr, o.verbose, args...)
 }
 
 // ostreeRunCapture runs an ostree command and captures its stdout.
@@ -329,36 +314,7 @@ func (o *Ostree) ostreeRunCapture(args ...string) (io.Reader, error) {
 		o.PrintError(">> Executing: ostree (stdout capture) %s\n", strings.Join(args, " "))
 	}
 	stdo := new(bytes.Buffer)
-	verbose := o.verbose
-	o.verbose = false
-	err := o.runCmd(stdo, o.stderr, args...)
-	o.verbose = verbose
-	return stdo, err
-}
-
-func run(stdout, stderr io.Writer, verbose bool, args ...string) error {
-	var finalArgs []string
-	if verbose {
-		finalArgs = append(finalArgs, "--verbose")
-		fmt.Fprintf(stderr, ">> Executing: ostree --verbose %s\n", strings.Join(args, " "))
-	}
-	finalArgs = append(finalArgs, args...)
-	return runCommand(newOstreeCmd(stdout, stderr, finalArgs...))
-}
-
-// Run runs an ostree command with --verbose if requested.
-var Run = func(verbose bool, args ...string) error {
-	return run(os.Stdout, os.Stderr, verbose, args...)
-}
-
-// RunWithStdoutCapture runs an ostree command and captures its stdout,
-// with --verbose if requested.
-var RunWithStdoutCapture = func(verbose bool, args ...string) (io.Reader, error) {
-	if verbose {
-		fmt.Fprintf(os.Stderr, ">> Executing: ostree (stdout capture) %s\n", strings.Join(args, " "))
-	}
-	stdo := new(bytes.Buffer)
-	err := run(stdo, os.Stderr, false /* do not run ostree with verbose! */, args...)
+	err := o.runCmd(stdo, o.stderr, false, args...)
 	return stdo, err
 }
 

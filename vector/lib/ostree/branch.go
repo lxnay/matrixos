@@ -90,54 +90,19 @@ func (o *Ostree) IsBranchFullSuffixed() (bool, error) {
 	return o.isBranchFullSuffixed(o.ref)
 }
 
-func (o *Ostree) BranchShortnameToFull(shortName, relStage, osName, arch string) (string, error) {
-	if shortName == "" {
-		return "", errors.New("invalid shortName parameter")
-	}
-	if relStage == "" {
-		return "", errors.New("invalid relStage parameter")
-	}
-	if osName == "" {
-		return "", errors.New("invalid osName parameter")
-	}
-	if arch == "" {
-		return "", errors.New("invalid arch parameter")
-	}
-
-	suffixed, err := o.isBranchFullSuffixed(shortName)
-	if err != nil {
-		return "", err
-	}
-
-	if !suffixed {
-		suffix, err := o.FullBranchSuffix()
-		if err != nil {
-			return "", err
-		}
-		// Support idempotency.
-		shortName = fmt.Sprintf("%s-%s", shortName, suffix)
-	}
-	return BranchShortnameToNormal(relStage, shortName, osName, arch)
-}
-
 func (o *Ostree) BranchToFull() (string, error) {
 	ref := o.ref
 	if ref == "" {
 		return "", errors.New("invalid ref parameter")
 	}
 
-	suffixed, err := o.isBranchFullSuffixed(ref)
-	if err != nil {
-		return "", err
-	}
-	if suffixed {
-		// Support idempotency.
-		return ref, nil
-	}
-
 	suffix, err := o.FullBranchSuffix()
 	if err != nil {
 		return "", err
+	}
+	if strings.HasSuffix(ref, "-"+suffix) {
+		// Support idempotency.
+		return ref, nil
 	}
 	return fmt.Sprintf("%s-%s", ref, suffix), nil
 }
@@ -146,14 +111,6 @@ func (o *Ostree) RemoveFullFromBranch() (string, error) {
 	ref := o.ref
 	if ref == "" {
 		return "", errors.New("invalid ref parameter")
-	}
-
-	suffixed, err := o.isBranchFullSuffixed(ref)
-	if err != nil {
-		return "", err
-	}
-	if !suffixed {
-		return ref, nil
 	}
 
 	suffix, err := o.FullBranchSuffix()

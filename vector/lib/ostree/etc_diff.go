@@ -1,7 +1,6 @@
 package ostree
 
 import (
-	"bufio"
 	"sort"
 	"strings"
 
@@ -211,53 +210,4 @@ func (o *Ostree) ListEtcChanges(aCommit, bCommit string) ([]EtcChange, error) {
 
 	changes := computeEtcDiff(oldEtcContent, newEtcContent, userEtcContent)
 	return changes, nil
-}
-
-// ConfigDiff runs "ostree admin --sysroot=<root> config-diff" and returns a
-// map whose keys are the status letter (e.g. "A", "M", "D") and whose values
-// are sorted slices of paths that have that status.
-func (o *Ostree) ConfigDiff() (map[string][]string, error) {
-	root, err := o.Root()
-	if err != nil {
-		return nil, err
-	}
-
-	stdout, err := o.ostreeRunCapture(
-		"admin",
-		"--sysroot="+root,
-		"config-diff",
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string][]string)
-
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-
-		status := fields[0]
-		path := fields[1]
-		result[status] = append(result[status], path)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	for key := range result {
-		sort.Strings(result[key])
-	}
-
-	return result, nil
 }

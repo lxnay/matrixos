@@ -57,9 +57,6 @@ func (o *Ostree) commitArgs(opts *CommitOptions) ([]string, error) {
 	}
 
 	a := []string{"commit"}
-	if o.verbose {
-		a = append(a, "--verbose")
-	}
 	if opts.Consume {
 		a = append(a, "--consume")
 	}

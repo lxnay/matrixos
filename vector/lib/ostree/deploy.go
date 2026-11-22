@@ -37,111 +37,6 @@ func BuildDeploymentRootfs(sysroot, osName, commit string, index int) string {
 	)
 }
 
-// DeployedRootfsWithSysroot returns the path to the deployed rootfs given a sysroot and repoDir.
-func DeployedRootfsWithSysroot(sysroot, repoDir, osName, ref string, verbose bool) (string, error) {
-	if sysroot == "" {
-		return "", errors.New("invalid sysroot parameter")
-	}
-	if repoDir == "" {
-		return "", errors.New("invalid repoDir parameter")
-	}
-	if osName == "" {
-		return "", errors.New("invalid osName parameter")
-	}
-	if ref == "" {
-		return "", errors.New("invalid ref parameter")
-	}
-
-	ostreeCommit, err := LastCommit(repoDir, ref, verbose)
-	if err != nil {
-		return "", fmt.Errorf("cannot get last ostree commit: %w", err)
-	}
-
-	rootfs := BuildDeploymentRootfs(sysroot, osName, ostreeCommit, 0)
-	return rootfs, nil
-}
-
-func ListDeploymentsWithSysroot(sysroot string, verbose bool) ([]Deployment, error) {
-	data, error := ostreeAdminStatusJson(sysroot, verbose)
-	if error != nil {
-		return nil, error
-	}
-	if data == nil {
-		return nil, errors.New("failed to get ostree status")
-	}
-
-	var deployments struct {
-		Deployments []Deployment `json:"deployments"`
-	}
-
-	if err := json.Unmarshal(*data, &deployments); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal ostree status: %w", err)
-	}
-	return deployments.Deployments, nil
-}
-
-func ostreeAdminStatusJson(sysroot string, verbose bool) (*[]byte, error) {
-	if sysroot == "" {
-		return nil, errors.New("invalid ostree sysroot parameter")
-	}
-	stdout, err := RunWithStdoutCapture(
-		verbose,
-		"--sysroot="+sysroot,
-		"admin",
-		"status",
-		"--json",
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := io.ReadAll(stdout)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read ostree status: %w", err)
-	}
-	return &data, nil
-}
-
-// BootedRefWithSysroot returns the ref of the booted deployment.
-func BootedRefWithSysroot(sysroot string, verbose bool) (string, error) {
-	if sysroot == "" {
-		return "", errors.New("invalid ostree sysroot parameter")
-	}
-
-	deployments, err := ListDeploymentsWithSysroot(sysroot, verbose)
-	if err != nil {
-		return "", err
-	}
-
-	for _, d := range deployments {
-		if d.Booted {
-			return d.Refspec, nil
-		}
-	}
-
-	return "", errors.New("no booted deployment found")
-}
-
-// BootedHash returns the commit hash of the booted deployment.
-func BootedHashWithSysroot(sysroot string, verbose bool) (string, error) {
-	if sysroot == "" {
-		return "", errors.New("invalid ostree sysroot parameter")
-	}
-
-	deployments, err := ListDeploymentsWithSysroot(sysroot, verbose)
-	if err != nil {
-		return "", err
-	}
-
-	for _, d := range deployments {
-		if d.Booted {
-			return d.Checksum, nil
-		}
-	}
-
-	return "", errors.New("no booted deployment found")
-}
-
 // listDeploymentsFromSysroot lists deployments using the instance runner.
 func (o *Ostree) listDeploymentsFromSysroot(sysroot string) ([]Deployment, error) {
 	if sysroot == "" {
@@ -224,23 +119,6 @@ func (o *Ostree) BootedRef() (string, error) {
 	for _, d := range deployments {
 		if d.Booted {
 			return d.Refspec, nil
-		}
-	}
-	return "", errors.New("no booted deployment found")
-}
-
-func (o *Ostree) BootedHash() (string, error) {
-	root, err := o.Root()
-	if err != nil {
-		return "", err
-	}
-	deployments, err := o.listDeploymentsFromSysroot(root)
-	if err != nil {
-		return "", err
-	}
-	for _, d := range deployments {
-		if d.Booted {
-			return d.Checksum, nil
 		}
 	}
 	return "", errors.New("no booted deployment found")

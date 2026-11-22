@@ -363,7 +363,7 @@ func TestCommitIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parentRev, err := LastCommit(repoDir, branch, false)
+	parentRev, err := o.LastCommit()
 	if err != nil {
 		t.Fatalf("LastCommit: %v", err)
 	}

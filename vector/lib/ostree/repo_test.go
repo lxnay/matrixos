@@ -29,27 +29,9 @@ func TestRepoOperations(t *testing.T) {
 		t.Fatalf("NewOstree failed: %v", err)
 	}
 
-	// Test ListRemotes (empty)
-	remotes, err := o.ListRemotes()
-	if err != nil {
-		t.Fatalf("ListRemotes failed: %v", err)
-	}
-	if len(remotes) != 0 {
-		t.Errorf("expected 0 remotes, got %d", len(remotes))
-	}
-
 	err = o.AddRemote()
 	if err != nil {
 		t.Fatalf("AddRemote failed: %v", err)
-	}
-
-	// Test ListRemotes (1)
-	remotes, err = o.ListRemotes()
-	if err != nil {
-		t.Fatalf("ListRemotes failed: %v", err)
-	}
-	if len(remotes) != 1 || remotes[0] != "origin" {
-		t.Errorf("expected [origin], got %v", remotes)
 	}
 
 	// Test LocalRefs (empty)
@@ -302,25 +284,8 @@ func TestOstreeWrappers(t *testing.T) {
 		return nil
 	}
 
-	if _, err := o.ListRemotes(); err != nil {
-		t.Error(err)
-	}
 	if _, err := o.LocalRefs(); err != nil {
 		t.Error(err)
-	}
-}
-
-func TestLastCommit_Errors(t *testing.T) {
-	origRunCommand := runCommand
-	defer func() { runCommand = origRunCommand }()
-
-	runCommand = func(cmd *runner.Cmd) error {
-		return fmt.Errorf("not found")
-	}
-
-	// Test standalone LastCommit if exposed or wrapper
-	if _, err := LastCommit("/repo", "ref", false); err == nil {
-		t.Error("LastCommit should fail if cmd fails")
 	}
 }
 

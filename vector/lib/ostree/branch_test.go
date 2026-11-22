@@ -109,16 +109,6 @@ func TestFullBranchHelpers(t *testing.T) {
 	if clean, _ := o.RemoveFullFromBranch(); clean != "branch" {
 		t.Errorf("RemoveFullFromBranch(branch) = %q, want branch", clean)
 	}
-
-	// BranchShortnameToFull
-	fullRef, err := o.BranchShortnameToFull("gnome", "dev", "matrixos", "amd64")
-	if err != nil {
-		t.Errorf("BranchShortnameToFull failed: %v", err)
-	}
-	wantFullRef := "matrixos/amd64/dev/gnome-full"
-	if fullRef != wantFullRef {
-		t.Errorf("BranchShortnameToFull = %q, want %q", fullRef, wantFullRef)
-	}
 }
 
 func TestBranchHelpersErrors(t *testing.T) {
@@ -149,9 +139,6 @@ func TestOstreeBranchMethodsErrors(t *testing.T) {
 
 	if _, err := o.IsBranchFullSuffixed(); err == nil {
 		t.Error("IsBranchFullSuffixed should fail empty ref")
-	}
-	if _, err := o.BranchShortnameToFull("", "stage", "os", "arch"); err == nil {
-		t.Error("BranchShortnameToFull should fail empty shortname")
 	}
 	if _, err := o.BranchToFull(); err == nil {
 		t.Error("BranchToFull should fail empty ref")
