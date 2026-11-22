@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sync"
 	"syscall"
 
 	"matrixos/vector/lib/config"
@@ -129,6 +130,7 @@ type Seeder struct {
 	*SeederConfig
 	runner       runner.Func
 	chrootRunner runner.ChrootRunFunc
+	ioMu         sync.Mutex
 	stdin        io.Reader
 	stdout       io.Writer
 	stderr       io.Writer

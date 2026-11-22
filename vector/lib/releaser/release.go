@@ -82,6 +82,7 @@ type Releaser struct {
 	ostree       ostree.IOstree
 	runner       runner.Func
 	chrootRunner runner.ChrootRunFunc
+	ioMu         sync.Mutex
 	stdout       io.Writer
 	stderr       io.Writer
 
