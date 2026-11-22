@@ -114,9 +114,11 @@ func CleanupMounts(opts CleanupMountsOptions) {
 		}
 		fmt.Fprintf(stdout, "Unmounting %s ...\n", mnt)
 		if err := Unmount(mnt, 0); err != nil {
-			FlushBlockDeviceBuffers(mnt)
 			fmt.Fprintf(stderr, "Unable to umount %s: %v\n", mnt, err)
 			if entry, mntErr := findMountByTarget(mnt); mntErr == nil {
+				if strings.HasPrefix(entry.Source, "/dev/") {
+					FlushBlockDeviceBuffers(entry.Source)
+				}
 				fmt.Fprintf(stderr, "%s\n", entry.String())
 			}
 			fmt.Fprintf(stderr, "For safety, calling umount -l %s\n", mnt)
@@ -182,7 +184,10 @@ func CheckActiveMounts(chrootDir string) error {
 		return fmt.Errorf("missing chrootDir parameter")
 	}
 
-	entries, _ := listMountsByPrefix(chrootDir)
+	entries, err := listMountsByPrefix(chrootDir)
+	if err != nil {
+		return fmt.Errorf("failed to inspect active mounts for %s: %w", chrootDir, err)
+	}
 	if len(entries) == 0 {
 		return nil
 	}

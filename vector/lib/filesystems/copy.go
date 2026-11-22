@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // CopyFile copies a file from src to dst atomically. It writes to a temporary
@@ -80,6 +82,10 @@ func CopyDirPreserve(src, dst string) error {
 	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()); err != nil {
 		return fmt.Errorf("failed to create destination %s: %w", dst, err)
 	}
+	// Explicitly preserve exact permissions and special bits regardless of umask.
+	if err := os.Chmod(dst, srcInfo.Mode()); err != nil {
+		return fmt.Errorf("failed to chmod destination %s: %w", dst, err)
+	}
 
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -109,17 +115,27 @@ func CopyDirPreserve(src, dst string) error {
 		// Handle directories.
 		if d.IsDir() {
 			if relPath == "." {
-				return nil // already created above
+				return nil // already created and chmodded above
 			}
 			if err := os.MkdirAll(dstPath, info.Mode().Perm()); err != nil {
 				return err
 			}
-			// Preserve sticky, setuid, setgid bits that MkdirAll ignores.
-			specialBits := info.Mode() & (os.ModeSticky | os.ModeSetuid | os.ModeSetgid)
-			if specialBits != 0 {
-				return os.Chmod(dstPath, info.Mode().Perm()|specialBits)
+			// Preserve exact perms and sticky/setuid/setgid bits regardless of umask.
+			return os.Chmod(dstPath, info.Mode())
+		}
+
+		// Handle named pipes (FIFOs) without blocking on os.Open.
+		if info.Mode()&os.ModeNamedPipe != 0 {
+			if err := unix.Mkfifo(dstPath, uint32(info.Mode().Perm())); err != nil {
+				return fmt.Errorf("failed to create FIFO %s: %w", dstPath, err)
 			}
-			return nil
+			return os.Chmod(dstPath, info.Mode())
+		}
+
+		// Guard against other special files (sockets, device nodes) that cannot
+		// be copied with os.Open/io.Copy.
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("cannot copy unsupported special file %s (mode %s)", path, info.Mode())
 		}
 
 		// Handle regular files.
@@ -129,7 +145,7 @@ func CopyDirPreserve(src, dst string) error {
 
 // CopyFilePreserveXattrs copies a file from src to dst, preserving permissions
 // and extended attributes (xattrs). This is equivalent to "cp -a" for regular files.
-func CopyFilePreserveXattrs(src, dst string) error {
+func CopyFilePreserveXattrs(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -141,13 +157,28 @@ func CopyFilePreserveXattrs(src, dst string) error {
 		return err
 	}
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode().Perm())
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			if cerr := dstFile.Close(); cerr != nil && retErr == nil {
+				retErr = cerr
+			}
+		}
+	}()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	// Preserve exact permissions and special bits regardless of umask or pre-existing dst.
+	if err := dstFile.Chmod(srcInfo.Mode()); err != nil {
+		return err
+	}
+	closed = true
+	if err := dstFile.Close(); err != nil {
 		return err
 	}
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,7 +67,7 @@ func (a *PathInfo) Equals(b *PathInfo) bool {
 	if a.Uid != b.Uid || a.Gid != b.Gid {
 		return false
 	}
-	if a.Size != b.Size {
+	if a.Mode.Type == "-" && a.Size != b.Size {
 		return false
 	}
 	if a.Link != b.Link {
@@ -352,15 +353,27 @@ type RemoveDirOptions struct {
 	Stderr io.Writer
 }
 
-// RemoveDir removes a directory.
+// RemoveDir removes a directory (or symlink at target).
 func RemoveDir(target string, opts RemoveDirOptions) error {
+	if target == "" {
+		return fmt.Errorf("missing target parameter")
+	}
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
-	if _, err := os.Stat(target); os.IsNotExist(err) {
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
 		fmt.Fprintf(stdout, "Removing: %s does not exist\n", target)
 		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		if err := CheckDirIsRoot(target); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(stdout, "Removing %s\n", target)
 	return os.RemoveAll(target)
@@ -374,6 +387,9 @@ type EmptyDirOptions struct {
 
 // EmptyDir empties a directory.
 func EmptyDir(target string, opts EmptyDirOptions) error {
+	if target == "" {
+		return fmt.Errorf("missing target parameter")
+	}
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
@@ -381,6 +397,9 @@ func EmptyDir(target string, opts EmptyDirOptions) error {
 	if _, err := os.Stat(target); os.IsNotExist(err) {
 		fmt.Fprintf(stdout, "Emptying: %s does not exist\n", target)
 		return nil
+	}
+	if err := CheckDirIsRoot(target); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "Emptying directory %s\n", target)
 
@@ -683,6 +702,9 @@ func AcquireFileLock(path string, timeout time.Duration) (func(), error) {
 		if err == nil {
 			break
 		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			f.Close()
 			return nil, fmt.Errorf("failed to acquire lock on %s: %w", path, err)
@@ -694,10 +716,10 @@ func AcquireFileLock(path string, timeout time.Duration) (func(), error) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	return sync.OnceFunc(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}), nil
 }
 
 // EnsureLockDir ensures the lock directory exists.

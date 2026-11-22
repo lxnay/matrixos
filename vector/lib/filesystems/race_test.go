@@ -526,3 +526,210 @@ func TestFsenc_UsesInjectedWriters(t *testing.T) {
 		t.Errorf("expected LuksEncrypt output in injected stdout, got %q", stdout.String())
 	}
 }
+
+func TestMountInfo_PrefixCollisionFailClosedAndTopmost(t *testing.T) {
+	t.Run("NoPrefixCollisionOnSiblingDir", func(t *testing.T) {
+		setupMockMountInfo(t, []*MountInfoEntry{
+			{Mountpoint: "/chroot/gnome.ostree_rootfs/proc", Source: "proc", FSType: "proc"},
+		})
+		if err := CheckActiveMounts("/chroot/gnome"); err != nil {
+			t.Fatalf("CheckActiveMounts falsely matched sibling path: %v", err)
+		}
+	})
+
+	t.Run("CheckActiveMountsPropagatesReadError", func(t *testing.T) {
+		setupMockMountInfoFail(t)
+		if err := CheckActiveMounts("/chroot/gnome"); err == nil {
+			t.Fatal("CheckActiveMounts failed open on ReadMountInfo error")
+		}
+	})
+
+	t.Run("IsMountedPropagatesReadError", func(t *testing.T) {
+		setupMockMountInfoFail(t)
+		if _, err := IsMounted("/chroot/gnome"); err == nil {
+			t.Fatal("IsMounted failed open on ReadMountInfo error")
+		}
+	})
+
+	t.Run("BestMountPrefersTopmostOvermount", func(t *testing.T) {
+		entries := []*MountInfoEntry{
+			{MountID: 1, Mountpoint: "/mnt", Source: "/dev/sda1", FSType: "ext4"},
+			{MountID: 2, Mountpoint: "/mnt", Source: "/dev/sda2", FSType: "btrfs"},
+		}
+		got := bestMountForPath(entries, "/mnt/file")
+		if got == nil || got.Source != "/dev/sda2" {
+			t.Fatalf("bestMountForPath returned %+v, want topmost /dev/sda2", got)
+		}
+	})
+}
+
+func TestCopyDirPreserve_FIFODoesNotHangAndPreservesRootSticky(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "dst")
+
+	if err := os.Chmod(src, 0755|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	fifoPath := filepath.Join(src, "test.fifo")
+	if err := unix.Mkfifo(fifoPath, 0644); err != nil {
+		t.Fatalf("Mkfifo: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- CopyDirPreserve(src, dst)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CopyDirPreserve failed on FIFO: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("CopyDirPreserve hung forever trying to open FIFO")
+	}
+
+	rootInfo, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat(dst): %v", err)
+	}
+	if rootInfo.Mode()&os.ModeSticky == 0 {
+		t.Errorf("CopyDirPreserve dropped sticky bit on root dst (mode=%v)", rootInfo.Mode())
+	}
+	fifoInfo, err := os.Lstat(filepath.Join(dst, "test.fifo"))
+	if err != nil {
+		t.Fatalf("Lstat(dst/test.fifo): %v", err)
+	}
+	if fifoInfo.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("expected named pipe at dst/test.fifo, got mode=%v", fifoInfo.Mode())
+	}
+}
+
+func TestPathInfoEquals_IgnoresNonRegularFileSize(t *testing.T) {
+	dirA := mkPI("/etc/conf.d", "d", 0755, 0, 0, 0, "")
+	dirB := mkPI("/etc/conf.d", "d", 0755, 0, 0, 4096, "")
+	if !dirA.Equals(&dirB) {
+		t.Error("PathInfo.Equals reported directories unequal solely due to filesystem Size difference")
+	}
+
+	linkA := mkPI("/etc/localtime", "l", 0777, 0, 0, 0, "../usr/share/zoneinfo/UTC")
+	linkB := mkPI("/etc/localtime", "l", 0777, 0, 0, 25, "../usr/share/zoneinfo/UTC")
+	if !linkA.Equals(&linkB) {
+		t.Error("PathInfo.Equals reported identical symlinks unequal solely due to Size difference")
+	}
+}
+
+func TestLoop_DetachRetriesOnEBUSYAndNilReceiverSafe(t *testing.T) {
+	setupMockLoop(t)
+
+	var nilLoop *Loop
+	if err := nilLoop.Attach(); err == nil {
+		t.Error("expected error on nil Loop.Attach")
+	}
+	if err := nilLoop.Detach(); err == nil {
+		t.Error("expected error on nil Loop.Detach")
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "loopdev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		return f, nil
+	}
+
+	attempts := 0
+	ioctlSetInt = func(fd int, req uint, val int) error {
+		if req == unix.LOOP_CLR_FD {
+			attempts++
+			if attempts < 3 {
+				return unix.EBUSY
+			}
+		}
+		return nil
+	}
+
+	l := NewLoopFromDevice("/dev/loop0")
+	if err := l.Detach(); err != nil {
+		t.Fatalf("Detach should retry on transient EBUSY, got: %v", err)
+	}
+	if attempts != 3 {
+		t.Errorf("Detach attempts = %d, want 3", attempts)
+	}
+}
+
+func TestRemoveDir_RejectsRootAndRemovesDanglingSymlink(t *testing.T) {
+	if err := RemoveDir("/", RemoveDirOptions{Stdout: io.Discard}); err == nil {
+		t.Fatal("RemoveDir('/') should be rejected by CheckDirIsRoot")
+	}
+	if err := EmptyDir("/", EmptyDirOptions{Stdout: io.Discard}); err == nil {
+		t.Fatal("EmptyDir('/') should be rejected by CheckDirIsRoot")
+	}
+	nonexistent := filepath.Join(t.TempDir(), "does-not-exist")
+	if err := RemoveDir(nonexistent, RemoveDirOptions{Stdout: io.Discard}); err != nil {
+		t.Fatalf("RemoveDir on nonexistent path should succeed, got: %v", err)
+	}
+	link := filepath.Join(t.TempDir(), "dangling")
+	if err := os.Symlink("/nonexistent/target", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveDir(link, RemoveDirOptions{Stdout: io.Discard}); err != nil {
+		t.Fatalf("RemoveDir on dangling symlink failed: %v", err)
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatal("RemoveDir left dangling symlink behind")
+	}
+}
+
+func TestFstrim_NilWritersDoNotPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Fstrim with nil writers panicked: %v", r)
+		}
+	}()
+	if err := Fstrim(func(*runner.Cmd) error { return nil }, nil, nil, "/mnt/test"); err != nil {
+		t.Fatalf("Fstrim: %v", err)
+	}
+}
+
+func TestMoveCrossDevice_PreservesDanglingSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src-link")
+	dst := filepath.Join(tmp, "sub", "dst-link")
+	if err := os.Symlink("/nonexistent/target", src); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := moveCrossDevice(src, dst); err != nil {
+		t.Fatalf("moveCrossDevice on dangling symlink failed: %v", err)
+	}
+	target, err := os.Readlink(dst)
+	if err != nil {
+		t.Fatalf("Readlink(dst): %v", err)
+	}
+	if target != "/nonexistent/target" {
+		t.Errorf("symlink target = %q, want /nonexistent/target", target)
+	}
+	if _, err := os.Lstat(src); !os.IsNotExist(err) {
+		t.Error("expected source symlink to be removed")
+	}
+}
+
+func TestAcquireFileLock_DoubleUnlockIsSafe(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "test.lock")
+	unlock, err := AcquireFileLock(lockPath, time.Second)
+	if err != nil {
+		t.Fatalf("AcquireFileLock: %v", err)
+	}
+	// Concurrent/repeated unlocks must be idempotent and never race on f.Close().
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unlock()
+		}()
+	}
+	wg.Wait()
+}

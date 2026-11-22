@@ -2,6 +2,7 @@ package filesystems
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 )
+
+var errMountNotFound = errors.New("mount not found")
 
 var (
 	// mountInfoPath is the path to the mountinfo file.
@@ -178,7 +181,7 @@ func findMountByTarget(mnt string) (*MountInfoEntry, error) {
 			return entries[i], nil
 		}
 	}
-	return nil, fmt.Errorf("no mount found for target %s", mnt)
+	return nil, fmt.Errorf("%w for target %s", errMountNotFound, mnt)
 }
 
 // findMountContainingPath returns the entry whose mountpoint is the longest
@@ -211,8 +214,8 @@ func findMountContainingPath(path string) (*MountInfoEntry, error) {
 }
 
 // bestMountForPath returns the entry whose mountpoint is the longest prefix
-// of resolved. On ties (same mountpoint), a non-autofs entry is preferred
-// over an autofs stub so the real backing filesystem wins.
+// of resolved. On ties (same mountpoint), the last (topmost) mount wins,
+// while still preferring a non-autofs backing mount over an autofs stub.
 func bestMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntry {
 	var best *MountInfoEntry
 	bestLen := -1
@@ -225,7 +228,7 @@ func bestMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntr
 		case len(mp) > bestLen:
 			bestLen = len(mp)
 			best = entries[i]
-		case len(mp) == bestLen && best != nil && best.FSType == "autofs" && entries[i].FSType != "autofs":
+		case len(mp) == bestLen && best != nil && (best.FSType == "autofs" || entries[i].FSType != "autofs"):
 			best = entries[i]
 		}
 	}
@@ -241,8 +244,8 @@ func defaultTriggerAutomount(path string) {
 	}
 }
 
-// listMountsByPrefix returns entries whose mountpoint starts with prefix.
-// The prefix is resolved through symlinks before comparison.
+// listMountsByPrefix returns entries whose mountpoint equals prefix or is a
+// descendant of prefix. The prefix is resolved through symlinks before comparison.
 func listMountsByPrefix(prefix string) ([]*MountInfoEntry, error) {
 	entries, err := ReadMountInfo()
 	if err != nil {
@@ -251,7 +254,7 @@ func listMountsByPrefix(prefix string) ([]*MountInfoEntry, error) {
 	resolved := resolvePath(prefix)
 	var result []*MountInfoEntry
 	for _, e := range entries {
-		if strings.HasPrefix(e.Mountpoint, resolved) {
+		if isPathUnderMount(e.Mountpoint, resolved) {
 			result = append(result, e)
 		}
 	}
@@ -277,7 +280,10 @@ func findMountsBySource(source string) ([]*MountInfoEntry, error) {
 func IsMounted(mnt string) (bool, error) {
 	_, err := findMountByTarget(mnt)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, errMountNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }

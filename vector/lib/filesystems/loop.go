@@ -7,11 +7,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-const loopAttachMaxRetries = 16
+const (
+	loopAttachMaxRetries    = 16
+	loopDetachMaxRetries    = 8
+	loopSetStatusMaxRetries = 8
+)
+
+var loopRetryDelay = 15 * time.Millisecond
 
 // Mockable variables for loop-device operations.
 var (
@@ -68,6 +75,9 @@ func (l *Loop) DevicePath() string {
 // by reading /sys/block/loopN/loop/backing_file.
 // Returns an empty string when the device has no backing file.
 func (l *Loop) BackingFile() string {
+	if l == nil {
+		return ""
+	}
 	l.mu.Lock()
 	dev := l.device
 	l.mu.Unlock()
@@ -90,9 +100,13 @@ func (l *Loop) BackingFile() string {
 }
 
 // Detach clears the file-descriptor association of the loop device,
-// equivalent to `losetup -d /dev/loopN`.
+// equivalent to `losetup -d /dev/loopN`. Retries briefly on transient EBUSY
+// (e.g. while udev finishes probing partitions after unmount/LUKS close).
 // Returns an error if the device was never attached or already detached.
 func (l *Loop) Detach() error {
+	if l == nil {
+		return fmt.Errorf("loop detach: nil loop device")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -106,8 +120,16 @@ func (l *Loop) Detach() error {
 	}
 	defer closeFile(f)
 
-	if err := ioctlSetInt(int(f.Fd()), unix.LOOP_CLR_FD, 0); err != nil {
-		return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.device, err)
+	var detachErr error
+	for attempt := range loopDetachMaxRetries {
+		detachErr = ioctlSetInt(int(f.Fd()), unix.LOOP_CLR_FD, 0)
+		if detachErr == nil {
+			break
+		}
+		if !errors.Is(detachErr, unix.EBUSY) || attempt == loopDetachMaxRetries-1 {
+			return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.device, detachErr)
+		}
+		time.Sleep(loopRetryDelay)
 	}
 
 	l.device = ""
@@ -123,6 +145,9 @@ func (l *Loop) Detach() error {
 // between LOOP_CTL_GET_FREE and LOOP_SET_FD.
 // Returns an error if already attached.
 func (l *Loop) Attach() error {
+	if l == nil {
+		return fmt.Errorf("loop attach: nil loop device")
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -181,11 +206,23 @@ func (l *Loop) Attach() error {
 			return fmt.Errorf("loop attach: LOOP_SET_FD on %s: %w", loopPath, err)
 		}
 
-		// 4. Enable partition scanning via LOOP_SET_STATUS64.
+		// 4. Enable partition scanning via LOOP_SET_STATUS64, retrying on
+		// transient EAGAIN/EBUSY while the kernel/udev settles.
 		info := unix.LoopInfo64{
 			Flags: unix.LO_FLAGS_PARTSCAN,
 		}
-		if err := ioctlLoopInfo(loopFd, &info); err != nil {
+		var statusErr error
+		for attempt := range loopSetStatusMaxRetries {
+			statusErr = ioctlLoopInfo(loopFd, &info)
+			if statusErr == nil {
+				break
+			}
+			if (!errors.Is(statusErr, unix.EAGAIN) && !errors.Is(statusErr, unix.EBUSY)) || attempt == loopSetStatusMaxRetries-1 {
+				break
+			}
+			time.Sleep(loopRetryDelay)
+		}
+		if statusErr != nil {
 			// Best-effort detach on failure.
 			beErr := ioctlSetInt(loopFd, unix.LOOP_CLR_FD, 0)
 			closeFile(loopFile)
@@ -193,11 +230,11 @@ func (l *Loop) Attach() error {
 				return fmt.Errorf(
 					"loop attach: LOOP_SET_STATUS64 on %s: %v (also failed to detach: %v)",
 					loopPath,
-					err,
+					statusErr,
 					beErr,
 				)
 			}
-			return fmt.Errorf("loop attach: LOOP_SET_STATUS64 on %s: %w", loopPath, err)
+			return fmt.Errorf("loop attach: LOOP_SET_STATUS64 on %s: %w", loopPath, statusErr)
 		}
 
 		closeFile(loopFile)
