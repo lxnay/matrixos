@@ -56,6 +56,12 @@ func ClientSideGpgArgs(gpgEnabled bool, pubKeyPath string) ([]string, error) {
 
 // PatchGpgHomeDir sets the correct permissions on the GPG homedir.
 func PatchGpgHomeDir(homeDir string) error {
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	return patchGpgHomeDirLocked(homeDir)
+}
+
+func patchGpgHomeDirLocked(homeDir string) error {
 	if homeDir == "" {
 		return errors.New("missing homeDir parameter")
 	}
@@ -123,22 +129,24 @@ func (o *Ostree) getDevGpgHomeDir() (string, error) {
 	return dir, nil
 }
 
-func (o *Ostree) GpgHomeDir() (string, error) {
+func (o *Ostree) gpgHomeDirLocked() (string, error) {
 	devGpgHomeDir, err := o.getDevGpgHomeDir()
 	if err != nil {
 		return "", err
 	}
-	if err := PatchGpgHomeDir(devGpgHomeDir); err != nil {
+	if err := patchGpgHomeDirLocked(devGpgHomeDir); err != nil {
 		return "", err
 	}
 	return devGpgHomeDir, nil
 }
 
-func (o *Ostree) GpgKeyID() (string, error) {
-	homeDir, err := o.GpgHomeDir()
-	if err != nil {
-		return "", err
-	}
+func (o *Ostree) GpgHomeDir() (string, error) {
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	return o.gpgHomeDirLocked()
+}
+
+func (o *Ostree) gpgKeyIDLocked(homeDir string) (string, error) {
 	pubkeyPath, err := o.GpgBestPubKeyPath()
 	if err != nil {
 		return "", err
@@ -156,7 +164,7 @@ func (o *Ostree) GpgKeyID() (string, error) {
 			pubkeyPath,
 		},
 		Stdout: out,
-		Stderr: o.stdout,
+		Stderr: o.stderr,
 	})
 	if err != nil {
 		return "", err
@@ -177,8 +185,7 @@ func (o *Ostree) GpgKeyID() (string, error) {
 		}
 	}
 
-	err = scanner.Err()
-	if err != nil {
+	if err := scanner.Err(); err != nil {
 		return "", err
 	}
 
@@ -186,6 +193,16 @@ func (o *Ostree) GpgKeyID() (string, error) {
 		return keyID, errors.New("cannot find gpg ostree key id.")
 	}
 	return keyID, nil
+}
+
+func (o *Ostree) GpgKeyID() (string, error) {
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	homeDir, err := o.gpgHomeDirLocked()
+	if err != nil {
+		return "", err
+	}
+	return o.gpgKeyIDLocked(homeDir)
 }
 
 func (o *Ostree) ImportGpgKey(keyPath string) error {
@@ -196,13 +213,13 @@ func (o *Ostree) ImportGpgKey(keyPath string) error {
 		return fmt.Errorf("file %s does not exist", keyPath)
 	}
 
-	homeDir, err := o.GpgHomeDir()
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	homeDir, err := o.gpgHomeDirLocked()
 	if err != nil {
 		return err
 	}
 
-	gpgMu.Lock()
-	defer gpgMu.Unlock()
 	return o.runner(&runner.Cmd{
 		Name:   "gpg",
 		Args:   []string{"--homedir", homeDir, "--batch", "--yes", "--import", keyPath},
@@ -219,12 +236,14 @@ func (o *Ostree) GpgSignFile(file string) error {
 		return fmt.Errorf("file %s does not exist", file)
 	}
 
-	homeDir, err := o.GpgHomeDir()
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+	homeDir, err := o.gpgHomeDirLocked()
 	if err != nil {
 		return err
 	}
 
-	keyID, err := o.GpgKeyID()
+	keyID, err := o.gpgKeyIDLocked(homeDir)
 	if err != nil {
 		return err
 	}
@@ -242,7 +261,7 @@ func (o *Ostree) GpgSignFile(file string) error {
 			file,
 		},
 		Stdout: o.stdout,
-		Stderr: o.stdout,
+		Stderr: o.stderr,
 	})
 	if err != nil {
 		return err
