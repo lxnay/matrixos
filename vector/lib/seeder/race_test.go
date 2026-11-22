@@ -208,3 +208,39 @@ func TestParallelSeed_SerializesOnSeederDone(t *testing.T) {
 		t.Errorf("len(doneNames) = %d, want %d", len(doneNames), len(infos))
 	}
 }
+
+type flushTrackingWriter struct {
+	flushed atomic.Bool
+}
+
+func (w *flushTrackingWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *flushTrackingWriter) Flush()                      { w.flushed.Store(true) }
+
+func TestParallelSeed_FlushesWorkerWriters(t *testing.T) {
+	infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+	paramsMap := map[string]*SeederParams{
+		"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+	}
+
+	stdoutW := &flushTrackingWriter{}
+	stderrW := &flushTrackingWriter{}
+	opts := &ParallelSeedOptions{
+		Seeders:         infos,
+		ParamsByName:    paramsMap,
+		Parallelism:     1,
+		NewSeeder:       func(_ *NewSeederOptions) (ISeeder, error) { return DefaultMockSeeder(), nil },
+		NewStdoutWriter: func(string) io.Writer { return stdoutW },
+		NewStderrWriter: func(string) io.Writer { return stderrW },
+		PushCleanup:     noopCleanup,
+	}
+
+	if err := ParallelSeed(context.Background(), opts); err != nil {
+		t.Fatalf("ParallelSeed: %v", err)
+	}
+	if !stdoutW.flushed.Load() {
+		t.Error("expected worker stdout writer to be flushed")
+	}
+	if !stderrW.flushed.Load() {
+		t.Error("expected worker stderr writer to be flushed")
+	}
+}

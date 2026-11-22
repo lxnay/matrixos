@@ -79,6 +79,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 	workerStdout := opts.NewStdoutWriter(
 		fmt.Sprintf("releases:%s", seederName),
 	)
+	defer worker.FlushWriters(workerStdout)
 	workerPrint := func(format string, args ...any) {
 		fmt.Fprintf(workerStdout, format, args...)
 	}
@@ -140,7 +141,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 		fmt.Sprintf("release:%s", shortRef),
 	)
 	flushWriters := func() {
-		worker.FlushWriters(relStdout, relStderr)
+		worker.FlushWriters(relStdout, relStderr, workerStdout)
 	}
 	defer flushWriters()
 

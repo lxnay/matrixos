@@ -428,3 +428,68 @@ func TestSignalGuard_RespawnsListenerAfterSignalExitReturns(t *testing.T) {
 		t.Fatal("second signal was never handled because previous listener exited without clearing globalSigCh")
 	}
 }
+
+func TestAllCommand_SignalCleanupFlushesAndClosesLog(t *testing.T) {
+	tmp := t.TempDir()
+	pusher := filepath.Join(tmp, "push.sh")
+	if err := os.WriteFile(pusher, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := NewAllCommand()
+	cmd.cfg = &config.MockConfig{
+		Items: map[string][]string{
+			"matrixOS.LocksDir": {filepath.Join(tmp, "locks")},
+			"matrixOS.LogsDir":  {filepath.Join(tmp, "logs")},
+		},
+	}
+	cmd.buildID = "sigtest"
+	cmd.buildName = "sig-build"
+	cmd.onlyImages = true
+	cmd.skipImages = true
+	cmd.disableJanitor = true
+	cmd.disableMail = true
+	cmd.cdnPusher = pusher
+
+	var logAfterSignalCleanup string
+	cmd.cmdRunner = func(c *runner.Cmd) error {
+		_, _ = io.WriteString(c.Stdout, "partial-before-signal")
+		// Simulate SignalGuard firing while AllCommand is in the middle of run().
+		cmd.RunCleanups()
+		data, err := os.ReadFile(cmd.logFile)
+		if err != nil {
+			t.Errorf("ReadFile(logFile) after signal cleanup: %v", err)
+		}
+		logAfterSignalCleanup = string(data)
+		return nil
+	}
+
+	if err := cmd.run(); err != nil {
+		t.Fatalf("AllCommand.run(): %v", err)
+	}
+	if !strings.Contains(logAfterSignalCleanup, "partial-before-signal") {
+		t.Fatalf("logFile missing flushed output after SignalGuard cleanup; got:\n%s", logAfterSignalCleanup)
+	}
+}
+
+func TestSignalGuard_PreCleanupRunsBeforeLaterCleanups(t *testing.T) {
+	var sg SignalGuard
+	var order []string
+
+	sg.PushCleanup(func() { order = append(order, "flush") })
+	sg.PushPreCleanup(func() { order = append(order, "cancel") })
+	// Worker cleanup pushed AFTER cancel must still run AFTER cancel.
+	sg.PushCleanup(func() { order = append(order, "worker-cleanup") })
+
+	sg.RunCleanups()
+
+	want := []string{"cancel", "worker-cleanup", "flush"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Errorf("order[%d] = %q, want %q (full: %v)", i, order[i], want[i], order)
+		}
+	}
+}

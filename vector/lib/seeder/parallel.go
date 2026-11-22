@@ -8,6 +8,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"matrixos/vector/lib/worker"
 )
 
 // ParallelSeedOptions configures the parallel seed execution engine.
@@ -305,6 +307,9 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 					Stdout: wp.opts.NewStdoutWriter(fmt.Sprintf("seeds:%s", seederName)),
 					Stderr: wp.opts.NewStderrWriter(fmt.Sprintf("seeds:%s", seederName)),
 				}
+				flushWriters := func() {
+					worker.FlushWriters(sopts.Stdout, sopts.Stderr)
+				}
 				workerSD, err := wp.opts.NewSeeder(sopts)
 				if err != nil {
 					if gotBoost && wp.opts.UnboostWorker != nil {
@@ -318,11 +323,15 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 							)
 						}
 					}
+					flushWriters()
 					setError(fmt.Errorf("[%s] failed to create seeder: %w", seederName, err))
 					return
 				}
 
-				wp.opts.PushCleanup(workerSD.Cleanup)
+				wp.opts.PushCleanup(func() {
+					workerSD.Cleanup()
+					flushWriters()
+				})
 				if gotBoost {
 					workerSD.Print(
 						"[%s] Worker boosted to max resources. Woohoo.\n",
@@ -352,6 +361,7 @@ func runWorkerPool(ctx context.Context, wp *workerPoolOpts) error {
 					"[%s] Worker finished at %s (elapsed: %s)\n",
 					seederName, workerEnd.Format(time.RFC3339), workerEnd.Sub(workerStart),
 				)
+				flushWriters()
 
 				if err != nil {
 					if gotBoost && wp.opts.UnboostWorker != nil {

@@ -101,6 +101,20 @@ func (c *ReleaseCommand) Run() error {
 
 // runRelease implements the release workflow.
 func (c *ReleaseCommand) runRelease() error {
+	ref := c.ref
+	if ostree.IsBranchShortName(ref) {
+		return fmt.Errorf(
+			"specify a complete branch name, %s is not allowed",
+			ref,
+		)
+	}
+
+	// Set up styled writers before logging banners or registering cleanups so
+	// LIFO defers print the finished banner before flushing.
+	c.SetupPrinters(fmt.Sprintf("release:%s", c.shortRef(ref)))
+	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
+
 	releaseStart := time.Now()
 	c.Printf(
 		"[%s] runRelease started at %s\n",
@@ -116,24 +130,11 @@ func (c *ReleaseCommand) runRelease() error {
 		)
 	}()
 
-	c.PushCleanup(c.killGpg)
-
-	ref := c.ref
-	if ostree.IsBranchShortName(ref) {
-		return fmt.Errorf(
-			"specify a complete branch name, %s is not allowed",
-			ref,
-		)
-	}
-
-	// Set up styled writers for subprocess output.
-	c.SetupPrinters(fmt.Sprintf("release:%s", c.shortRef(ref)))
-	defer c.FlushPrinters()
-
 	c.ot.SetStdout(c.StdoutWriter())
 	c.ot.SetStderr(c.StderrWriter())
 	c.ot.SetVerbose(false) // ostree's own verbose flag, separate from ours.
 	c.ot.SetRef(ref)
+	c.PushCleanup(c.killGpg)
 
 	// Create c.imageDir if it doesn't exist and check it's a valid directory.
 	if err := os.MkdirAll(c.imageDir, 0755); err != nil {
@@ -156,11 +157,8 @@ func (c *ReleaseCommand) runRelease() error {
 
 	// Execute the release pipeline under an exclusive release lock.
 	return c.rel.ExecuteWithReleaseLock(func() error {
-		// Register cleanup.
-		c.PushCleanup(func() {
-			c.rel.Cleanup()
-			c.FlushPrinters()
-		})
+		// Register cleanup (LIFO: rel.Cleanup -> killGpg -> FlushPrinters).
+		c.PushCleanup(c.rel.Cleanup)
 
 		if err := c.rel.Build(); err != nil {
 			return fmt.Errorf("release build failed: %w", err)

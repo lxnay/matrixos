@@ -61,10 +61,11 @@ var (
 )
 
 type SignalGuard struct {
-	mu        sync.Mutex
-	cleanupMu sync.Mutex
-	cleanups  []func()
-	armed     bool
+	mu          sync.Mutex
+	cleanupMu   sync.Mutex
+	preCleanups []func()
+	cleanups    []func()
+	armed       bool
 }
 
 // Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
@@ -160,10 +161,24 @@ func (sg *SignalGuard) Disarm() {
 	if wasArmed {
 		sg.cleanupMu.Lock()
 		sg.mu.Lock()
+		sg.preCleanups = nil
 		sg.cleanups = nil
 		sg.mu.Unlock()
 		sg.cleanupMu.Unlock()
 	}
+}
+
+// PushPreCleanup adds a high-priority cleanup function (such as a context
+// cancellation func) that always runs in LIFO order BEFORE regular cleanups
+// registered via PushCleanup. This ensures parallel workers stop dequeuing
+// new work before resource teardowns run.
+func (sg *SignalGuard) PushPreCleanup(fn func()) {
+	if fn == nil {
+		return
+	}
+	sg.mu.Lock()
+	defer sg.mu.Unlock()
+	sg.preCleanups = append(sg.preCleanups, fn)
 }
 
 // PushCleanup adds a cleanup function to the top of the LIFO stack.
@@ -187,7 +202,8 @@ func (sg *SignalGuard) RunCleanups() {
 	sg.runCleanups()
 }
 
-// runCleanups drains and executes all registered cleanups in LIFO order.
+// runCleanups drains and executes all registered cleanups in LIFO order,
+// executing preCleanups before regular cleanups on each pass.
 // cleanupMu serializes concurrent callers (e.g. a signal handler arriving
 // while deferred cleanup is already running) so callers wait for in-flight
 // cleanups to finish rather than exiting early.
@@ -195,18 +211,7 @@ func (sg *SignalGuard) runCleanups() {
 	sg.cleanupMu.Lock()
 	defer sg.cleanupMu.Unlock()
 
-	for {
-		sg.mu.Lock()
-		if len(sg.cleanups) == 0 {
-			sg.mu.Unlock()
-			return
-		}
-		fns := make([]func(), len(sg.cleanups))
-		copy(fns, sg.cleanups)
-		sg.cleanups = nil
-		sg.mu.Unlock()
-
-		// Execute in LIFO order.
+	runBatch := func(fns []func()) {
 		for i := len(fns) - 1; i >= 0; i-- {
 			func() {
 				defer func() {
@@ -217,6 +222,25 @@ func (sg *SignalGuard) runCleanups() {
 				fns[i]()
 			}()
 		}
+	}
+
+	for {
+		sg.mu.Lock()
+		if len(sg.preCleanups) == 0 && len(sg.cleanups) == 0 {
+			sg.mu.Unlock()
+			return
+		}
+		pre := make([]func(), len(sg.preCleanups))
+		copy(pre, sg.preCleanups)
+		sg.preCleanups = nil
+
+		fns := make([]func(), len(sg.cleanups))
+		copy(fns, sg.cleanups)
+		sg.cleanups = nil
+		sg.mu.Unlock()
+
+		runBatch(pre)
+		runBatch(fns)
 	}
 }
 
@@ -282,6 +306,7 @@ func (ui *UI) NewStderrWriter(name string) *styledWriter {
 // the given command name.  After calling this, Println / Printf /
 // PrintErr / PrintErrf write through these writers.
 func (ui *UI) SetupPrinters(name string) {
+	ui.FlushPrinters()
 	ui.printer = ui.NewStdoutWriter(name)
 	ui.errPrinter = ui.NewStderrWriter(name)
 }

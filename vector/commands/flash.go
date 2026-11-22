@@ -141,6 +141,7 @@ func (c *FlashCommand) Run() error {
 // runFlash implements the main flash/install logic.
 func (c *FlashCommand) runFlash() error {
 	c.SetupPrinters(c.Name())
+	defer c.FlushPrinters()
 
 	ref, err := c.resolveRef()
 	if err != nil {
@@ -149,7 +150,6 @@ func (c *FlashCommand) runFlash() error {
 
 	// Narrow the prefix now that we know the ref.
 	c.SetupPrinters(fmt.Sprintf("flash:%s", c.shortRef(ref)))
-	defer c.FlushPrinters()
 
 	c.ot.SetStdout(c.StdoutWriter())
 	c.ot.SetStderr(c.StderrWriter())

@@ -143,6 +143,10 @@ func (c *ReleasesCommand) updateStdWriters(name string) {
 	c.sd.SetStdout(c.StdoutWriter())
 	c.sd.SetStderr(c.StderrWriter())
 	c.det.SetStderr(c.StderrWriter())
+	if c.ot != nil {
+		c.ot.SetStdout(c.StdoutWriter())
+		c.ot.SetStderr(c.StderrWriter())
+	}
 }
 
 // runReleases implements the multi-seeder release workflow.
@@ -203,9 +207,10 @@ func (c *ReleasesCommand) runReleases() error {
 		c.sd.Print("  %s\n", s.Name)
 	}
 
-	// Context cancelled on SIGINT/SIGTERM via PushCleanup.
+	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
+	// stop dequeuing new work before resource cleanups execute.
 	ctx, cancel := context.WithCancel(context.Background())
-	c.PushCleanup(cancel)
+	c.PushPreCleanup(cancel)
 	defer cancel()
 
 	releaseStart := time.Now()

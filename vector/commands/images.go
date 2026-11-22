@@ -145,10 +145,12 @@ func (c *ImagesCommand) onlyFilter() releaser.RefFilterFunc {
 func (c *ImagesCommand) runImages() error {
 	c.SetupPrinters("images:all")
 	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
 
 	c.ot.SetStdout(c.StdoutWriter())
 	c.ot.SetStderr(c.StderrWriter())
 	c.ot.SetVerbose(false)
+	c.PushCleanup(c.killGpg)
 
 	// Verify imager environment.
 	if err := c.qa.VerifyImagerEnvironmentSetup("/"); err != nil {
@@ -258,9 +260,10 @@ func (c *ImagesCommand) runImages() error {
 		c.Printf("  %s\n", ref)
 	}
 
-	// Context cancelled on SIGINT/SIGTERM via PushCleanup.
+	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
+	// stop dequeuing new work before resource cleanups execute.
 	ctx, cancel := context.WithCancel(context.Background())
-	c.PushCleanup(cancel)
+	c.PushPreCleanup(cancel)
 	defer cancel()
 
 	var released []string
@@ -288,7 +291,6 @@ func (c *ImagesCommand) runImages() error {
 			if err := ot.MaybeInitializeGpg(); err != nil {
 				return fmt.Errorf("failed to initialize GPG: %w", err)
 			}
-			pushCleanup(func() { ot.KillGpgDaemons() })
 
 			if c.localOstree {
 				return c.showLocalRefs(ot, im)

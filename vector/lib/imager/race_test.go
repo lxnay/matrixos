@@ -301,3 +301,43 @@ func TestImagerMount_CleanupDuringInFlightMountAborts(t *testing.T) {
 		t.Fatal("MountRootfs succeeded even though Cleanup() ran while mount was in flight (TOCTOU mount leak)")
 	}
 }
+
+type flushTrackingWriter struct {
+	flushed atomic.Bool
+}
+
+func (w *flushTrackingWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (w *flushTrackingWriter) Flush()                      { w.flushed.Store(true) }
+
+func TestParallelImage_FlushesPoolAndWorkerWriters(t *testing.T) {
+	poolStderr := &flushTrackingWriter{}
+	workerStdout := &flushTrackingWriter{}
+
+	opts := &ParallelImageOptions{
+		Refs:        []string{"matrixos/amd64/dev/bedrock"},
+		Parallelism: 1,
+		Config:      &config.MockConfig{Items: map[string][]string{}},
+		NewStdoutWriter: func(label string) io.Writer {
+			if label == "images:matrixos/amd64/dev/bedrock" {
+				return workerStdout
+			}
+			return io.Discard
+		},
+		NewStderrWriter: func(label string) io.Writer {
+			if label == "images" {
+				return poolStderr
+			}
+			return io.Discard
+		},
+		PushCleanup: func(func()) {},
+	}
+
+	_ = ParallelImage(context.Background(), opts)
+
+	if !poolStderr.flushed.Load() {
+		t.Error("expected poolStderr writer to be flushed")
+	}
+	if !workerStdout.flushed.Load() {
+		t.Error("expected workerStdout writer to be flushed")
+	}
+}

@@ -126,6 +126,9 @@ func failFastChecks(ot ostree.IOstree, icfg *imager.ImagerConfig) error {
 
 // runImage implements the image building logic.
 func (c *ImageCommand) runImage() error {
+	c.SetupPrinters(fmt.Sprintf("image:%s", c.shortRef(c.ref)))
+	defer c.FlushPrinters()
+
 	imageStart := time.Now()
 	c.Printf(
 		"[%s] Imaging started at %s\n",
@@ -140,9 +143,6 @@ func (c *ImageCommand) runImage() error {
 			imageEnd.Sub(imageStart).Round(time.Second),
 		)
 	}()
-
-	c.SetupPrinters(fmt.Sprintf("image:%s", c.shortRef(c.ref)))
-	defer c.FlushPrinters()
 
 	ref := c.ref
 	if ostree.IsBranchShortName(ref) {

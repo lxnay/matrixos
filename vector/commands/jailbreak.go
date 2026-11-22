@@ -152,6 +152,8 @@ func (c *JailbreakCommand) configStr(key string) (string, error) {
 }
 
 func (c *JailbreakCommand) Run() error {
+	defer c.FlushPrinters()
+
 	if err := requireRoot(); err != nil {
 		return err
 	}

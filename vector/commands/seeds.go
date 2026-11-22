@@ -14,6 +14,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/seeder"
 	"matrixos/vector/lib/validation"
+	"matrixos/vector/lib/worker"
 )
 
 // newSeeder is the factory used to create an ISeeder.
@@ -257,9 +258,10 @@ func (c *SeedsCommand) runSeeds() error {
 		return err
 	}
 
-	// Context cancelled on SIGINT/SIGTERM via PushCleanup.
+	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
+	// stop dequeuing new work before resource cleanups execute.
 	ctx, cancel := context.WithCancel(context.Background())
-	c.PushCleanup(cancel)
+	c.PushPreCleanup(cancel)
 	defer cancel()
 
 	psOpts := &seeder.ParallelSeedOptions{
@@ -389,28 +391,41 @@ func (c *SeedsCommand) runPostBuild(seeders []seeder.SeederInfo, paramsByName ma
 
 		c.Printf("  [%s] Running post-build in %s ...\n", info.Name, chrootDir)
 
-		sopts := &seeder.NewSeederOptions{
-			Stdout: c.UI.NewStdoutWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
-			Stderr: c.UI.NewStderrWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
-		}
-		postSD, err := newSeeder(c.cfg, sopts)
-		if err != nil {
-			return fmt.Errorf("[%s] failed to create seeder for post-build: %w", info.Name, err)
-		}
-		c.PushCleanup(postSD.Cleanup)
+		if err := func() error {
+			sopts := &seeder.NewSeederOptions{
+				Stdout: c.UI.NewStdoutWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
+				Stderr: c.UI.NewStderrWriter(fmt.Sprintf("seeds:%s:post", info.Name)),
+			}
+			flushWriters := func() {
+				worker.FlushWriters(sopts.Stdout, sopts.Stderr)
+			}
+			defer flushWriters()
 
-		if err := postSD.SetupChrootDNS(chrootDir); err != nil {
-			return fmt.Errorf("[%s] post-build DNS setup failed: %w", info.Name, err)
-		}
+			postSD, err := newSeeder(c.cfg, sopts)
+			if err != nil {
+				return fmt.Errorf("[%s] failed to create seeder for post-build: %w", info.Name, err)
+			}
+			c.PushCleanup(func() {
+				postSD.Cleanup()
+				flushWriters()
+			})
+			defer postSD.Cleanup()
 
-		postOpts := &seeder.SeedOptions{
-			ChrootDir: chrootDir,
-			Info:      info,
+			if err := postSD.SetupChrootDNS(chrootDir); err != nil {
+				return fmt.Errorf("[%s] post-build DNS setup failed: %w", info.Name, err)
+			}
+
+			postOpts := &seeder.SeedOptions{
+				ChrootDir: chrootDir,
+				Info:      info,
+			}
+			if err := postSD.PostBuild(postOpts); err != nil {
+				return fmt.Errorf("[%s] post-build failed: %w", info.Name, err)
+			}
+			return nil
+		}(); err != nil {
+			return err
 		}
-		if err := postSD.PostBuild(postOpts); err != nil {
-			return fmt.Errorf("[%s] post-build failed: %w", info.Name, err)
-		}
-		postSD.Cleanup()
 
 		c.Printf("  [%s] Post-build complete.\n", info.Name)
 	}

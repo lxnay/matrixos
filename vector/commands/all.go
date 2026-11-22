@@ -212,13 +212,16 @@ func (c *AllCommand) sendMail(buildErr error) {
 func (c *AllCommand) run() error {
 	c.SetupPrinters("build:all")
 	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
 
 	// Acquire build lock.
-	unlock, err := c.acquireBuildLock()
+	rawUnlock, err := c.acquireBuildLock()
 	if err != nil {
 		return err
 	}
+	unlock := sync.OnceFunc(rawUnlock)
 	defer unlock()
+	c.PushCleanup(unlock)
 
 	// Set up log file.
 	logF, err := c.setupLogFile()
@@ -227,7 +230,7 @@ func (c *AllCommand) run() error {
 	}
 
 	// Flush buffered output, detach printers/global log, and close logF once
-	// before sendMail attaches c.logFile (and on panic/early return via defer).
+	// before sendMail attaches c.logFile (and on signal/panic/early return).
 	closeLog := sync.OnceFunc(func() {
 		c.FlushPrinters()
 		c.SetLogWriter(nil)
@@ -235,6 +238,7 @@ func (c *AllCommand) run() error {
 		_ = logF.Close()
 	})
 	defer closeLog()
+	c.PushCleanup(closeLog)
 
 	// Tee all styled output (this command + sub-commands) to the log.
 	SetGlobalLogWriter(logF)

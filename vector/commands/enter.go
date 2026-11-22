@@ -119,6 +119,8 @@ func (c *EnterCommand) Run() error {
 
 // run implements the enter workflow.
 func (c *EnterCommand) run() error {
+	defer c.FlushPrinters()
+
 	opts := seeder.NewSeederOptions{
 		Stdin:  os.Stdin,
 		Stdout: os.Stdout,

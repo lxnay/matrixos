@@ -66,6 +66,7 @@ func ParallelImage(ctx context.Context, opts *ParallelImageOptions) error {
 	}
 
 	poolStderr := opts.NewStderrWriter("images")
+	defer worker.FlushWriters(poolStderr)
 
 	return worker.RunPool(ctx, worker.PoolOptions[string]{
 		Items:       opts.Refs,
@@ -91,6 +92,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 	workerStdout := opts.NewStdoutWriter(
 		fmt.Sprintf("images:%s", ref),
 	)
+	defer worker.FlushWriters(workerStdout)
 	workerPrint := func(format string, args ...any) {
 		fmt.Fprintf(workerStdout, format, args...)
 	}
@@ -127,7 +129,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 		fmt.Sprintf("image:%s", shortRef),
 	)
 	flushWriters := func() {
-		worker.FlushWriters(imgStdout, imgStderr)
+		worker.FlushWriters(imgStdout, imgStderr, workerStdout)
 	}
 	defer flushWriters()
 

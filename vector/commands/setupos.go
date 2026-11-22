@@ -189,6 +189,8 @@ func (c *SetupOSCommand) configStr(key string) (string, error) {
 }
 
 func (c *SetupOSCommand) Run() error {
+	defer c.FlushPrinters()
+
 	if err := requireRootFn(c.run.getEuid); err != nil {
 		return err
 	}
