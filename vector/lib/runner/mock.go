@@ -8,7 +8,7 @@ type MockRunnerCall struct {
 	Args      []string
 	Dir       string
 	Env       []string
-	ChrootDir string // set only by ChrootRun / ChrootOutput
+	ChrootDir string // set only by ChrootRun
 }
 
 // MockRunner records calls and returns configurable errors.
@@ -19,11 +19,6 @@ type MockRunner struct {
 	Calls  []MockRunnerCall
 	Err    error
 	FailOn int // Fail on this call index (0-based), -1 means always fail if Err != nil
-
-	// OutputData maps a call index (0-based) to the byte slice returned by
-	// Output or CombinedOutput for that invocation. If no entry exists for
-	// the current call index, an empty slice is returned.
-	OutputData map[int][]byte
 }
 
 func (mr *MockRunner) recordCmd(c *Cmd) {
@@ -59,41 +54,12 @@ func (mr *MockRunner) errForCall() error {
 	return nil
 }
 
-// outputForCall returns the output data configured for the current call index.
-func (mr *MockRunner) outputForCall() []byte {
-	if mr.OutputData == nil {
-		return nil
-	}
-	return mr.OutputData[len(mr.Calls)-1]
-}
-
-// Output implements the OutputFunc signature.
-func (mr *MockRunner) Output(c *Cmd) ([]byte, error) {
-	mr.mu.Lock()
-	defer mr.mu.Unlock()
-	mr.recordCmd(c)
-	return mr.outputForCall(), mr.errForCall()
-}
-
-// CombinedOutput implements the CombinedOutputFunc signature.
-func (mr *MockRunner) CombinedOutput(c *Cmd) ([]byte, error) {
-	return mr.Output(c)
-}
-
 // ChrootRun implements the ChrootRunFunc signature.
 func (mr *MockRunner) ChrootRun(c *ChrootCmd) error {
 	mr.mu.Lock()
 	defer mr.mu.Unlock()
 	mr.recordChrootCmd(c)
 	return mr.errForCall()
-}
-
-// ChrootOutput implements the ChrootOutputFunc signature.
-func (mr *MockRunner) ChrootOutput(c *ChrootCmd) ([]byte, error) {
-	mr.mu.Lock()
-	defer mr.mu.Unlock()
-	mr.recordChrootCmd(c)
-	return mr.outputForCall(), mr.errForCall()
 }
 
 // NewMockRunner creates a MockRunner that always succeeds.

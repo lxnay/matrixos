@@ -14,13 +14,12 @@ func TestMockRunner_ConcurrentRun(t *testing.T) {
 			defer wg.Done()
 			for range 50 {
 				_ = mr.Run(&Cmd{Name: "echo", Args: []string{"hi"}})
-				_, _ = mr.Output(&Cmd{Name: "echo"})
 				_ = mr.ChrootRun(&ChrootCmd{Cmd: Cmd{Name: "sh"}, ChrootDir: "/tmp"})
 			}
 		}()
 	}
 	wg.Wait()
-	if len(mr.Calls) != 8*50*3 {
-		t.Errorf("got %d calls, want %d", len(mr.Calls), 8*50*3)
+	if len(mr.Calls) != 8*50*2 {
+		t.Errorf("got %d calls, want %d", len(mr.Calls), 8*50*2)
 	}
 }

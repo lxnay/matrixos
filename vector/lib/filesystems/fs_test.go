@@ -85,11 +85,6 @@ func fakeExecOutput(c *runner.Cmd) ([]byte, error) {
 	return fakeExecCommand(c.Name, c.Args...).Output()
 }
 
-// fakeExecCombinedOutput wraps fakeExecCommand to implement runner.CombinedOutputFunc.
-func fakeExecCombinedOutput(c *runner.Cmd) ([]byte, error) {
-	return fakeExecCommand(c.Name, c.Args...).CombinedOutput()
-}
-
 // fakeChrootOutput wraps fakeExecCommand to implement runner.ChrootOutputFunc.
 func fakeChrootOutput(c *runner.ChrootCmd) ([]byte, error) {
 	if c.ChrootDir == "" {
