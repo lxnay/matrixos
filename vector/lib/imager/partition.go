@@ -56,26 +56,53 @@ func (im *Imager) CreateImage(imageSize string) (retErr error) {
 	return nil
 }
 
+func (im *Imager) runCmd(name string, args ...string) error {
+	return im.runner(&runner.Cmd{
+		Name:   name,
+		Args:   args,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
+	})
+}
+
+func (im *Imager) mountPartition(device, missingDeviceMsg, mountPoint, missingMountMsg string, mountArgs []string, dest *string) error {
+	if device == "" {
+		return errors.New(missingDeviceMsg)
+	}
+	if mountPoint == "" {
+		return errors.New(missingMountMsg)
+	}
+	if !filesystems.DirectoryExists(mountPoint) {
+		im.Print("Creating %s ...\n", mountPoint)
+		if err := os.MkdirAll(mountPoint, 0755); err != nil {
+			return fmt.Errorf("failed to create mount point %s: %w", mountPoint, err)
+		}
+	}
+
+	im.Print("Mounting %s to %s\n", device, mountPoint)
+	gen := im.trackMount(mountPoint)
+	if err := im.runCmd("mount", mountArgs...); err != nil {
+		return err
+	}
+	if im.cleanupActiveOrRanSince(gen) {
+		im.trackMount(mountPoint)
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted mount of %s", mountPoint)
+	}
+	*dest = mountPoint
+	return nil
+}
+
 func (im *Imager) ClearPartitionTable() error {
 	if im.devicePath == "" {
 		return errors.New("missing devicePath, not set in NewImagerOptions")
 	}
 
 	im.Print("Clearing partition table on %s ...\n", im.devicePath)
-	if err := im.runner(&runner.Cmd{
-		Name:   "sgdisk",
-		Args:   []string{"-g", "-o", im.devicePath},
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	if err := im.runCmd("sgdisk", "-g", "-o", im.devicePath); err != nil {
 		return fmt.Errorf("sgdisk -g -o failed on %s: %w", im.devicePath, err)
 	}
-	return im.runner(&runner.Cmd{
-		Name:   "sgdisk",
-		Args:   []string{"-Z", im.devicePath},
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	})
+	return im.runCmd("sgdisk", "-Z", im.devicePath)
 }
 
 func (im *Imager) DatedFsLabel() string {
@@ -115,76 +142,42 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 	im.Print(" --> p3 (ROOT: Remainder of %s, plus autogrow)\n", imageSize)
 
 	// Create EFI partition.
-	epArgs := []string{
+	if err := im.runCmd(
 		"sgdisk",
 		"-n", fmt.Sprintf("1:0:+%s", efiSize),
 		"-t", fmt.Sprintf("1:%s", espPartType),
 		im.devicePath,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   epArgs[0],
-		Args:   epArgs[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	); err != nil {
 		return fmt.Errorf("sgdisk EFI partition failed: %w", err)
 	}
 
 	// Create boot partition.
-	bpArgs := []string{
+	if err := im.runCmd(
 		"sgdisk",
 		"-n", fmt.Sprintf("2:0:+%s", bootSize),
 		"-t", fmt.Sprintf("2:%s", bootPartType),
 		im.devicePath,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   bpArgs[0],
-		Args:   bpArgs[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	); err != nil {
 		return fmt.Errorf("sgdisk boot partition failed: %w", err)
 	}
 
 	// Create root partition with -10M padding for systemd-repart.
-	rpArgs := []string{
+	if err := im.runCmd(
 		"sgdisk",
 		"-n", "3:0:-10M",
 		"-t", fmt.Sprintf("3:%s", rootPartType),
 		im.devicePath,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   rpArgs[0],
-		Args:   rpArgs[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	); err != nil {
 		return fmt.Errorf("sgdisk root partition failed: %w", err)
 	}
 
 	// Set the auto-grow flag (bit 59) on partition 3.
-	agArgs := []string{
-		"sgdisk", "-A", "3:set:59", im.devicePath,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   agArgs[0],
-		Args:   agArgs[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	if err := im.runCmd("sgdisk", "-A", "3:set:59", im.devicePath); err != nil {
 		return fmt.Errorf("sgdisk set auto-grow flag failed: %w", err)
 	}
 
 	im.Print("Refreshing partition table ...\n")
-	args := []string{
-		"partprobe", "-s", im.devicePath,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   args[0],
-		Args:   args[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
+	if err := im.runCmd("partprobe", "-s", im.devicePath); err != nil {
 		return fmt.Errorf("partprobe failed: %w", err)
 	}
 
@@ -199,52 +192,16 @@ func (im *Imager) FormatEfifs() error {
 
 	im.Print("Creating EFI partition on %s\n", im.efiDevice)
 	label := "ME" + im.DatedFsLabel()
-	args := []string{
-		"mkfs.vfat",
-		"-F", "32",
-		"-n", label,
-		im.efiDevice,
-	}
-	return im.runner(&runner.Cmd{
-		Name:   args[0],
-		Args:   args[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	})
+	return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.efiDevice)
 }
 
 func (im *Imager) MountEfifs(mountEfifs string) error {
-	if im.efiDevice == "" {
-		return errors.New("missing efiDevice, not set in NewImagerOptions")
-	}
-	if mountEfifs == "" {
-		return errors.New("missing mountEfifs parameter")
-	}
-
-	if !filesystems.DirectoryExists(mountEfifs) {
-		im.Print("Creating %s ...\n", mountEfifs)
-		if err := os.MkdirAll(mountEfifs, 0755); err != nil {
-			return fmt.Errorf("failed to create mount point %s: %w", mountEfifs, err)
-		}
-	}
-
-	im.Print("Mounting %s to %s\n", im.efiDevice, mountEfifs)
-	gen := im.trackMount(mountEfifs)
-	if err := im.runner(&runner.Cmd{
-		Name:   "mount",
-		Args:   []string{"-t", "vfat", im.efiDevice, mountEfifs},
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
-		return err
-	}
-	if im.cleanupActiveOrRanSince(gen) {
-		im.trackMount(mountEfifs)
-		im.Cleanup()
-		return fmt.Errorf("cleanup interrupted mount of %s", mountEfifs)
-	}
-	im.efifsMount = mountEfifs
-	return nil
+	return im.mountPartition(
+		im.efiDevice, "missing efiDevice, not set in NewImagerOptions",
+		mountEfifs, "missing mountEfifs parameter",
+		[]string{"-t", "vfat", im.efiDevice, mountEfifs},
+		&im.efifsMount,
+	)
 }
 
 func (im *Imager) EfiBootDir() (string, error) {
@@ -270,32 +227,14 @@ func (im *Imager) FormatBootfs() error {
 	label := "MB" + im.DatedFsLabel()
 	switch fsType {
 	case "btrfs":
-		return im.formatBootfsBtrfs(label)
+		im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
+		return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.bootDevice)
 	case "vfat":
-		return im.formatBootfsVfat(label)
+		im.Print("Creating vfat on %s (boot)\n", im.bootDevice)
+		return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.bootDevice)
 	default:
 		return fmt.Errorf("unsupported boot filesystem type %q: must be btrfs or vfat", fsType)
 	}
-}
-
-func (im *Imager) formatBootfsBtrfs(label string) error {
-	im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
-	return im.runner(&runner.Cmd{
-		Name:   "mkfs.btrfs",
-		Args:   []string{"-f", "-L", label, im.bootDevice},
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	})
-}
-
-func (im *Imager) formatBootfsVfat(label string) error {
-	im.Print("Creating vfat on %s (boot)\n", im.bootDevice)
-	return im.runner(&runner.Cmd{
-		Name:   "mkfs.vfat",
-		Args:   []string{"-F", "32", "-n", label, im.bootDevice},
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	})
 }
 
 func (im *Imager) MountBootfs(mountBootfs string) error {
@@ -309,36 +248,16 @@ func (im *Imager) MountBootfs(mountBootfs string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get boot filesystem type: %w", err)
 	}
-	if !filesystems.DirectoryExists(mountBootfs) {
-		im.Print("Creating %s ...\n", mountBootfs)
-		if err := os.MkdirAll(mountBootfs, 0755); err != nil {
-			return fmt.Errorf("failed to create mount point %s: %w", mountBootfs, err)
-		}
-	}
-	im.Print("Mounting %s to %s\n", im.bootDevice, mountBootfs)
-	gen := im.trackMount(mountBootfs)
-	var mountArgs []string
-	switch fsType {
-	case "vfat":
+	mountArgs := []string{im.bootDevice, mountBootfs}
+	if fsType == "vfat" {
 		mountArgs = []string{"-t", "vfat", im.bootDevice, mountBootfs}
-	default:
-		mountArgs = []string{im.bootDevice, mountBootfs}
 	}
-	if err := im.runner(&runner.Cmd{
-		Name:   "mount",
-		Args:   mountArgs,
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
-		return err
-	}
-	if im.cleanupActiveOrRanSince(gen) {
-		im.trackMount(mountBootfs)
-		im.Cleanup()
-		return fmt.Errorf("cleanup interrupted mount of %s", mountBootfs)
-	}
-	im.bootfsMount = mountBootfs
-	return nil
+	return im.mountPartition(
+		im.bootDevice, "missing bootDevice, not set in NewImagerOptions",
+		mountBootfs, "missing mountBootfs parameter",
+		mountArgs,
+		&im.bootfsMount,
+	)
 }
 
 func (im *Imager) MaybeEncryptRootfs() error {
@@ -373,18 +292,7 @@ func (im *Imager) FormatRootfs() error {
 
 	label := "MR" + im.DatedFsLabel()
 	im.Print("Creating btrfs on %s (root)\n", im.rootDevice)
-	args := []string{
-		"mkfs.btrfs",
-		"-f",
-		"-L", label,
-		im.rootDevice,
-	}
-	return im.runner(&runner.Cmd{
-		Name:   args[0],
-		Args:   args[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	})
+	return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.rootDevice)
 }
 
 func (im *Imager) RootfsKernelArgs() []string {
@@ -392,47 +300,13 @@ func (im *Imager) RootfsKernelArgs() []string {
 }
 
 func (im *Imager) MountRootfs(mountRootfs string) error {
-	if im.rootDevice == "" {
-		return errors.New("missing rootDevice, not set in NewImagerOptions")
-	}
-	if mountRootfs == "" {
-		return errors.New("missing mountRootfs parameter")
-	}
-
-	if !filesystems.DirectoryExists(mountRootfs) {
-		im.Print("Creating %s ...\n", mountRootfs)
-		if err := os.MkdirAll(mountRootfs, 0755); err != nil {
-			return fmt.Errorf("failed to create mount point %s: %w", mountRootfs, err)
-		}
-	}
-
-	compression := "zstd:6"
-	btrfsOpts := fmt.Sprintf("compress-force=%s,space_cache=v2,commit=120", compression)
-	im.Print("Mounting %s to %s\n", im.rootDevice, mountRootfs)
-
-	gen := im.trackMount(mountRootfs)
-	args := []string{
-		"mount",
-		"-o", btrfsOpts,
-		im.rootDevice,
-		mountRootfs,
-	}
-	if err := im.runner(&runner.Cmd{
-		Name:   args[0],
-		Args:   args[1:],
-		Stdout: im.Stdout(),
-		Stderr: im.Stderr(),
-	}); err != nil {
-		return err
-	}
-	if im.cleanupActiveOrRanSince(gen) {
-		im.trackMount(mountRootfs)
-		im.Cleanup()
-		return fmt.Errorf("cleanup interrupted mount of %s", mountRootfs)
-	}
-	im.rootfsMount = mountRootfs
-
-	return nil
+	btrfsOpts := "compress-force=zstd:6,space_cache=v2,commit=120"
+	return im.mountPartition(
+		im.rootDevice, "missing rootDevice, not set in NewImagerOptions",
+		mountRootfs, "missing mountRootfs parameter",
+		[]string{"-o", btrfsOpts, im.rootDevice, mountRootfs},
+		&im.rootfsMount,
+	)
 }
 
 func (im *Imager) FinalizeFilesystems() error {
