@@ -1,10 +1,12 @@
 package cleaners
 
 import (
+	"cmp"
 	"fmt"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/seeder"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -15,18 +17,23 @@ var (
 )
 
 func sortChrootDirs(dirs []string) []string {
-	slices.SortFunc(dirs, func(a, b string) int {
-		matchesA := ChrootDirNamePattern.FindStringSubmatch(a)
-		matchesB := ChrootDirNamePattern.FindStringSubmatch(b)
-		if len(matchesA) < 3 || len(matchesB) < 3 {
+	slices.SortStableFunc(dirs, func(a, b string) int {
+		matchesA := ChrootDirNamePattern.FindStringSubmatch(filepath.Base(a))
+		matchesB := ChrootDirNamePattern.FindStringSubmatch(filepath.Base(b))
+		hasA := len(matchesA) >= 3
+		hasB := len(matchesB) >= 3
+		if !hasA && !hasB {
 			return 0
+		}
+		if !hasA {
+			return -1
+		}
+		if !hasB {
+			return 1
 		}
 		verA, _ := strconv.Atoi(matchesA[2])
 		verB, _ := strconv.Atoi(matchesB[2])
-		if verA != verB {
-			return verA - verB
-		}
-		return 0
+		return cmp.Compare(verA, verB)
 	})
 	return dirs
 }

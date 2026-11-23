@@ -54,57 +54,91 @@ func ParseModeString(input string) (*filesystems.PathMode, error) {
 	return &mode, nil
 }
 
+// nextWhitespaceToken splits the next non-empty space/tab-delimited token from
+// s, returning the token, the unconsumed remainder (starting at the whitespace
+// immediately after the token), and whether a token was found.
+func nextWhitespaceToken(s string) (tok, rest string, ok bool) {
+	s = strings.TrimLeft(s, " \t")
+	if s == "" {
+		return "", "", false
+	}
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return s, "", true
+	}
+	return s[:i], s[i:], true
+}
+
 // ParseOstreeLsChecksumLine parses a line from `ostree ls -C` output into a PathInfo struct.
 func ParseOstreeLsChecksumLine(line string) (*filesystems.PathInfo, error) {
-	parts := strings.Fields(line)
-	if len(parts) < 6 {
+	rest := strings.TrimRight(line, "\r\n")
+
+	modeStr, rest, ok := nextWhitespaceToken(rest)
+	if !ok {
 		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
 	}
-	idx := 0
-
-	pi := &filesystems.PathInfo{}
-	mode, err := ParseModeString(parts[idx])
-	if err != nil {
-		return nil, err
-	}
-	pi.Mode = mode
-	idx++
-
-	uid, gid := parts[idx], parts[idx+1]
-	idx += 2
-
-	pi.Uid, err = strconv.ParseUint(uid, 10, 32)
+	mode, err := ParseModeString(modeStr)
 	if err != nil {
 		return nil, err
 	}
 
-	pi.Gid, err = strconv.ParseUint(gid, 10, 32)
+	uidStr, rest, ok := nextWhitespaceToken(rest)
+	if !ok {
+		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+	}
+	gidStr, rest, ok := nextWhitespaceToken(rest)
+	if !ok {
+		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+	}
+	sizeStr, rest, ok := nextWhitespaceToken(rest)
+	if !ok {
+		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+	}
+
+	pi := &filesystems.PathInfo{Mode: mode}
+
+	pi.Uid, err = strconv.ParseUint(uidStr, 10, 32)
 	if err != nil {
 		return nil, err
 	}
 
-	pi.Size, err = strconv.ParseUint(parts[idx], 10, 64)
+	pi.Gid, err = strconv.ParseUint(gidStr, 10, 32)
 	if err != nil {
 		return nil, err
 	}
-	idx++
+
+	pi.Size, err = strconv.ParseUint(sizeStr, 10, 64)
+	if err != nil {
+		return nil, err
+	}
 
 	if pi.Mode.Type == "d" {
 		// Directories have two checksums, use the second one.
-		idx++
+		if _, rest, ok = nextWhitespaceToken(rest); !ok {
+			return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+		}
 	}
-	if idx+1 >= len(parts) {
+
+	checksum, rest, ok := nextWhitespaceToken(rest)
+	if !ok {
 		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
 	}
+	pi.OSTreeChecksum = checksum
 
-	pi.OSTreeChecksum = parts[idx]
-	idx++
-
-	pi.Path = parts[idx]
-	idx++
-	if pi.Mode.Type == "l" && idx+1 < len(parts) && parts[idx] == "->" {
-		idx++
-		pi.Link = parts[idx]
+	// Preserve internal and trailing spaces in the path (and symlink target).
+	pathPart := strings.TrimLeft(rest, " \t")
+	if pathPart == "" {
+		return nil, fmt.Errorf("unexpected format for ostree ls line: %q", line)
+	}
+	if pi.Mode.Type == "l" {
+		if linkPath, target, hasArrow := strings.Cut(pathPart, " -> "); hasArrow {
+			pi.Path = linkPath
+			pi.Link = target
+		} else {
+			pi.Path = pathPart
+		}
+	} else {
+		pi.Path = pathPart
 	}
 	return pi, nil
 }
@@ -145,8 +179,7 @@ func (o *Ostree) listContentsOfPath(commit, repoDir, path string) (*[]filesystem
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if strings.TrimSpace(line) == "" {
 			continue
 		}
 

@@ -295,12 +295,16 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 	for _, relPath := range expected {
 		fullPath := filepath.Join(rootfs, relPath)
 
-		// Check if it's a symlink and if it points to a directory.
-		// We use Lstat to check the link itself and Stat to check the target.
-		lfi, lerr := os.Lstat(fullPath)
-		if lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
-			if fi, err := os.Stat(fullPath); err == nil && fi.IsDir() {
-				continue
+		// Verify the entry itself (under its confined parent inside rootfs) is a
+		// symlink and that its resolved target strictly inside rootfs is a directory.
+		parentHost, parentFi, perr := filesystems.ResolvePathInRoot(rootfs, filepath.Dir(relPath))
+		if perr == nil && parentFi.IsDir() {
+			linkHost := filepath.Join(parentHost, filepath.Base(relPath))
+			lfi, lerr := os.Lstat(linkHost)
+			if lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
+				if _, fi, err := filesystems.ResolvePathInRoot(rootfs, relPath); err == nil && fi.IsDir() {
+					continue
+				}
 			}
 		}
 

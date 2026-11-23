@@ -230,12 +230,13 @@ func TestSortChrootDirs(t *testing.T) {
 				"/chroots/bedrock-20260101",
 				"/chroots/other",
 			},
-			// Non-matching entries keep relative order (stable behavior not guaranteed,
-			// but they compare as equal, so the sort should not rearrange them).
+			// Non-matching entries sort before dated chroots (preserving their
+			// relative order) so valid dated chroots are never displaced by an
+			// invalid comparator.
 			[]string{
 				"/chroots/invalid",
-				"/chroots/bedrock-20260101",
 				"/chroots/other",
+				"/chroots/bedrock-20260101",
 			},
 		},
 	}

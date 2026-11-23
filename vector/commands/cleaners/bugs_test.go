@@ -160,3 +160,32 @@ func TestSeedsCleaner_RejectsHostRootPath(t *testing.T) {
 		t.Fatalf("expected CheckDirIsRoot rejection error, got: %v", err)
 	}
 }
+
+func TestSortChrootDirs_StrictWeakOrderAndBasenameMatching(t *testing.T) {
+	t.Run("NonMatchingDoesNotTrapNewestAtStart", func(t *testing.T) {
+		dirs := []string{
+			"/chroots/bedrock-20260103",
+			"/chroots/invalid",
+			"/chroots/bedrock-20260101",
+		}
+		got := sortChrootDirs(dirs)
+		if got[len(got)-1] != "/chroots/bedrock-20260103" {
+			t.Fatalf("newest chroot was not sorted last (would be marked for deletion): got %v", got)
+		}
+		if got[len(got)-2] != "/chroots/bedrock-20260101" {
+			t.Fatalf("dated chroots not sorted chronologically: got %v", got)
+		}
+	})
+
+	t.Run("MatchesBasenameNotAncestorDir", func(t *testing.T) {
+		dirs := []string{
+			"/build/run-20260101/chroots/bedrock-20260105",
+			"/build/run-20260101/chroots/bedrock-20260102",
+		}
+		got := sortChrootDirs(dirs)
+		if got[0] != "/build/run-20260101/chroots/bedrock-20260102" ||
+			got[1] != "/build/run-20260101/chroots/bedrock-20260105" {
+			t.Fatalf("sortChrootDirs matched ancestor date instead of basename: got %v", got)
+		}
+	})
+}

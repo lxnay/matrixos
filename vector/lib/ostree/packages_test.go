@@ -447,4 +447,56 @@ d00755 0 0 0 eee555 fff666 /etc/conf.d
 			t.Error("expected error for malformed output, got nil")
 		}
 	})
+
+	t.Run("PathsAndSymlinksWithSpaces", func(t *testing.T) {
+		cfg := &config.MockConfig{
+			Items: map[string][]string{
+				"Ostree.RepoDir": {"/repo"},
+			},
+		}
+		o, err := NewOstree(NewOstreeOptions{Config: cfg})
+		if err != nil {
+			t.Fatalf("NewOstree failed: %v", err)
+		}
+
+		mockOutput := "" +
+			"d00755 0 0      0 aaa111 bbb222 /usr/etc/dir with spaces\n" +
+			"-00644 0 0     42 ccc333 /usr/etc/NetworkManager/system-connections/Home  WiFi.nmconnection\n" +
+			"-00644 0 0      3 ddd444 /usr/etc/trailing space \n" +
+			"l00777 0 0      0 eee555 /usr/etc/my link -> /usr/share/target with -> arrow and spaces\n" +
+			"l00777 0 0      0 fff666 /usr/etc/link trailing -> /etc/some target \n"
+
+		o.runner = func(cmd *runner.Cmd) error {
+			_, _ = cmd.Stdout.Write([]byte(mockOutput))
+			return nil
+		}
+
+		pis, err := o.ListContents("abc123", "/usr/etc")
+		if err != nil {
+			t.Fatalf("ListContents failed: %v", err)
+		}
+		if pis == nil || len(*pis) != 5 {
+			t.Fatalf("expected 5 entries, got %v", pis)
+		}
+
+		want := []struct {
+			path string
+			link string
+		}{
+			{"/usr/etc/dir with spaces", ""},
+			{"/usr/etc/NetworkManager/system-connections/Home  WiFi.nmconnection", ""},
+			{"/usr/etc/trailing space ", ""},
+			{"/usr/etc/my link", "/usr/share/target with -> arrow and spaces"},
+			{"/usr/etc/link trailing", "/etc/some target "},
+		}
+		for i, w := range want {
+			got := (*pis)[i]
+			if got.Path != w.path {
+				t.Errorf("entry[%d].Path = %q, want %q", i, got.Path, w.path)
+			}
+			if got.Link != w.link {
+				t.Errorf("entry[%d].Link = %q, want %q", i, got.Link, w.link)
+			}
+		}
+	})
 }
