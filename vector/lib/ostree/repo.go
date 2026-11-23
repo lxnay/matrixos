@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 )
 
@@ -16,62 +15,29 @@ var (
 	repoLocks   = make(map[string]*sync.Mutex)
 )
 
-// canonicalRepoKey resolves repoDir to a canonical path key for in-process
-// repo locking. Relative paths are anchored against os.Getwd() without lexical
-// pre-cleaning so "<symlink>/.." expands in POSIX order. When repoDir itself
-// does not yet exist (e.g. before MaybeInitializeRemote), the longest existing
-// ancestor is symlink-resolved and the remaining leaf components are re-appended
-// so symlinked and real paths (e.g. /ostree/repo vs /sysroot/ostree/repo) map
-// to the same lock key.
+// canonicalRepoKey returns a canonical absolute path key for LockRepo,
+// resolving symlinks on repoDir or its nearest existing ancestor.
 func canonicalRepoKey(repoDir string) string {
 	if repoDir == "" {
 		return ""
 	}
-	p := repoDir
-	if !filepath.IsAbs(p) {
-		if wd, err := os.Getwd(); err == nil {
-			if strings.HasSuffix(wd, string(filepath.Separator)) {
-				p = wd + p
-			} else {
-				p = wd + string(filepath.Separator) + p
-			}
+	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
+		if filepath.IsAbs(resolved) {
+			return resolved
 		}
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		if abs, err := filepath.Abs(resolved); err == nil {
+			return canonicalRepoKey(abs)
+		}
 		return resolved
 	}
-	cur := strings.TrimRight(p, string(filepath.Separator))
-	var tail []string
-	for cur != "" {
-		idx := strings.LastIndexByte(cur, filepath.Separator)
-		if idx < 0 {
-			break
-		}
-		comp := cur[idx+1:]
-		parent := cur[:idx]
-		if parent == "" {
-			parent = string(filepath.Separator)
-		}
-		if comp != "" && comp != "." {
-			if comp == ".." {
-				break
-			}
-			tail = append(tail, comp)
-		}
-		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			parts := make([]string, 0, 1+len(tail))
-			parts = append(parts, resolved)
-			for i := len(tail) - 1; i >= 0; i-- {
-				parts = append(parts, tail[i])
-			}
-			return filepath.Join(parts...)
-		}
-		if parent == string(filepath.Separator) {
-			break
-		}
-		cur = strings.TrimRight(parent, string(filepath.Separator))
+	abs, err := filepath.Abs(repoDir)
+	if err != nil {
+		return filepath.Clean(repoDir)
 	}
-	return filepath.Clean(p)
+	if dir := filepath.Dir(abs); dir != abs {
+		return filepath.Join(canonicalRepoKey(dir), filepath.Base(abs))
+	}
+	return abs
 }
 
 // LockRepo acquires an exclusive in-process lock for repoDir and returns its
