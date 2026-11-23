@@ -1852,6 +1852,30 @@ func TestSetupChrootDNS_ConfinesSymlinksAndReplacesResolvSymlink(t *testing.T) {
 			t.Fatalf("SetupChrootDNS wrote resolv.conf outside chroot into %s", outsideDir)
 		}
 	})
+
+	t.Run("RejectsHostRootAndMissingChrootDir", func(t *testing.T) {
+		sd := newTestSeederWithConfig(workerTestConfig())
+
+		if err := sd.SetupChrootDNS("/"); err == nil || !strings.Contains(err.Error(), "HOST ROOT") {
+			t.Fatalf("SetupChrootDNS(\"/\") err = %v, want HOST ROOT rejection", err)
+		}
+
+		rootLink := filepath.Join(t.TempDir(), "rootlink")
+		if err := os.Symlink("/", rootLink); err != nil {
+			t.Fatal(err)
+		}
+		if err := sd.SetupChrootDNS(rootLink); err == nil || !strings.Contains(err.Error(), "HOST ROOT") {
+			t.Fatalf("SetupChrootDNS(symlink->\"/\") err = %v, want HOST ROOT rejection", err)
+		}
+
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+		if err := sd.SetupChrootDNS(missing); err == nil {
+			t.Fatalf("SetupChrootDNS(%q) succeeded on nonexistent chrootDir", missing)
+		}
+		if _, err := os.Stat(missing); !os.IsNotExist(err) {
+			t.Fatalf("SetupChrootDNS created nonexistent chrootDir %s", missing)
+		}
+	})
 }
 
 // --- SetupChrootDirs tests ---

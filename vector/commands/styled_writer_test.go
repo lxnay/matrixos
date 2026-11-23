@@ -198,6 +198,41 @@ func TestWriteLFFollowedByCRLF(t *testing.T) {
 	})
 }
 
+func TestFlushStripsBufferedTrailingCR(t *testing.T) {
+	t.Run("NonTTYAndLog", func(t *testing.T) {
+		var dest, logBuf bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "", "", false)
+		sw.SetLogWriter(&logBuf)
+
+		if _, err := sw.Write([]byte("progress 50%\rprogress 100%\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.Flush()
+		if strings.Contains(dest.String(), "\r") {
+			t.Errorf("non-TTY Flush leaked raw CR: %q", dest.String())
+		}
+		if strings.Contains(logBuf.String(), "\r") {
+			t.Errorf("log Flush leaked raw CR: %q", logBuf.String())
+		}
+		if got := dest.String(); got != "[P] progress 100%\n" {
+			t.Errorf("dest = %q, want %q", got, "[P] progress 100%\n")
+		}
+	})
+
+	t.Run("TTYAndFlushInline", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "\033[32m", "\033[0m", true)
+
+		if _, err := sw.Write([]byte("100%\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.FlushInline()
+		if strings.Contains(dest.String(), "\r") {
+			t.Errorf("TTY FlushInline leaked raw trailing CR: %q", dest.String())
+		}
+	})
+}
+
 func TestWriteCROverwriteTTY(t *testing.T) {
 	var buf bytes.Buffer
 	sw := newStyledWriter(&buf, "", "", "", true)

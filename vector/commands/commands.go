@@ -110,7 +110,7 @@ type SignalGuard struct {
 
 // runSignalCleanups executes all captured guards' cleanup stacks for a
 // received signal up to each guard's captured arm generation. Kept as a
-// non-inlined named function so calledFromSignalCleanup can reliably detect
+// non-inlined named function so calledFromCleanup can reliably detect
 // re-entrant Disarm() calls originating from inside a signal-triggered cleanup.
 //
 //go:noinline
@@ -121,15 +121,20 @@ func runSignalCleanups(sig os.Signal, guards []capturedGuard) {
 	}
 }
 
-// calledFromSignalCleanup reports whether the current goroutine's call stack
-// is inside runSignalCleanups, preventing self-deadlock if a signal-triggered
-// cleanup invokes Disarm().
-func calledFromSignalCleanup() bool {
-	targetFunc := runtime.FuncForPC(reflect.ValueOf(runSignalCleanups).Pointer())
-	if targetFunc == nil {
+// calledFromCleanup reports whether the current goroutine's call stack is
+// inside runSignalCleanups or runGuardCleanups, preventing self-deadlock and
+// AB-BA deadlock (cleanupMu <-> sigCleanupDone) if a cleanup invokes Disarm().
+func calledFromCleanup() bool {
+	var sigEntry, guardEntry uintptr
+	if f := runtime.FuncForPC(reflect.ValueOf(runSignalCleanups).Pointer()); f != nil {
+		sigEntry = f.Entry()
+	}
+	if f := runtime.FuncForPC(reflect.ValueOf(runGuardCleanups).Pointer()); f != nil {
+		guardEntry = f.Entry()
+	}
+	if sigEntry == 0 && guardEntry == 0 {
 		return false
 	}
-	targetEntry := targetFunc.Entry()
 	var pcs [64]uintptr
 	for skip := 2; ; skip += len(pcs) {
 		n := runtime.Callers(skip, pcs[:])
@@ -139,8 +144,11 @@ func calledFromSignalCleanup() bool {
 		frames := runtime.CallersFrames(pcs[:n])
 		for {
 			f, more := frames.Next()
-			if f.Func != nil && f.Func.Entry() == targetEntry {
-				return true
+			if f.Func != nil {
+				entry := f.Func.Entry()
+				if (sigEntry != 0 && entry == sigEntry) || (guardEntry != 0 && entry == guardEntry) {
+					return true
+				}
 			}
 			if !more {
 				break
@@ -297,7 +305,7 @@ func (sg *SignalGuard) Disarm() {
 		select {
 		case <-waitSigCleanup:
 		default:
-			if !calledFromSignalCleanup() {
+			if !calledFromCleanup() {
 				<-waitSigCleanup
 			}
 		}
@@ -360,14 +368,20 @@ func (sg *SignalGuard) RunCleanups() {
 // while deferred cleanup is already running) so callers wait for in-flight
 // cleanups to finish rather than exiting early.
 func (sg *SignalGuard) runCleanups() {
-	sg.runCleanupsGen(0, true)
+	runGuardCleanups(sg, 0, true)
 }
 
 func (sg *SignalGuard) runCleanupsUpTo(maxGen uint64) {
-	sg.runCleanupsGen(maxGen, false)
+	runGuardCleanups(sg, maxGen, false)
 }
 
-func (sg *SignalGuard) runCleanupsGen(maxGen uint64, useCurrentGen bool) {
+// runGuardCleanups drains and executes sg's cleanup stacks up to maxGen (or
+// sg's current armGen when useCurrentGen is true). Kept as a non-inlined
+// package-level function so calledFromCleanup can reliably detect re-entrant
+// Disarm() calls made while holding sg.cleanupMu.
+//
+//go:noinline
+func runGuardCleanups(sg *SignalGuard, maxGen uint64, useCurrentGen bool) {
 	sg.cleanupMu.Lock()
 	defer sg.cleanupMu.Unlock()
 

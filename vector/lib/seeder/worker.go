@@ -438,8 +438,8 @@ func (s *Seeder) ExecutePrepper(info SeederInfo, params *SeederParams, opts *Pre
 // symlinks outside chrootDir or overwriting host targets through a symlinked
 // /etc/resolv.conf.
 func (s *Seeder) SetupChrootDNS(chrootDir string) error {
-	if chrootDir == "" {
-		return fmt.Errorf("missing chrootDir parameter")
+	if err := filesystems.CheckDirIsRoot(chrootDir); err != nil {
+		return err
 	}
 	src := "/etc/resolv.conf"
 	chrootDir = filepath.Clean(chrootDir)

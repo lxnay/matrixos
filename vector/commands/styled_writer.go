@@ -241,7 +241,9 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 		return
 	}
 
-	line := w.cleanLine(string(w.buf))
+	// Strip any trailing \r left buffered by Write() while waiting to see
+	// whether a following \n would form \r\n.
+	line := w.cleanLine(string(bytes.TrimRight(w.buf, "\r")))
 	w.buf = nil
 	if strings.TrimSpace(line) == "" {
 		return
