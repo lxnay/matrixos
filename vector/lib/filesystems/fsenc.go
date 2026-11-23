@@ -177,29 +177,46 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 
 	luksName := filepath.Base(desiredLuksDevice)
 
-	if f.closed.Load() {
-		return fmt.Errorf("cleanup already ran; refusing to format LUKS device %s", devicePath)
+	// Hold openMu across closed-check and luksFormat so Cleanup() waits for an
+	// in-flight luksFormat before returning (preventing Imager.Cleanup from
+	// detaching the underlying loop device mid-format) and so luksFormat cannot
+	// start after Cleanup() has already run.
+	var formatClosedErr error
+	var closedDuringFormat bool
+	err = func() error {
+		f.openMu.Lock()
+		defer f.openMu.Unlock()
+		if f.closed.Load() {
+			formatClosedErr = fmt.Errorf("cleanup already ran; refusing to format LUKS device %s", devicePath)
+			return nil
+		}
+		fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
+		runErr := f.runner(&runner.Cmd{
+			Name: "cryptsetup",
+			Args: []string{
+				"-c",
+				"aes-xts-plain64",
+				"-s",
+				"512",
+				"luksFormat",
+				devicePath,
+				keyFileArg,
+			},
+			Stdin:  stdin,
+			Stdout: stdout,
+			Stderr: stderr,
+		})
+		closedDuringFormat = f.closed.Load()
+		return runErr
+	}()
+	if formatClosedErr != nil {
+		return formatClosedErr
 	}
-
-	// Format the device with LUKS encryption.
-	fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
-	err = f.runner(&runner.Cmd{
-		Name: "cryptsetup",
-		Args: []string{
-			"-c",
-			"aes-xts-plain64",
-			"-s",
-			"512",
-			"luksFormat",
-			devicePath,
-			keyFileArg,
-		},
-		Stdin:  stdin,
-		Stdout: stdout,
-		Stderr: stderr,
-	})
 	if err != nil {
 		return fmt.Errorf("cryptsetup luksFormat failed on %s: %w", devicePath, err)
+	}
+	if closedDuringFormat || f.closed.Load() {
+		return fmt.Errorf("cleanup interrupted LUKS format on %s", devicePath)
 	}
 
 	// Re-create stdin for the open command if the key is not a file.

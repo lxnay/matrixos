@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -29,22 +30,24 @@ func Move(src, dst string) error {
 
 	// If rename failed because the destination parent doesn't exist,
 	// create it and retry (still same-device), but only when src actually
-	// exists so a missing src never leaves empty destination parents behind.
+	// exists and dst has a valid target name.
 	if errors.Is(err, syscall.ENOENT) {
-		if _, srcErr := os.Lstat(src); srcErr == nil {
-			dstDir := filepath.Dir(filepath.Clean(dst))
-			if _, statErr := os.Stat(dstDir); os.IsNotExist(statErr) {
-				if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
-					return fmt.Errorf("failed to create destination directory %s: %w", dstDir, mkErr)
+		if srcInfo, srcErr := os.Lstat(src); srcErr == nil {
+			if cleanDst, vErr := validateCrossDeviceDst(dst, srcInfo.IsDir()); vErr == nil {
+				dstDir := filepath.Dir(cleanDst)
+				if _, statErr := os.Stat(dstDir); os.IsNotExist(statErr) {
+					if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
+						return fmt.Errorf("failed to create destination directory %s: %w", dstDir, mkErr)
+					}
+					err = os.Rename(src, dst)
+					if err == nil {
+						return nil
+					}
+					if !isCrossDeviceError(err) {
+						return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+					}
+					// If the retry got EXDEV, fall through to the cross-device path.
 				}
-				err = os.Rename(src, dst)
-				if err == nil {
-					return nil
-				}
-				if !isCrossDeviceError(err) {
-					return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
-				}
-				// If the retry got EXDEV, fall through to the cross-device path.
 			}
 		}
 	}
@@ -57,25 +60,55 @@ func Move(src, dst string) error {
 	return moveCrossDevice(src, dst)
 }
 
+// validateCrossDeviceDst validates dst before any staging directories are
+// created on the destination filesystem, rejecting trailing slashes on
+// non-directories, root "/", and "." / ".." final path components (which POSIX
+// rename(2) forbids) without lexically collapsing "/." or "/.." away.
+func validateCrossDeviceDst(dst string, isDir bool) (string, error) {
+	if dst == "" {
+		return "", syscall.ENOENT
+	}
+	if !isDir && strings.HasSuffix(dst, string(filepath.Separator)) {
+		return "", syscall.ENOTDIR
+	}
+	trimmed := strings.TrimRight(dst, string(filepath.Separator))
+	if trimmed == "" {
+		return "", syscall.EBUSY
+	}
+	lastComp := trimmed
+	if idx := strings.LastIndexByte(trimmed, filepath.Separator); idx >= 0 {
+		lastComp = trimmed[idx+1:]
+	}
+	if lastComp == "." || lastComp == ".." {
+		return "", syscall.EINVAL
+	}
+	return trimmed, nil
+}
+
 func moveCrossDevice(src, dst string) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
 		return fmt.Errorf("failed to stat source %s: %w", src, err)
 	}
 
+	cleanDst, err := validateCrossDeviceDst(dst, srcInfo.IsDir())
+	if err != nil {
+		return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+	}
+
 	if srcInfo.Mode()&os.ModeSymlink != 0 {
-		return moveSymlinkCrossDevice(src, dst)
+		return moveSymlinkCrossDevice(src, cleanDst)
 	}
 	if srcInfo.IsDir() {
-		return moveDirCrossDevice(src, dst)
+		return moveDirCrossDevice(src, cleanDst)
 	}
 	if srcInfo.Mode()&os.ModeNamedPipe != 0 {
-		return moveFifoCrossDevice(src, dst, srcInfo.Mode())
+		return moveFifoCrossDevice(src, cleanDst, srcInfo.Mode())
 	}
 	if !srcInfo.Mode().IsRegular() {
 		return fmt.Errorf("cannot move unsupported special file %s (mode %s)", src, srcInfo.Mode())
 	}
-	return moveFileCrossDevice(src, dst)
+	return moveFileCrossDevice(src, cleanDst)
 }
 
 // moveFifoCrossDevice recreates a named pipe (FIFO) at dst atomically without
@@ -159,10 +192,13 @@ func moveFileCrossDevice(src, dst string) error {
 	return nil
 }
 
-// removeTreeBestEffort restores owner rwx on subdirectories before calling
-// os.RemoveAll so non-root staging cleanup succeeds even after CopyDirPreserve
-// applied read-only (e.g. 0555) directory modes.
-func removeTreeBestEffort(root string) {
+// removeTree removes root and its contents, restoring owner rwx permissions
+// on subdirectories if needed so non-root callers can remove read-only
+// (e.g. 0555/0500) source or staging directory trees cleanly.
+func removeTree(root string) error {
+	if err := os.RemoveAll(root); err == nil {
+		return nil
+	}
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -172,35 +208,38 @@ func removeTreeBestEffort(root string) {
 		}
 		return nil
 	})
-	_ = os.RemoveAll(root)
+	return os.RemoveAll(root)
 }
 
 // moveDirCrossDevice copies a directory into a private staging directory on
 // the destination filesystem, atomically renames it into place, and removes
 // the source only after placement succeeds.
 func moveDirCrossDevice(src, dst string) error {
-	dst = filepath.Clean(dst)
-	dstParent := filepath.Dir(dst)
+	cleanDst, err := validateCrossDeviceDst(dst, true)
+	if err != nil {
+		return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+	}
+	dstParent := filepath.Dir(cleanDst)
 	if err := os.MkdirAll(dstParent, 0755); err != nil {
-		return fmt.Errorf("failed to create parent of destination %s: %w", dst, err)
+		return fmt.Errorf("failed to create parent of destination %s: %w", cleanDst, err)
 	}
 
 	stageParent, err := os.MkdirTemp(dstParent, ".move-dir-*")
 	if err != nil {
 		return fmt.Errorf("failed to create staging dir in %s: %w", dstParent, err)
 	}
-	defer removeTreeBestEffort(stageParent)
+	defer func() { _ = removeTree(stageParent) }()
 
 	stageDst := filepath.Join(stageParent, "dir")
 	if err := CopyDirPreserve(src, stageDst); err != nil {
-		return fmt.Errorf("failed to copy directory %s to %s: %w", src, dst, err)
+		return fmt.Errorf("failed to copy directory %s to %s: %w", src, cleanDst, err)
 	}
 
-	if err := os.Rename(stageDst, dst); err != nil {
-		return fmt.Errorf("failed to place directory %s at %s: %w", src, dst, err)
+	if err := os.Rename(stageDst, cleanDst); err != nil {
+		return fmt.Errorf("failed to place directory %s at %s: %w", src, cleanDst, err)
 	}
 
-	if err := os.RemoveAll(src); err != nil {
+	if err := removeTree(src); err != nil {
 		return fmt.Errorf("failed to remove source directory %s after move: %w", src, err)
 	}
 

@@ -346,6 +346,122 @@ func TestMoveDirCrossDevice_AtomicStagingAndCleanupOnError(t *testing.T) {
 			t.Fatalf("expected moved file at dst/f.txt: %v", err)
 		}
 	})
+
+	t.Run("ReadOnlySourceSubdirAsNonRoot", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses DAC write checks on 0555 directories")
+		}
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src")
+		roSub := filepath.Join(src, "rosub")
+		dst := filepath.Join(tmp, "dst")
+		if err := os.MkdirAll(roSub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(roSub, "inner.txt"), []byte("secret"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(roSub, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(roSub, 0755)
+			_ = os.Chmod(filepath.Join(dst, "rosub"), 0755)
+		})
+
+		if err := moveDirCrossDevice(src, dst); err != nil {
+			t.Fatalf("moveDirCrossDevice failed on read-only 0555 subdir: %v", err)
+		}
+		if _, err := os.Stat(src); !os.IsNotExist(err) {
+			t.Fatalf("source dir %s still exists after moveDirCrossDevice", src)
+		}
+		data, err := os.ReadFile(filepath.Join(dst, "rosub", "inner.txt"))
+		if err != nil || string(data) != "secret" {
+			t.Fatalf("moved inner.txt = (%q, %v), want (\"secret\", nil)", string(data), err)
+		}
+		info, err := os.Stat(filepath.Join(dst, "rosub"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0555 {
+			t.Errorf("dst/rosub perms = %04o, want 0555", info.Mode().Perm())
+		}
+	})
+
+	t.Run("RejectsDotDotDotAndRootDst", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src")
+		emptyDst := filepath.Join(tmp, "emptyDst")
+		subDst := filepath.Join(tmp, "subParent", "sub")
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(emptyDst, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(subDst, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := moveDirCrossDevice(src, emptyDst+"/."); err == nil {
+			t.Fatal("moveDirCrossDevice accepted dst ending in '/.' and replaced emptyDst")
+		}
+		if _, err := os.Stat(filepath.Join(src, "keep.txt")); err != nil {
+			t.Fatalf("src was deleted or damaged after '/.' rejection: %v", err)
+		}
+		if err := moveDirCrossDevice(src, subDst+"/.."); err == nil {
+			t.Fatal("moveDirCrossDevice accepted dst ending in '/..'")
+		}
+
+		workDir := t.TempDir()
+		t.Chdir(workDir)
+		// Put a socket inside src so if moveDirCrossDevice stages a copy before
+		// rejecting "." / ".." / "/", the error will mention unsupported special file.
+		if err := unix.Mknod(filepath.Join(src, "s.sock"), unix.S_IFSOCK|0600, 0); err != nil {
+			t.Fatalf("Mknod: %v", err)
+		}
+		for _, badDst := range []string{".", "..", "/"} {
+			err := moveDirCrossDevice(src, badDst)
+			if err == nil {
+				t.Errorf("moveDirCrossDevice(src, %q) succeeded, want error", badDst)
+			} else if strings.Contains(err.Error(), "unsupported special file") {
+				t.Errorf("moveDirCrossDevice(src, %q) staged a full copy before rejecting invalid dst: %v", badDst, err)
+			}
+		}
+	})
+}
+
+func TestMoveCrossDevice_NonDirTrailingSlashDoesNotCreateDir(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(path string) error
+	}{
+		{"RegularFile", func(p string) error { return os.WriteFile(p, []byte("hi"), 0644) }},
+		{"Symlink", func(p string) error { return os.Symlink("target", p) }},
+		{"FIFO", func(p string) error { return unix.Mkfifo(p, 0640) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			src := filepath.Join(tmp, "src")
+			if err := tc.setup(src); err != nil {
+				t.Fatal(err)
+			}
+			dstBase := filepath.Join(tmp, "newdst")
+			if err := moveCrossDevice(src, dstBase+"/"); err == nil {
+				t.Fatalf("moveCrossDevice(%s, dst/) succeeded for non-dir with trailing slash", tc.name)
+			}
+			if info, err := os.Lstat(dstBase); !os.IsNotExist(err) {
+				t.Fatalf("moveCrossDevice(%s, dst/) created bogus entry at %s (info=%v, err=%v)", tc.name, dstBase, info, err)
+			}
+			if _, err := os.Lstat(src); err != nil {
+				t.Fatalf("source %s should remain intact on error: %v", src, err)
+			}
+		})
+	}
 }
 
 // --- Real cross-device tests (require root to mount tmpfs) ---

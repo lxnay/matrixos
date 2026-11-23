@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/runner"
 
 	"golang.org/x/sys/unix"
@@ -409,9 +410,19 @@ func TestFsenc_CleanupDuringLuksFormatPreventsSubsequentOpen(t *testing.T) {
 	}()
 
 	<-inFormat
-	// Cleanup runs while luksFormat is in flight (e.g. SIGINT).
-	f.Cleanup()
+	// Cleanup runs concurrently while luksFormat is in flight (e.g. SIGINT),
+	// marks closed immediately, and waits for luksFormat to finish before returning.
+	cleanupDone := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(cleanupDone)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !f.closed.Load() {
+		time.Sleep(time.Millisecond)
+	}
 	close(releaseFormat)
+	<-cleanupDone
 
 	if err := <-encryptErr; err == nil {
 		t.Fatal("expected LuksEncrypt to fail when Cleanup() ran during luksFormat")
@@ -1046,5 +1057,66 @@ func TestCopyFilePreserveXattrs_ReadOnlyFileWithUserXattr(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0444 {
 		t.Errorf("dst perms = %04o, want 0444", info.Mode().Perm())
+	}
+}
+
+func TestFsenc_CleanupWaitsForInFlightLuksFormat(t *testing.T) {
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Imager.EncryptionKey":       {"passphrase"},
+			"Imager.EncryptedRootFsName": {"test-luks"},
+		},
+	}
+	f, err := NewFsenc(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	f.SetStdout(io.Discard)
+	f.SetStderr(io.Discard)
+
+	inFormat := make(chan struct{})
+	releaseFormat := make(chan struct{})
+	var openCalled atomic.Bool
+	f.runner = func(cmd *runner.Cmd) error {
+		for _, a := range cmd.Args {
+			if a == "luksFormat" {
+				close(inFormat)
+				<-releaseFormat
+				return nil
+			}
+			if a == "open" {
+				openCalled.Store(true)
+			}
+		}
+		return nil
+	}
+
+	encErrCh := make(chan error, 1)
+	go func() {
+		encErrCh <- f.LuksEncrypt("/dev/loop9p3", "/dev/mapper/test-luks")
+	}()
+	<-inFormat
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(cleanupDone)
+	}()
+
+	select {
+	case <-cleanupDone:
+		close(releaseFormat)
+		<-encErrCh
+		t.Fatal("Fsenc.Cleanup() returned while cryptsetup luksFormat was still running (allows loop.Detach mid-format)")
+	case <-time.After(150 * time.Millisecond):
+		close(releaseFormat)
+	}
+
+	<-cleanupDone
+	if err := <-encErrCh; err == nil {
+		t.Fatal("expected LuksEncrypt to abort after Cleanup() interrupted luksFormat")
+	}
+	if openCalled.Load() {
+		t.Fatal("cryptsetup open was invoked after Cleanup() set closed=true during luksFormat")
 	}
 }
