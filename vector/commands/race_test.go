@@ -398,19 +398,7 @@ func TestSignalGuard_RespawnsListenerAfterSignalExitReturns(t *testing.T) {
 	}
 	inner1.Disarm()
 
-	// Wait briefly for the first listener goroutine to finish its defer cleanup.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		sigCoordMu.Lock()
-		cleared := globalSigCh == nil
-		sigCoordMu.Unlock()
-		if cleared {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// Arming another guard while outer is still armed must ensure a live listener.
+	// Arming another guard while outer is still armed must immediately ensure a live listener.
 	inner2.Arm()
 	defer inner2.Disarm()
 
@@ -586,5 +574,323 @@ func TestVMDriver_WaitDrainsAllStdoutBeforeClosingPipe(t *testing.T) {
 	}
 	if !strings.Contains(disp.String(), "FINAL_MARKER_END") {
 		t.Fatal("Wait closed StdoutPipe before pump drained trailing output (missing FINAL_MARKER_END)")
+	}
+}
+
+func TestSignalGuard_DisarmInsideCleanupDoesNotDeadlock(t *testing.T) {
+	var sg SignalGuard
+	sg.Arm()
+	sg.PushCleanup(func() {
+		sg.Disarm()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		sg.RunCleanups()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("SignalGuard.Disarm() called from inside a cleanup deadlocked on cleanupMu")
+	}
+}
+
+func TestSignalGuard_PreCleanupDrainedBeforeRegularCleanups(t *testing.T) {
+	var sg SignalGuard
+	var order []string
+
+	sg.PushCleanup(func() { order = append(order, "regular") })
+	sg.PushPreCleanup(func() {
+		order = append(order, "pre1")
+		sg.PushPreCleanup(func() { order = append(order, "pre2") })
+		sg.PushCleanup(func() { order = append(order, "worker-from-pre") })
+	})
+
+	sg.RunCleanups()
+
+	want := []string{"pre1", "pre2", "worker-from-pre", "regular"}
+	if len(order) != len(want) {
+		t.Fatalf("order = %v, want %v", order, want)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("order = %v, want %v (preCleanups and regular cleanups were snapshotted together)", order, want)
+		}
+	}
+}
+
+func TestSignalGuard_RespawnsListenerImmediatelyDuringSignalExit(t *testing.T) {
+	origExit := signalExit
+	inExit := make(chan struct{}, 2)
+	releaseExit := make(chan struct{})
+	signalExit = func(int) {
+		inExit <- struct{}{}
+		<-releaseExit
+	}
+	t.Cleanup(func() { signalExit = origExit })
+
+	var outer, inner1, inner2 SignalGuard
+	outer.Arm()
+	defer outer.Disarm()
+
+	inner1.Arm()
+	sigCoordMu.Lock()
+	ch1 := globalSigCh
+	sigCoordMu.Unlock()
+	ch1 <- syscall.SIGINT
+
+	select {
+	case <-inExit:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first signalExit")
+	}
+	// Do NOT wait for the first listener goroutine to return from signalExit:
+	// arming inner2 right now must immediately spawn a fresh live signal channel.
+	inner2.Arm()
+	defer inner2.Disarm()
+
+	sigCoordMu.Lock()
+	ch2 := globalSigCh
+	sigCoordMu.Unlock()
+
+	close(releaseExit)
+	inner1.Disarm()
+
+	if ch2 == nil || ch2 == ch1 {
+		t.Fatal("Arm() did not spawn a fresh live signal listener because previous listener had not cleared globalSigCh before signalExit")
+	}
+}
+
+func TestUI_SetupPlainPrintersFlushesPreviousWriter(t *testing.T) {
+	var buf bytes.Buffer
+	var ui UI
+	ui.printer = newStyledWriter(&buf, "[old]", "", "", false)
+	_, _ = io.WriteString(ui.printer, "buffered-partial-line")
+
+	ui.SetupPlainPrinters()
+
+	if !strings.Contains(buf.String(), "buffered-partial-line") {
+		t.Fatalf("SetupPlainPrinters dropped buffered output from previous writer; got %q", buf.String())
+	}
+}
+
+func TestVMDriver_WaitRespectsWaitDelayWhenDescendantHoldsStdout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Spawn a child that spawns a background sleep inheriting stdout, then exits
+	// once killed, leaving the pipe write-end open in the descendant.
+	cmd := exec.CommandContext(ctx, "sh", "-c", "sleep 2 & echo ready; sleep 30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return cmd.Process.Kill()
+	}
+	cmd.WaitDelay = 120 * time.Millisecond
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vm := &VMDriver{
+		ctx:     ctx,
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  stdout,
+		reader:  bufio.NewReader(stdout),
+		display: io.Discard,
+	}
+	if err := vm.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	})
+	if err := vm.Expect("ready", 2*time.Second); err != nil {
+		t.Fatalf("Expect: %v", err)
+	}
+
+	cancel()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- vm.Wait()
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("VMDriver.Wait() blocked past WaitDelay while descendant held stdout open")
+	}
+}
+
+func TestVMCommand_RunTestsRegistersSignalCleanupForQemu(t *testing.T) {
+	binDir := t.TempDir()
+	fakeQemu := filepath.Join(binDir, qemuSystemBinary())
+	pidFile := filepath.Join(t.TempDir(), "qemu.pid")
+	script := "#!/bin/sh\necho $$ > " + pidFile + "\necho started\nexec sleep 30\n"
+	if err := os.WriteFile(fakeQemu, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewVMCommand()
+	c.StartUI()
+	c.SetupPrinters("vm")
+	defer c.FlushPrinters()
+	c.waitBoot = 5 * time.Second
+	c.waitTests = 5 * time.Second
+	c.maxRunTime = 10 * time.Second
+
+	var tempRemovedAfterQemuDead atomic.Bool
+	// Simulate temp-dir cleanup pushed by VMCommand.run() BEFORE runTests().
+	c.PushCleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			if _, serr := os.Stat("/proc/" + strings.TrimSpace(string(data))); serr != nil {
+				tempRemovedAfterQemuDead.Store(true)
+			}
+		}
+	})
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- c.runTests(nil)
+	}()
+
+	// Wait until fake QEMU has written its PID file.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil && strings.TrimSpace(string(data)) != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Trigger SignalGuard cleanups while runTests is blocked waiting for boot.
+	c.RunCleanups()
+
+	select {
+	case <-runDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("runTests did not terminate promptly when SignalGuard.RunCleanups() ran (QEMU was not guarded)")
+	}
+
+	if !tempRemovedAfterQemuDead.Load() {
+		t.Fatal("temp dir cleanup ran before QEMU was killed/reaped")
+	}
+}
+
+func TestVMCommand_RunInteractiveRegistersSignalCleanupForQemu(t *testing.T) {
+	binDir := t.TempDir()
+	fakeQemu := filepath.Join(binDir, qemuSystemBinary())
+	pidFile := filepath.Join(t.TempDir(), "qemu-interactive.pid")
+	script := "#!/bin/sh\necho $$ > " + pidFile + "\nexec sleep 30\n"
+	if err := os.WriteFile(fakeQemu, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := NewVMCommand()
+	c.StartUI()
+	c.SetupPrinters("vm")
+	defer c.FlushPrinters()
+
+	var tempRemovedAfterQemuDead atomic.Bool
+	c.PushCleanup(func() {
+		data, err := os.ReadFile(pidFile)
+		if err == nil {
+			if _, serr := os.Stat("/proc/" + strings.TrimSpace(string(data))); serr != nil {
+				tempRemovedAfterQemuDead.Store(true)
+			}
+		}
+	})
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- c.runInteractive(nil)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil && strings.TrimSpace(string(data)) != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	c.RunCleanups()
+
+	select {
+	case <-runDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("runInteractive did not terminate promptly when SignalGuard.RunCleanups() ran (QEMU was not guarded)")
+	}
+
+	if !tempRemovedAfterQemuDead.Load() {
+		t.Fatal("temp dir cleanup ran before interactive QEMU was killed/reaped")
+	}
+}
+
+func TestSignalGuard_DisarmDoesNotWipeReArmedCleanups(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 1)
+	signalExit = func(code int) { exitCh <- code }
+	t.Cleanup(func() { signalExit = origExit })
+
+	var sg SignalGuard
+	inCleanup := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+
+	sg.Arm()
+	sg.PushCleanup(func() {
+		close(inCleanup)
+		<-releaseCleanup
+	})
+
+	sigCoordMu.Lock()
+	ch := globalSigCh
+	sigCoordMu.Unlock()
+	ch <- syscall.SIGINT
+
+	<-inCleanup
+
+	disarmDone := make(chan struct{})
+	go func() {
+		sg.Disarm()
+		close(disarmDone)
+	}()
+
+	// Wait until Disarm has set sg.armed=false and is waiting on sigCleanupDone.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sigCoordMu.Lock()
+		armed := sg.armed
+		sigCoordMu.Unlock()
+		if !armed {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Re-arm and register a fresh cleanup while the old Disarm is still waiting.
+	var freshRan atomic.Bool
+	sg.Arm()
+	sg.PushCleanup(func() { freshRan.Store(true) })
+
+	close(releaseCleanup)
+	<-exitCh
+	<-disarmDone
+
+	sg.RunCleanups()
+	sg.Disarm()
+	if !freshRan.Load() {
+		t.Fatal("stale Disarm wiped cleanup pushed after concurrent re-Arm")
 	}
 }

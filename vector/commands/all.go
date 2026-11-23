@@ -229,6 +229,12 @@ func (c *AllCommand) run() error {
 		return err
 	}
 
+	// Tee all styled output (this command + sub-commands) to the log before
+	// registering closeLog so a signal cannot close logF and then leave a
+	// closed file attached as the global log writer.
+	SetGlobalLogWriter(logF)
+	c.SetLogWriter(logF)
+
 	// Flush buffered output, detach printers/global log, and close logF once
 	// before sendMail attaches c.logFile (and on signal/panic/early return).
 	closeLog := sync.OnceFunc(func() {
@@ -239,10 +245,6 @@ func (c *AllCommand) run() error {
 	})
 	defer closeLog()
 	c.PushCleanup(closeLog)
-
-	// Tee all styled output (this command + sub-commands) to the log.
-	SetGlobalLogWriter(logF)
-	c.SetLogWriter(logF)
 
 	c.Printf("Logfile at: %s\n", c.logFile)
 

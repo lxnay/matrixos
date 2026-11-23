@@ -284,6 +284,7 @@ func (c *SeedsCommand) runSeeds() error {
 		OnSeederDone: c.recordResults,
 	}
 	if cgPool != nil {
+		psOpts.AcquireSysProcAttr = cgPool.AcquireSysProcAttr
 		psOpts.SysProcAttr = cgPool.SysProcAttr
 		psOpts.BoostWorker = cgPool.BoostWorker
 		psOpts.UnboostWorker = cgPool.UnboostWorker

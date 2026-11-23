@@ -28,8 +28,13 @@ type ParallelSeedOptions struct {
 	// Stage3File is the path to a pre-downloaded stage3 tarball.
 	Stage3File string
 
+	// AcquireSysProcAttr returns an owned SysProcAttr (with a duplicated
+	// CgroupFD) and a release function for a given worker index. Preferred
+	// over SysProcAttr so concurrent cgroup pool shutdown cannot close or
+	// reuse the FD while a child process is being spawned.
+	AcquireSysProcAttr func(workerIndex int) (*syscall.SysProcAttr, func())
 	// SysProcAttr returns the SysProcAttr for a given worker index,
-	// used for cgroup isolation.  May be nil when no isolation is needed.
+	// used for cgroup isolation when AcquireSysProcAttr is nil.
 	SysProcAttr func(workerIndex int) *syscall.SysProcAttr
 	// NewSeeder creates an isolated ISeeder instance for a worker goroutine.
 	NewSeeder func(opts *NewSeederOptions) (ISeeder, error)
@@ -561,10 +566,16 @@ func seedWorker(ctx context.Context, sw *seedWorkerOpts) error {
 	}
 
 	// Execute seeder inside chroot.
-	// Fetch SysProcAttr freshly right before Seed so we never reuse a
-	// cached CgroupFD that may have been closed during shutdown.
+	// Acquire a per-spawn owned CgroupFD duplicate (when available) so a
+	// concurrent WorkerPool.Close() cannot close or reuse the FD mid-fork.
 	var sysProcAttr *syscall.SysProcAttr
-	if opts.SysProcAttr != nil {
+	if opts.AcquireSysProcAttr != nil {
+		var release func()
+		sysProcAttr, release = opts.AcquireSysProcAttr(sw.workerIdx)
+		if release != nil {
+			defer release()
+		}
+	} else if opts.SysProcAttr != nil {
 		sysProcAttr = opts.SysProcAttr(sw.workerIdx)
 	}
 	sd.Print(

@@ -61,11 +61,15 @@ var (
 )
 
 type SignalGuard struct {
-	mu          sync.Mutex
-	cleanupMu   sync.Mutex
-	preCleanups []func()
-	cleanups    []func()
-	armed       bool
+	mu              sync.Mutex
+	cleanupMu       sync.Mutex
+	preCleanups     []func()
+	cleanups        []func()
+	armGen          uint64
+	clearGen        uint64
+	runningCleanups bool
+	armed           bool
+	sigCleanupDone  <-chan struct{}
 }
 
 // Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
@@ -80,6 +84,9 @@ func (sg *SignalGuard) Arm() {
 		return
 	}
 	sg.armed = true
+	sg.mu.Lock()
+	sg.armGen++
+	sg.mu.Unlock()
 	activeGuards = append(activeGuards, sg)
 
 	if globalSigCh == nil {
@@ -109,20 +116,34 @@ func (sg *SignalGuard) Arm() {
 			case <-done:
 				return
 			case sig := <-sigCh:
+				cleanupDone := make(chan struct{})
 				sigCoordMu.Lock()
 				if globalSigDone != done {
 					// Disarm() already stopped this listener while a signal was buffered.
 					sigCoordMu.Unlock()
 					return
 				}
+				// Detach this exiting listener immediately so any subsequent Arm()
+				// spawns a fresh live listener rather than assuming this one is active.
+				signal.Stop(sigCh)
+				globalSigCh = nil
+				globalSigDone = nil
+				globalSigListenerDone = nil
+
 				guards := make([]*SignalGuard, len(activeGuards))
 				copy(guards, activeGuards)
+				for _, g := range guards {
+					g.sigCleanupDone = cleanupDone
+				}
 				sigCoordMu.Unlock()
 
-				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
-				for i := len(guards) - 1; i >= 0; i-- {
-					guards[i].runCleanups()
-				}
+				func() {
+					defer close(cleanupDone)
+					fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
+					for i := len(guards) - 1; i >= 0; i-- {
+						guards[i].runCleanups()
+					}
+				}()
 				signalExit(1)
 			}
 		}(sigCh, done, listenerDone)
@@ -134,9 +155,14 @@ func (sg *SignalGuard) Arm() {
 func (sg *SignalGuard) Disarm() {
 	sigCoordMu.Lock()
 	wasArmed := sg.armed
+	waitSigCleanup := sg.sigCleanupDone
+	var myGen uint64
 	var waitListener <-chan struct{}
 	if wasArmed {
 		sg.armed = false
+		sg.mu.Lock()
+		myGen = sg.armGen
+		sg.mu.Unlock()
 		for i, g := range activeGuards {
 			if g == sg {
 				activeGuards = append(activeGuards[:i], activeGuards[i+1:]...)
@@ -157,14 +183,24 @@ func (sg *SignalGuard) Disarm() {
 	if waitListener != nil {
 		<-waitListener
 	}
+	if waitSigCleanup != nil {
+		<-waitSigCleanup
+	}
 
 	if wasArmed {
-		sg.cleanupMu.Lock()
 		sg.mu.Lock()
-		sg.preCleanups = nil
-		sg.cleanups = nil
+		if sg.armGen == myGen {
+			if sg.runningCleanups {
+				// Defer clearing until runCleanups() completes so calling
+				// Disarm() from inside a cleanup does not self-deadlock on
+				// cleanupMu, and never wipe cleanups pushed after a re-Arm().
+				sg.clearGen = myGen
+			} else {
+				sg.preCleanups = nil
+				sg.cleanups = nil
+			}
+		}
 		sg.mu.Unlock()
-		sg.cleanupMu.Unlock()
 	}
 }
 
@@ -211,6 +247,20 @@ func (sg *SignalGuard) runCleanups() {
 	sg.cleanupMu.Lock()
 	defer sg.cleanupMu.Unlock()
 
+	sg.mu.Lock()
+	sg.runningCleanups = true
+	sg.mu.Unlock()
+	defer func() {
+		sg.mu.Lock()
+		sg.runningCleanups = false
+		if sg.clearGen != 0 && sg.clearGen == sg.armGen {
+			sg.preCleanups = nil
+			sg.cleanups = nil
+			sg.clearGen = 0
+		}
+		sg.mu.Unlock()
+	}()
+
 	runBatch := func(fns []func()) {
 		for i := len(fns) - 1; i >= 0; i-- {
 			func() {
@@ -226,20 +276,22 @@ func (sg *SignalGuard) runCleanups() {
 
 	for {
 		sg.mu.Lock()
-		if len(sg.preCleanups) == 0 && len(sg.cleanups) == 0 {
+		if len(sg.preCleanups) > 0 {
+			pre := make([]func(), len(sg.preCleanups))
+			copy(pre, sg.preCleanups)
+			sg.preCleanups = nil
+			sg.mu.Unlock()
+			runBatch(pre)
+			continue
+		}
+		if len(sg.cleanups) == 0 {
 			sg.mu.Unlock()
 			return
 		}
-		pre := make([]func(), len(sg.preCleanups))
-		copy(pre, sg.preCleanups)
-		sg.preCleanups = nil
-
 		fns := make([]func(), len(sg.cleanups))
 		copy(fns, sg.cleanups)
 		sg.cleanups = nil
 		sg.mu.Unlock()
-
-		runBatch(pre)
 		runBatch(fns)
 	}
 }
@@ -316,6 +368,7 @@ func (ui *UI) SetupPrinters(name string) {
 // informational commands where a repeated [name] prefix would be
 // noisy.
 func (ui *UI) SetupPlainPrinters() {
+	ui.FlushPrinters()
 	prefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cGreen, ui.iconGear, ui.cReset)
 	ui.printer = newStyledWriter(os.Stdout, prefix, "", "", ui.isTTY)
 	errPrefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cRed, ui.iconWarn, ui.cReset)

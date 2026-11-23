@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -173,5 +175,110 @@ func TestWorkerPool_CloseRetriesStaleDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(parentDir); !os.IsNotExist(err) {
 		t.Fatalf("parentDir %s still exists after second Close() retry", parentDir)
+	}
+}
+
+func TestWorkerPool_AcquireSysProcAttrSurvivesClose(t *testing.T) {
+	root := fakeCgroupRoot(t)
+	pool, err := NewWorkerPool(&WorkerPoolOptions{
+		Parallelism:       1,
+		NumCPUs:           2,
+		MemPerWorkerBytes: 1 << 30,
+		TotalMemBytes:     1 << 30,
+		CgroupRoot:        root,
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+
+	attr, release := pool.AcquireSysProcAttr(0)
+	if attr == nil || !attr.UseCgroupFD {
+		t.Fatalf("expected valid SysProcAttr with UseCgroupFD, got %+v", attr)
+	}
+	flags, err := unix.FcntlInt(uintptr(attr.CgroupFD), unix.F_GETFD, 0)
+	if err != nil {
+		release()
+		t.Fatalf("F_GETFD on acquired dup fd: %v", err)
+	}
+	if flags&unix.FD_CLOEXEC == 0 {
+		release()
+		t.Fatalf("acquired dup fd %d missing FD_CLOEXEC", attr.CgroupFD)
+	}
+
+	// Closing the pool must NOT invalidate the caller's owned dup FD.
+	pool.Close()
+	if _, err := unix.FcntlInt(uintptr(attr.CgroupFD), unix.F_GETFD, 0); err != nil {
+		release()
+		t.Fatalf("pool.Close() closed the caller's owned dup FD %d: %v", attr.CgroupFD, err)
+	}
+
+	// Releasing must close the dup FD and be idempotent.
+	release()
+	release()
+	if _, err := unix.FcntlInt(uintptr(attr.CgroupFD), unix.F_GETFD, 0); err == nil {
+		t.Fatalf("expected dup FD %d to be closed after release()", attr.CgroupFD)
+	}
+
+	// Acquiring after Close must return nil, noop.
+	attr2, release2 := pool.AcquireSysProcAttr(0)
+	release2()
+	if attr2 != nil {
+		t.Fatalf("expected nil SysProcAttr after Close, got %+v", attr2)
+	}
+}
+
+func TestWorkerPool_CloseRetriesTransientEBUSY(t *testing.T) {
+	root := fakeCgroupRoot(t)
+	pool, err := NewWorkerPool(&WorkerPoolOptions{
+		Parallelism:       1,
+		NumCPUs:           2,
+		MemPerWorkerBytes: 1 << 30,
+		TotalMemBytes:     1 << 30,
+		CgroupRoot:        root,
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+
+	workerDir := pool.workers[0].dir
+	parentDir := pool.parentDir
+
+	// Empty the fake dirs so os.Remove succeeds once simulated EBUSY clears.
+	entries, err := os.ReadDir(workerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		_ = os.Remove(filepath.Join(workerDir, e.Name()))
+	}
+	_ = os.Remove(filepath.Join(parentDir, "cgroup.subtree_control"))
+
+	origRemove := cgroupRemoveFunc
+	origDelay := cgroupRemoveRetryDelay
+	cgroupRemoveRetryDelay = time.Millisecond
+	var workerAttempts int
+	cgroupRemoveFunc = func(path string) error {
+		if path == workerDir {
+			workerAttempts++
+			if workerAttempts < 3 {
+				return &os.PathError{Op: "remove", Path: path, Err: syscall.EBUSY}
+			}
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() {
+		cgroupRemoveFunc = origRemove
+		cgroupRemoveRetryDelay = origDelay
+	})
+
+	pool.Close()
+	if workerAttempts != 3 {
+		t.Errorf("workerDir remove attempts = %d, want 3", workerAttempts)
+	}
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Fatalf("workerDir %s still exists after EBUSY retries", workerDir)
+	}
+	if _, err := os.Stat(parentDir); !os.IsNotExist(err) {
+		t.Fatalf("parentDir %s still exists after EBUSY retries", parentDir)
 	}
 }

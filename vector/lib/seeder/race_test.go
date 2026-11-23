@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -298,5 +299,67 @@ func TestParallelSeed_DuplicateSeederNamesReturnsError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
 		t.Fatalf("expected duplicate seeder error, got: %v", err)
+	}
+}
+
+type attrTrackingSeeder struct {
+	*MockSeeder
+	onSeed func(opts *SeedOptions) error
+}
+
+func (a *attrTrackingSeeder) Seed(opts *SeedOptions) error {
+	if a.onSeed != nil {
+		return a.onSeed(opts)
+	}
+	return nil
+}
+
+func TestParallelSeed_AcquireSysProcAttrReleasesFD(t *testing.T) {
+	infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+	paramsMap := map[string]*SeederParams{
+		"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+	}
+
+	var released atomic.Bool
+	var releasedDuringSeed atomic.Bool
+	var seenFD atomic.Int64
+
+	opts := &ParallelSeedOptions{
+		Seeders:      infos,
+		ParamsByName: paramsMap,
+		Parallelism:  1,
+		AcquireSysProcAttr: func(workerIndex int) (*syscall.SysProcAttr, func()) {
+			return &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: 42}, func() {
+				released.Store(true)
+			}
+		},
+		NewSeeder: func(_ *NewSeederOptions) (ISeeder, error) {
+			return &attrTrackingSeeder{
+				MockSeeder: DefaultMockSeeder(),
+				onSeed: func(sopts *SeedOptions) error {
+					if sopts.SysProcAttr != nil {
+						seenFD.Store(int64(sopts.SysProcAttr.CgroupFD))
+					}
+					releasedDuringSeed.Store(released.Load())
+					return nil
+				},
+			}, nil
+		},
+		NewStdoutWriter: noopWriter,
+		NewStderrWriter: noopWriter,
+		PushCleanup:     noopCleanup,
+	}
+
+	if err := ParallelSeed(context.Background(), opts); err != nil {
+		t.Fatalf("ParallelSeed: %v", err)
+	}
+	if seenFD.Load() != 42 {
+		t.Errorf("Seed received CgroupFD = %d, want 42", seenFD.Load())
+	}
+	if releasedDuringSeed.Load() {
+		t.Error("AcquireSysProcAttr release callback ran before Seed completed")
+	}
+	if !released.Load() {
+		t.Error("AcquireSysProcAttr release callback was not called after Seed completed")
 	}
 }

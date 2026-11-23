@@ -3,6 +3,7 @@
 package cgroups
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -17,7 +21,12 @@ const (
 	cpuPeriod           = 100000
 )
 
-var poolSeq atomic.Uint64
+var (
+	poolSeq                atomic.Uint64
+	cgroupRemoveFunc       = os.Remove
+	cgroupRemoveMaxRetries = 10
+	cgroupRemoveRetryDelay = 25 * time.Millisecond
+)
 
 // workerCgroup holds the state for a single per-worker cgroup.
 type workerCgroup struct {
@@ -339,6 +348,52 @@ func (p *WorkerPool) SysProcAttr(workerIndex int) *syscall.SysProcAttr {
 	}
 }
 
+// AcquireSysProcAttr duplicates the worker's cgroup directory file descriptor
+// with FD_CLOEXEC and returns a SysProcAttr together with a release callback
+// that closes the duplicate. Holding an owned duplicate prevents a concurrent
+// WorkerPool.Close() from closing or allowing FD reuse of CgroupFD while a
+// child process is being forked with clone3(CLONE_INTO_CGROUP).
+// Returns (nil, noop) if the pool is nil, closed, or workerIndex is out of range.
+func (p *WorkerPool) AcquireSysProcAttr(workerIndex int) (*syscall.SysProcAttr, func()) {
+	noop := func() {}
+	if p == nil {
+		return nil, noop
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) || p.workers[workerIndex].fd < 0 {
+		return nil, noop
+	}
+	dupFd, err := unix.FcntlInt(uintptr(p.workers[workerIndex].fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, noop
+	}
+	release := sync.OnceFunc(func() {
+		_ = syscall.Close(dupFd)
+	})
+	return &syscall.SysProcAttr{
+		UseCgroupFD: true,
+		CgroupFD:    dupFd,
+	}, release
+}
+
+// removeCgroupDir removes a cgroup directory, retrying briefly only on
+// transient EBUSY while the kernel finishes reaping killed cgroup tasks.
+func removeCgroupDir(dir string) error {
+	var err error
+	for attempt := range cgroupRemoveMaxRetries {
+		err = cgroupRemoveFunc(dir)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		if !errors.Is(err, syscall.EBUSY) || attempt == cgroupRemoveMaxRetries-1 {
+			return err
+		}
+		time.Sleep(cgroupRemoveRetryDelay)
+	}
+	return err
+}
+
 // Close releases all file descriptors and removes the cgroup hierarchy.
 // Calling Close multiple times is safe and retries removal of any cgroup
 // directories that were still busy (EBUSY) on an earlier call.
@@ -365,14 +420,14 @@ func (p *WorkerPool) Close() {
 		if _, err := os.Stat(killPath); err == nil {
 			_ = os.WriteFile(killPath, []byte("1"), 0644)
 		}
-		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+		if err := removeCgroupDir(dir); err != nil {
 			remaining = append(remaining, dir)
 		}
 	}
 	p.staleDirs = remaining
 
 	if p.parentDir != "" {
-		if err := os.Remove(p.parentDir); err == nil || os.IsNotExist(err) {
+		if err := removeCgroupDir(p.parentDir); err == nil {
 			p.parentDir = ""
 		}
 	}

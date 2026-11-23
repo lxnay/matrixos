@@ -36,6 +36,7 @@ const (
 )
 
 type VMDriver struct {
+	ctx      context.Context
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
@@ -75,6 +76,7 @@ func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
 	}
 
 	return &VMDriver{
+		ctx:     ctx,
 		cmd:     cmd,
 		stdin:   stdin,
 		stdout:  stdout,
@@ -209,9 +211,33 @@ func (vm *VMDriver) Wait() error {
 		done := vm.pumpDone
 		vm.mu.Unlock()
 		if done != nil {
-			<-done
+			if vm.ctx != nil {
+				select {
+				case <-done:
+				case <-vm.ctx.Done():
+					// Context cancelled: give the pump up to WaitDelay to drain
+					// naturally, then fall through to cmd.Wait() which closes
+					// StdoutPipe and unblocks the pump even if a descendant kept
+					// stdout open.
+					delay := vm.cmd.WaitDelay
+					if delay <= 0 {
+						delay = 5 * time.Second
+					}
+					timer := time.NewTimer(delay)
+					select {
+					case <-done:
+						timer.Stop()
+					case <-timer.C:
+					}
+				}
+			} else {
+				<-done
+			}
 		}
 		vm.waitErr = vm.cmd.Wait()
+		if done != nil {
+			<-done
+		}
 	})
 	return vm.waitErr
 }
@@ -456,13 +482,45 @@ func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	c.Println("Starting VM in interactive mode...")
 	c.FlushPrinters()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// Wire QEMU directly to stdio so interactive input works and large serial
 	// output never deadlocks on an unread pipe.
-	cmd := exec.Command(qemuSystemBinary(), qemuArgs...)
+	cmd := exec.CommandContext(ctx, qemuSystemBinary(), qemuArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	cmd.WaitDelay = 5 * time.Second
+
+	// Cancel ctx on signal even if SIGINT arrives before cmd.Start().
+	c.PushPreCleanup(cancel)
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start VM: %w", err)
+	}
+
+	var waitOnce sync.Once
+	var waitErr error
+	waitCmd := func() error {
+		waitOnce.Do(func() {
+			waitErr = cmd.Wait()
+		})
+		return waitErr
+	}
+	stopVM := sync.OnceFunc(func() {
+		cancel()
+		_ = waitCmd()
+	})
+	// Register QEMU teardown above temp-disk cleanups so SIGINT/SIGTERM kills
+	// and reaps QEMU before temporary OVMF/test disks are removed.
+	c.PushCleanup(stopVM)
+	defer stopVM()
+
+	if err := waitCmd(); err != nil {
 		return fmt.Errorf("VM exited with error: %w", err)
 	}
 	return nil
@@ -485,14 +543,22 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 		return fmt.Errorf("failed to init VM: %w", err)
 	}
 	vm.display = os.Stdout
-	defer func() {
-		cancel()
-		_ = vm.Close()
-	}()
+	// Cancel ctx on signal even if SIGINT arrives before vm.Start().
+	c.PushPreCleanup(cancel)
 
 	if err := vm.Start(); err != nil {
+		_ = vm.Close()
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
+
+	stopVM := sync.OnceFunc(func() {
+		cancel()
+		_ = vm.Close()
+	})
+	// Guard started QEMU under SignalGuard so SIGINT/SIGTERM kills and reaps
+	// it before tempDir/testImagePath/extraDiskPath are removed.
+	c.PushCleanup(stopVM)
+	defer stopVM()
 
 	startTime := time.Now()
 
