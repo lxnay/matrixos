@@ -94,7 +94,9 @@ func TestCommitAndListPackages(t *testing.T) {
 
 func TestListPackagesErrors(t *testing.T) {
 	cfg := &config.MockConfig{
-		Items: map[string][]string{}, // Missing ReadOnlyVdb
+		Items: map[string][]string{
+			"Ostree.Root": {t.TempDir()},
+		}, // Missing ReadOnlyVdb
 	}
 	o, err := NewOstree(NewOstreeOptions{Config: cfg})
 	if err != nil {
@@ -102,17 +104,22 @@ func TestListPackagesErrors(t *testing.T) {
 	}
 	if _, err := o.ListPackages("commit"); err == nil {
 		t.Error("ListPackages should fail if ReadOnlyVdb is missing")
+	} else if !strings.Contains(err.Error(), "Releaser.ReadOnlyVdb") {
+		t.Errorf("Expected Releaser.ReadOnlyVdb error, got: %v", err)
 	}
 
 	cfg = &config.MockConfig{
 		Items: map[string][]string{
+			"Ostree.Root":          {t.TempDir()},
 			"Releaser.ReadOnlyVdb": {RwVdbPath},
 		},
 	}
 	o, _ = NewOstree(NewOstreeOptions{Config: cfg})
-	// Sysroot does not exist
+	// Sysroot repo does not exist
 	if _, err := o.ListPackages("commit"); err == nil {
 		t.Error("ListPackages should fail if sysroot/var/db/pkg does not exist")
+	} else if strings.Contains(err.Error(), "Ostree.Root") {
+		t.Errorf("Expected repo/ostree failure rather than missing Ostree.Root, got: %v", err)
 	}
 }
 

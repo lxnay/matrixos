@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -359,7 +360,10 @@ func TestImagerCleanup_RetainsTmpDirWhenActiveMountRemains(t *testing.T) {
 	im.SetStdout(io.Discard)
 	im.SetStderr(io.Discard)
 
-	tmpDir := t.TempDir()
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	marker := tmpDir + "/keep.txt"
 	if err := os.WriteFile(marker, []byte("precious"), 0644); err != nil {
 		t.Fatal(err)
@@ -389,7 +393,10 @@ func TestImagerCleanup_RetainsTmpDirWhenActiveMountRemains(t *testing.T) {
 
 func TestImagerCleanup_UnmountsLateReTrackedMountBeforeRemovingTmpDir(t *testing.T) {
 	cfg := baseImageConfig()
-	tmpDir := t.TempDir()
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	marker := tmpDir + "/data.txt"
 	if err := os.WriteFile(marker, []byte("mounted-data"), 0644); err != nil {
 		t.Fatal(err)
@@ -515,7 +522,10 @@ func TestImagerMount_RefusesMountAfterPriorCleanupCompleted(t *testing.T) {
 
 func TestImagerCleanup_WaitsForInFlightMountBeforeRemovingTmpDir(t *testing.T) {
 	cfg := baseImageConfig()
-	tmpDir := t.TempDir()
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	marker := tmpDir + "/live.txt"
 	if err := os.WriteFile(marker, []byte("precious"), 0644); err != nil {
 		t.Fatal(err)

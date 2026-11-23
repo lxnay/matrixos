@@ -216,7 +216,7 @@ func TestPrepareFilesystemHierarchyEdgeCases(t *testing.T) {
 
 		cfg := &config.MockConfig{
 			Items: map[string][]string{
-				"Releaser.ReadOnlyVdb": {RwVdbPath},
+				"Releaser.ReadOnlyVdb": {"/usr/var-db-pkg"},
 				"Imager.EfiRoot":       {"/efi"},
 			},
 		}
@@ -226,6 +226,8 @@ func TestPrepareFilesystemHierarchyEdgeCases(t *testing.T) {
 		}
 		if err := o.PrepareFilesystemHierarchy(imageDir); err == nil {
 			t.Error("Expected error for invalid home symlink")
+		} else if !strings.Contains(err.Error(), "home symlink invalid") {
+			t.Errorf("Expected 'home symlink invalid' error, got: %v", err)
 		}
 	})
 }
