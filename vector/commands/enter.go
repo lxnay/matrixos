@@ -5,11 +5,44 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/seeder"
 )
+
+// normalizeChrootPath returns a canonical path for comparing and entering
+// chroot directories. It converts relative paths to absolute paths (which
+// also runs filepath.Clean to strip trailing slashes, collapse duplicate
+// slashes, and resolve "." / "..") and resolves symlinks (e.g. /home ->
+// /var/home on OSTree hosts) when the path exists on disk.
+func normalizeChrootPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = filepath.Clean(p)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return abs
+	}
+	return resolved
+}
+
+// containsNormalizedPath reports whether target (already normalized) matches
+// any non-empty path in paths after normalization.
+func containsNormalizedPath(paths []string, target string) bool {
+	if target == "" {
+		return false
+	}
+	for _, p := range paths {
+		if p != "" && normalizeChrootPath(p) == target {
+			return true
+		}
+	}
+	return false
+}
 
 // EnterCommand enters a seeded chroot interactively.
 type EnterCommand struct {
@@ -145,13 +178,17 @@ func (c *EnterCommand) run() error {
 	completeChrootDirs := make(map[string]bool)
 	for _, params := range seedersParams {
 		for _, dir := range params.CompleteChrootDirs {
-			completeChrootDirs[dir] = true
+			if norm := normalizeChrootPath(dir); norm != "" {
+				completeChrootDirs[norm] = true
+			}
 		}
 	}
 	partialChrootDirs := make(map[string]bool)
 	for _, params := range seedersParams {
 		for _, dir := range params.PartialChrootDirs {
-			partialChrootDirs[dir] = true
+			if norm := normalizeChrootPath(dir); norm != "" {
+				partialChrootDirs[norm] = true
+			}
 		}
 	}
 
@@ -175,17 +212,18 @@ func (c *EnterCommand) run() error {
 			}
 		}
 
-		if completeChrootDirs[target] {
-			chrootDirs = append(chrootDirs, target)
+		normTarget := normalizeChrootPath(target)
+		if completeChrootDirs[normTarget] {
+			chrootDirs = append(chrootDirs, normTarget)
 			continue
 		}
-		if partialChrootDirs[target] {
-			chrootDirs = append(chrootDirs, target)
+		if partialChrootDirs[normTarget] {
+			chrootDirs = append(chrootDirs, normTarget)
 			continue
 		}
 
-		if filesystems.DirectoryExists(target) {
-			chrootDirs = append(chrootDirs, target)
+		if filesystems.DirectoryExists(normTarget) {
+			chrootDirs = append(chrootDirs, normTarget)
 			continue
 		}
 
@@ -238,15 +276,16 @@ func (c *EnterCommand) resolveNames(sps SeedersParams, names []string) ([]string
 	var chrootsDirs []string
 	for _, info := range c.detected {
 		params, ok := sps[info.Name]
-		if !ok {
+		if !ok || params == nil {
 			continue
 		}
 		if params.ChrootsDir == "" {
 			continue
 		}
-		if !seen[params.ChrootsDir] {
-			seen[params.ChrootsDir] = true
-			chrootsDirs = append(chrootsDirs, params.ChrootsDir)
+		normDir := normalizeChrootPath(params.ChrootsDir)
+		if !seen[normDir] {
+			seen[normDir] = true
+			chrootsDirs = append(chrootsDirs, normDir)
 		}
 	}
 
@@ -255,7 +294,7 @@ func (c *EnterCommand) resolveNames(sps SeedersParams, names []string) ([]string
 	resolvedSeen := make(map[string]bool)
 	for _, name := range names {
 		for _, dir := range chrootsDirs {
-			candidate := filepath.Join(dir, name)
+			candidate := normalizeChrootPath(filepath.Join(dir, name))
 			if resolvedSeen[candidate] {
 				continue
 			}
@@ -271,6 +310,7 @@ func (c *EnterCommand) resolveNames(sps SeedersParams, names []string) ([]string
 
 // enter runs an interactive shell inside the chroot, and tears down mounts afterwards.
 func (c *EnterCommand) enter(sd seeder.ISeeder, seedersParams SeedersParams, chrootDir string) error {
+	chrootDir = normalizeChrootPath(chrootDir)
 	name := filepath.Base(chrootDir)
 	c.SetupPrinters(name)
 	defer c.FlushPrinters()
@@ -286,6 +326,8 @@ func (c *EnterCommand) enter(sd seeder.ISeeder, seedersParams SeedersParams, chr
 }
 
 func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, seedersParams SeedersParams, chrootDir string) error {
+	normChrootDir := normalizeChrootPath(chrootDir)
+
 	// Find the corresponding seeder chroot dir matching it with chrootDir.
 	var si seeder.SeederInfo
 	var found bool
@@ -294,18 +336,9 @@ func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, seedersParams SeedersPara
 		if !ok || params == nil {
 			continue
 		}
-		if slices.Contains(params.CompleteChrootDirs, chrootDir) {
-			found = true
-			si = info // copy
-			break
-		}
-		if slices.Contains(params.PartialChrootDirs, chrootDir) {
-			found = true
-			si = info // copy
-			break
-		}
-		if params.PreferredChrootDir == chrootDir {
-			// Last ditch attempt.
+		if containsNormalizedPath(params.CompleteChrootDirs, normChrootDir) ||
+			containsNormalizedPath(params.PartialChrootDirs, normChrootDir) ||
+			(params.PreferredChrootDir != "" && normalizeChrootPath(params.PreferredChrootDir) == normChrootDir) {
 			found = true
 			si = info // copy
 			break
@@ -314,7 +347,7 @@ func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, seedersParams SeedersPara
 	if !found {
 		return fmt.Errorf(
 			"no valid seeder chroot found for chroot dir %s. Try with --skiplock and full chroot path.",
-			chrootDir,
+			normChrootDir,
 		)
 	}
 
@@ -327,7 +360,7 @@ func (c *EnterCommand) chrootWorker(sd seeder.ISeeder, seedersParams SeedersPara
 	si.ChrootChrootArgs = []string{"--login"}
 
 	opts := &seeder.SeedOptions{
-		ChrootDir: chrootDir,
+		ChrootDir: normChrootDir,
 		Info:      si,
 		Env:       env,
 		Stdin:     os.Stdin,

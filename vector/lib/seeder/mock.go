@@ -41,6 +41,7 @@ type MockSeeder struct {
 	SetupChrootDNSCalled             bool
 	SetupChrootDirsCalled            bool
 	SeedCalled                       bool
+	SeedOpts                         []*SeedOptions
 	PostBuildCalled                  bool
 	MarkSeederDoneCalled             bool
 	ExecuteWithSeederLockCalled      bool
@@ -110,8 +111,9 @@ func (m *MockSeeder) SetupChrootDirs(chrootDir string) error {
 	return m.SetupChrootDirsErr
 }
 
-func (m *MockSeeder) Seed(*SeedOptions) error {
+func (m *MockSeeder) Seed(opts *SeedOptions) error {
 	m.SeedCalled = true
+	m.SeedOpts = append(m.SeedOpts, opts)
 	return m.SeedErr
 }
 
