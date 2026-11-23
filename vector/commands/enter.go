@@ -5,35 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/seeder"
 )
 
 // normalizeChrootPath returns a canonical path for comparing and entering
-// chroot directories. Relative paths are anchored against the working
-// directory without pre-cleaning so "<symlink>/.." expands in POSIX order
-// via filepath.EvalSymlinks (e.g. /home -> /var/home on OSTree hosts),
-// falling back to filepath.Clean when the path does not exist on disk.
+// chroot directories (e.g. /home -> /var/home on OSTree hosts).
 func normalizeChrootPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if !filepath.IsAbs(p) {
-		if wd, err := os.Getwd(); err == nil {
-			if strings.HasSuffix(wd, string(filepath.Separator)) {
-				p = wd + p
-			} else {
-				p = wd + string(filepath.Separator) + p
-			}
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return filepath.Clean(p)
-	}
-	return resolved
+	return filesystems.CanonicalPath(p)
 }
 
 // containsNormalizedPath reports whether target (already normalized) matches

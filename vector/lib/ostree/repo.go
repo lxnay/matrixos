@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+
+	"matrixos/vector/lib/filesystems"
 )
 
 var (
@@ -15,36 +17,11 @@ var (
 	repoLocks   = make(map[string]*sync.Mutex)
 )
 
-// canonicalRepoKey returns a canonical absolute path key for LockRepo,
-// resolving symlinks on repoDir or its nearest existing ancestor.
-func canonicalRepoKey(repoDir string) string {
-	if repoDir == "" {
-		return ""
-	}
-	if resolved, err := filepath.EvalSymlinks(repoDir); err == nil {
-		if filepath.IsAbs(resolved) {
-			return resolved
-		}
-		if abs, err := filepath.Abs(resolved); err == nil {
-			return canonicalRepoKey(abs)
-		}
-		return resolved
-	}
-	abs, err := filepath.Abs(repoDir)
-	if err != nil {
-		return filepath.Clean(repoDir)
-	}
-	if dir := filepath.Dir(abs); dir != abs {
-		return filepath.Join(canonicalRepoKey(dir), filepath.Base(abs))
-	}
-	return abs
-}
-
 // LockRepo acquires an exclusive in-process lock for repoDir and returns its
 // unlock function. This serializes ostree repository mutations (init, remote
 // setup, commit, prune, static-delta, summary) across concurrent workers.
 func LockRepo(repoDir string) func() {
-	key := canonicalRepoKey(repoDir)
+	key := filesystems.CanonicalPath(repoDir)
 	repoLocksMu.Lock()
 	mu, ok := repoLocks[key]
 	if !ok {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -156,29 +155,9 @@ func isPathUnderMount(path, mountpoint string) bool {
 	return path == mountpoint || strings.HasPrefix(path, mountpoint+"/")
 }
 
-// resolvePath returns the canonical absolute path with symlinks resolved in
-// POSIX order. Relative paths are anchored against the working directory
-// without lexical cleaning beforehand so "<symlink>/.." expands the symlink
-// before traversing "..". If symlink resolution fails (e.g. the path does not
-// exist), it falls back to filepath.Clean on the absolutized path.
+// resolvePath returns the canonical absolute path with symlinks resolved.
 func resolvePath(p string) string {
-	if p == "" {
-		return ""
-	}
-	if !filepath.IsAbs(p) {
-		if wd, err := os.Getwd(); err == nil {
-			if strings.HasSuffix(wd, string(filepath.Separator)) {
-				p = wd + p
-			} else {
-				p = wd + string(filepath.Separator) + p
-			}
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return filepath.Clean(p)
-	}
-	return resolved
+	return CanonicalPath(p)
 }
 
 // exactMountForPath returns the topmost entry whose mountpoint equals resolved,

@@ -181,17 +181,12 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	// in-flight luksFormat before returning (preventing Imager.Cleanup from
 	// detaching the underlying loop device mid-format) and so luksFormat cannot
 	// start after Cleanup() has already run.
-	var formatClosedErr error
-	var closedDuringFormat bool
-	err = func() error {
-		f.openMu.Lock()
-		defer f.openMu.Unlock()
-		if f.closed.Load() {
-			formatClosedErr = fmt.Errorf("cleanup already ran; refusing to format LUKS device %s", devicePath)
-			return nil
-		}
-		fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
-		runErr := f.runner(&runner.Cmd{
+	if err := f.runUnderOpenLock(
+		fmt.Sprintf("cleanup already ran; refusing to format LUKS device %s", devicePath),
+		fmt.Sprintf("cryptsetup luksFormat failed on %s", devicePath),
+		fmt.Sprintf("cleanup interrupted LUKS format on %s", devicePath),
+		func() { fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath) },
+		&runner.Cmd{
 			Name: "cryptsetup",
 			Args: []string{
 				"-c",
@@ -205,18 +200,9 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 			Stdin:  stdin,
 			Stdout: stdout,
 			Stderr: stderr,
-		})
-		closedDuringFormat = f.closed.Load()
-		return runErr
-	}()
-	if formatClosedErr != nil {
-		return formatClosedErr
-	}
-	if err != nil {
-		return fmt.Errorf("cryptsetup luksFormat failed on %s: %w", devicePath, err)
-	}
-	if closedDuringFormat || f.closed.Load() {
-		return fmt.Errorf("cleanup interrupted LUKS format on %s", devicePath)
+		},
+	); err != nil {
+		return err
 	}
 
 	// Re-create stdin for the open command if the key is not a file.
@@ -235,17 +221,12 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	}
 	// Hold openMu across closed-check, tracking, and cryptsetup open so a
 	// concurrent Cleanup() cannot race with open and leak /dev/mapper/<luksName>.
-	var closedErr error
-	var closedDuringOpen bool
-	err = func() error {
-		f.openMu.Lock()
-		defer f.openMu.Unlock()
-		if f.closed.Load() {
-			closedErr = fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
-			return nil
-		}
-		f.openMappers = append(f.openMappers, luksName)
-		runErr := f.runner(&runner.Cmd{
+	if err := f.runUnderOpenLock(
+		fmt.Sprintf("cleanup already ran; refusing to open LUKS device %s", luksName),
+		fmt.Sprintf("cryptsetup open failed on %s", devicePath),
+		fmt.Sprintf("cleanup interrupted LUKS open for %s", luksName),
+		func() { f.openMappers = append(f.openMappers, luksName) },
+		&runner.Cmd{
 			Name: "cryptsetup",
 			Args: []string{
 				"open",
@@ -257,18 +238,9 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 			Stdin:  stdin,
 			Stdout: stdout,
 			Stderr: stderr,
-		})
-		closedDuringOpen = f.closed.Load()
-		return runErr
-	}()
-	if closedErr != nil {
-		return closedErr
-	}
-	if err != nil {
-		return fmt.Errorf("cryptsetup open failed on %s: %w", devicePath, err)
-	}
-	if closedDuringOpen || f.closed.Load() {
-		return fmt.Errorf("cleanup interrupted LUKS open for %s", luksName)
+		},
+	); err != nil {
+		return err
 	}
 
 	if f.opened != nil {
@@ -286,6 +258,24 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 		return fmt.Errorf("cleanup interrupted LUKS open for %s", luksName)
 	}
 
+	return nil
+}
+
+func (f *Fsenc) runUnderOpenLock(refuseMsg, failPrefix, interruptMsg string, beforeRun func(), cmd *runner.Cmd) error {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
+	if f.closed.Load() {
+		return errors.New(refuseMsg)
+	}
+	if beforeRun != nil {
+		beforeRun()
+	}
+	if err := f.runner(cmd); err != nil {
+		return fmt.Errorf("%s: %w", failPrefix, err)
+	}
+	if f.closed.Load() {
+		return errors.New(interruptMsg)
+	}
 	return nil
 }
 

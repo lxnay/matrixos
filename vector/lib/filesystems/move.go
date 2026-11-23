@@ -92,27 +92,10 @@ func isSameEntry(srcInfo os.FileInfo, dst string) bool {
 	return err == nil && os.SameFile(srcInfo, dstInfo)
 }
 
-// canonicalAbs resolves symlinks on the deepest existing ancestor of p and
-// returns a clean absolute path for directory containment checks.
-func canonicalAbs(p string) string {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		abs = filepath.Clean(p)
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
-	}
-	dir := filepath.Dir(abs)
-	if dir != abs {
-		return filepath.Join(canonicalAbs(dir), filepath.Base(abs))
-	}
-	return abs
-}
-
 // isSameOrSubpath reports whether dst equals src or lies beneath src.
 func isSameOrSubpath(src, dst string) bool {
-	cSrc := canonicalAbs(src)
-	cDst := canonicalAbs(dst)
+	cSrc := CanonicalPath(src)
+	cDst := CanonicalPath(dst)
 	if cSrc == cDst {
 		return true
 	}
