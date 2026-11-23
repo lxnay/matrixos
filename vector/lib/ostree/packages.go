@@ -186,7 +186,8 @@ func (o *Ostree) ListPackages(commit string) ([]string, error) {
 
 func (o *Ostree) listPackagesFromPath(root, path, commit string) ([]string, error) {
 	repoDir := filepath.Join(root, "ostree", "repo")
-	vardbpkg := filepath.Join(root, path)
+	// path is inside the OSTree commit tree (e.g. /var/db/pkg), NOT on the host root.
+	vardbpkg := filepath.Clean("/" + path)
 
 	pis, err := o.listContentsOfPath(commit, repoDir, vardbpkg)
 	if err != nil {

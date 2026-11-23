@@ -415,3 +415,66 @@ func TestPrepareFilesystemHierarchy_RejectsRootAndEmpty(t *testing.T) {
 		t.Fatalf("expected root safety error for '/', got: %v", err)
 	}
 }
+
+func TestOstree_LocalAndRemoteRefsSerializeWithLockRepo(t *testing.T) {
+	repoDir := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Ostree.RepoDir":   {repoDir},
+			"Ostree.Remote":    {"origin"},
+			"Ostree.RemoteUrl": {"http://example.com"},
+		},
+		Bools: map[string]bool{
+			"Ostree.Gpg": false,
+		},
+	}
+
+	var inFlight, maxInFlight atomic.Int32
+	mockRunner := func(cmd *runner.Cmd) error {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxInFlight.Load()
+			if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+		inFlight.Add(-1)
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if err := o.AddRemote(); err != nil {
+			t.Errorf("AddRemote: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if _, err := o.LocalRefs(); err != nil {
+			t.Errorf("LocalRefs: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if _, err := o.RemoteRefs(); err != nil {
+			t.Errorf("RemoteRefs: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > 1 {
+		t.Fatalf("LocalRefs/RemoteRefs overlapped with AddRemote on same repo: maxInFlight = %d, want 1", got)
+	}
+}

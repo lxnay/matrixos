@@ -381,6 +381,8 @@ func (o *Ostree) LocalRefs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.listLocalRefsFromRepo(repoDir)
 }
 
@@ -393,6 +395,8 @@ func (o *Ostree) RemoteRefs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.listRemoteRefsFromRepo(repoDir, remote)
 }
 

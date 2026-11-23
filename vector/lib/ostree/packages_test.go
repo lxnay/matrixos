@@ -14,28 +14,23 @@ import (
 func TestCommitAndListPackages(t *testing.T) {
 	repoDir := setupTestRepo(t)
 
-	// Create root first — we need its resolved path to lay out the commit content
-	// so that the in-commit paths match what ListPackages looks up via
-	// filepath.Join(root, RwVdbPath).
 	root := t.TempDir()
-	// Resolve symlinks (e.g. /tmp -> sysroot/tmp) so ostree can traverse the path.
+	// Resolve symlinks (e.g. /tmp -> sysroot/tmp) so ostree can traverse the repo path.
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Create content to commit.
-	// listPackagesFromPath runs: ostree ls -R commit -- <root>/var/db/pkg
-	// so the commit tree must contain the package data at that absolute path.
+	// Create content to commit at the commit root (e.g. /var/db/pkg/...) —
+	// listPackagesFromPath must query the in-commit path even when Ostree.Root
+	// is a non-"/" directory.
 	contentDir := t.TempDir()
 	contentDir, err = filepath.EvalSymlinks(contentDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Strip the leading separator so filepath.Join works correctly.
-	relRoot := strings.TrimPrefix(root, string(filepath.Separator))
-	pkgDir := filepath.Join(contentDir, relRoot, RwVdbPath, "sys-apps", "systemd")
+	pkgDir := filepath.Join(contentDir, RwVdbPath, "sys-apps", "systemd")
 	if err := os.MkdirAll(pkgDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +153,47 @@ d00755 0 0 0 abc abc /var/db/pkg/cat/other
 	}
 	if pkgs[0] != "cat/other" || pkgs[1] != "cat/pkg" {
 		t.Errorf("Unexpected packages: %v", pkgs)
+	}
+}
+
+func TestListPackages_NonRootOstreeRootUsesInCommitPath(t *testing.T) {
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Releaser.ReadOnlyVdb": {"/usr/lib/portage/vdb"},
+			"Ostree.Root":          {"/sysroot"},
+		},
+	}
+	o, err := NewOstree(NewOstreeOptions{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewOstree failed: %v", err)
+	}
+
+	var seenRepoArg, seenPathArg string
+	o.runner = func(cmd *runner.Cmd) error {
+		for _, a := range cmd.Args {
+			if strings.HasPrefix(a, "--repo=") {
+				seenRepoArg = a
+			}
+		}
+		if len(cmd.Args) > 0 {
+			seenPathArg = cmd.Args[len(cmd.Args)-1]
+		}
+		_, _ = cmd.Stdout.Write([]byte("d00755 0 0 0 aaa bbb /usr/lib/portage/vdb/sys-apps/systemd\n"))
+		return nil
+	}
+
+	pkgs, err := o.ListPackages("deadbeef")
+	if err != nil {
+		t.Fatalf("ListPackages failed: %v", err)
+	}
+	if seenRepoArg != "--repo=/sysroot/ostree/repo" {
+		t.Errorf("repo arg = %q, want --repo=/sysroot/ostree/repo", seenRepoArg)
+	}
+	if seenPathArg != "/usr/lib/portage/vdb" {
+		t.Errorf("in-commit path arg = %q, want /usr/lib/portage/vdb (host root must not be prepended to commit path)", seenPathArg)
+	}
+	if len(pkgs) != 1 || pkgs[0] != "sys-apps/systemd" {
+		t.Errorf("pkgs = %v, want [sys-apps/systemd]", pkgs)
 	}
 }
 
