@@ -188,6 +188,19 @@ func (im *Imager) trackLoopDeviceIfOpen(loop *filesystems.Loop) bool {
 	return true
 }
 
+// beginTrackedOp increments inFlightOps and reports true only if Cleanup() has
+// not started or already completed. When it returns true, the caller MUST
+// invoke finishTrackedOp() before returning or calling Cleanup().
+func (im *Imager) beginTrackedOp() bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	if im.cleaning || im.cleanupGen > 0 {
+		return false
+	}
+	im.inFlightOps.Add(1)
+	return true
+}
+
 // cleanupActiveOrRan reports whether Cleanup() is currently running or has
 // already run at least once on this Imager instance.
 func (im *Imager) cleanupActiveOrRan() bool {

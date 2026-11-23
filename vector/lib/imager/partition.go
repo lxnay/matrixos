@@ -66,6 +66,25 @@ func (im *Imager) runCmd(name string, args ...string) error {
 	})
 }
 
+// runTrackedDeviceOp executes a destructive partitioning or formatting
+// operation while holding an in-flight reservation so Cleanup() waits for it
+// before detaching loop devices or closing LUKS mappers, and refuses to start
+// once Cleanup() has started or completed.
+func (im *Imager) runTrackedDeviceOp(opDesc string, fn func() error) error {
+	if !im.beginTrackedOp() {
+		return fmt.Errorf("cleanup already ran; refusing to %s", opDesc)
+	}
+	defer im.finishTrackedOp()
+
+	if err := fn(); err != nil {
+		return err
+	}
+	if im.cleanupActiveOrRan() {
+		return fmt.Errorf("cleanup interrupted %s", opDesc)
+	}
+	return nil
+}
+
 func (im *Imager) mountPartition(device, missingDeviceMsg, mountPoint, missingMountMsg string, mountArgs []string, dest *string) error {
 	if device == "" {
 		return errors.New(missingDeviceMsg)
@@ -105,11 +124,13 @@ func (im *Imager) ClearPartitionTable() error {
 		return errors.New("missing devicePath, not set in NewImagerOptions")
 	}
 
-	im.Print("Clearing partition table on %s ...\n", im.devicePath)
-	if err := im.runCmd("sgdisk", "-g", "-o", im.devicePath); err != nil {
-		return fmt.Errorf("sgdisk -g -o failed on %s: %w", im.devicePath, err)
-	}
-	return im.runCmd("sgdisk", "-Z", im.devicePath)
+	return im.runTrackedDeviceOp("clear partition table on "+im.devicePath, func() error {
+		im.Print("Clearing partition table on %s ...\n", im.devicePath)
+		if err := im.runCmd("sgdisk", "-g", "-o", im.devicePath); err != nil {
+			return fmt.Errorf("sgdisk -g -o failed on %s: %w", im.devicePath, err)
+		}
+		return im.runCmd("sgdisk", "-Z", im.devicePath)
+	})
 }
 
 func (im *Imager) DatedFsLabel() string {
@@ -143,53 +164,55 @@ func (im *Imager) PartitionDevices(efiSize, bootSize, imageSize string) error {
 		return err
 	}
 
-	im.Print("Partitioning %s:\n", im.devicePath)
-	im.Print(" --> p1 (EFI: %s)\n", efiSize)
-	im.Print(" --> p2 (BOOT: %s)\n", bootSize)
-	im.Print(" --> p3 (ROOT: Remainder of %s, plus autogrow)\n", imageSize)
+	return im.runTrackedDeviceOp("partition "+im.devicePath, func() error {
+		im.Print("Partitioning %s:\n", im.devicePath)
+		im.Print(" --> p1 (EFI: %s)\n", efiSize)
+		im.Print(" --> p2 (BOOT: %s)\n", bootSize)
+		im.Print(" --> p3 (ROOT: Remainder of %s, plus autogrow)\n", imageSize)
 
-	// Create EFI partition.
-	if err := im.runCmd(
-		"sgdisk",
-		"-n", fmt.Sprintf("1:0:+%s", efiSize),
-		"-t", fmt.Sprintf("1:%s", espPartType),
-		im.devicePath,
-	); err != nil {
-		return fmt.Errorf("sgdisk EFI partition failed: %w", err)
-	}
+		// Create EFI partition.
+		if err := im.runCmd(
+			"sgdisk",
+			"-n", fmt.Sprintf("1:0:+%s", efiSize),
+			"-t", fmt.Sprintf("1:%s", espPartType),
+			im.devicePath,
+		); err != nil {
+			return fmt.Errorf("sgdisk EFI partition failed: %w", err)
+		}
 
-	// Create boot partition.
-	if err := im.runCmd(
-		"sgdisk",
-		"-n", fmt.Sprintf("2:0:+%s", bootSize),
-		"-t", fmt.Sprintf("2:%s", bootPartType),
-		im.devicePath,
-	); err != nil {
-		return fmt.Errorf("sgdisk boot partition failed: %w", err)
-	}
+		// Create boot partition.
+		if err := im.runCmd(
+			"sgdisk",
+			"-n", fmt.Sprintf("2:0:+%s", bootSize),
+			"-t", fmt.Sprintf("2:%s", bootPartType),
+			im.devicePath,
+		); err != nil {
+			return fmt.Errorf("sgdisk boot partition failed: %w", err)
+		}
 
-	// Create root partition with -10M padding for systemd-repart.
-	if err := im.runCmd(
-		"sgdisk",
-		"-n", "3:0:-10M",
-		"-t", fmt.Sprintf("3:%s", rootPartType),
-		im.devicePath,
-	); err != nil {
-		return fmt.Errorf("sgdisk root partition failed: %w", err)
-	}
+		// Create root partition with -10M padding for systemd-repart.
+		if err := im.runCmd(
+			"sgdisk",
+			"-n", "3:0:-10M",
+			"-t", fmt.Sprintf("3:%s", rootPartType),
+			im.devicePath,
+		); err != nil {
+			return fmt.Errorf("sgdisk root partition failed: %w", err)
+		}
 
-	// Set the auto-grow flag (bit 59) on partition 3.
-	if err := im.runCmd("sgdisk", "-A", "3:set:59", im.devicePath); err != nil {
-		return fmt.Errorf("sgdisk set auto-grow flag failed: %w", err)
-	}
+		// Set the auto-grow flag (bit 59) on partition 3.
+		if err := im.runCmd("sgdisk", "-A", "3:set:59", im.devicePath); err != nil {
+			return fmt.Errorf("sgdisk set auto-grow flag failed: %w", err)
+		}
 
-	im.Print("Refreshing partition table ...\n")
-	if err := im.runCmd("partprobe", "-s", im.devicePath); err != nil {
-		return fmt.Errorf("partprobe failed: %w", err)
-	}
+		im.Print("Refreshing partition table ...\n")
+		if err := im.runCmd("partprobe", "-s", im.devicePath); err != nil {
+			return fmt.Errorf("partprobe failed: %w", err)
+		}
 
-	filesystems.DevicesSettle()
-	return nil
+		filesystems.DevicesSettle()
+		return nil
+	})
 }
 
 func (im *Imager) FormatEfifs() error {
@@ -197,9 +220,11 @@ func (im *Imager) FormatEfifs() error {
 		return errors.New("missing efiDevice, not set in NewImagerOptions")
 	}
 
-	im.Print("Creating EFI partition on %s\n", im.efiDevice)
-	label := "ME" + im.DatedFsLabel()
-	return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.efiDevice)
+	return im.runTrackedDeviceOp("format EFI on "+im.efiDevice, func() error {
+		im.Print("Creating EFI partition on %s\n", im.efiDevice)
+		label := "ME" + im.DatedFsLabel()
+		return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.efiDevice)
+	})
 }
 
 func (im *Imager) MountEfifs(mountEfifs string) error {
@@ -234,11 +259,15 @@ func (im *Imager) FormatBootfs() error {
 	label := "MB" + im.DatedFsLabel()
 	switch fsType {
 	case "btrfs":
-		im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
-		return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.bootDevice)
+		return im.runTrackedDeviceOp("format boot on "+im.bootDevice, func() error {
+			im.Print("Creating btrfs on %s (boot)\n", im.bootDevice)
+			return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.bootDevice)
+		})
 	case "vfat":
-		im.Print("Creating vfat on %s (boot)\n", im.bootDevice)
-		return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.bootDevice)
+		return im.runTrackedDeviceOp("format boot on "+im.bootDevice, func() error {
+			im.Print("Creating vfat on %s (boot)\n", im.bootDevice)
+			return im.runCmd("mkfs.vfat", "-F", "32", "-n", label, im.bootDevice)
+		})
 	default:
 		return fmt.Errorf("unsupported boot filesystem type %q: must be btrfs or vfat", fsType)
 	}
@@ -274,6 +303,9 @@ func (im *Imager) MaybeEncryptRootfs() error {
 
 	// Get the current root device.
 	rootDevice := im.RootDevice()
+	if im.cleanupActiveOrRan() {
+		return fmt.Errorf("cleanup already ran; refusing to encrypt rootfs %s", rootDevice)
+	}
 	im.realRootDevice = rootDevice
 
 	encRootfsName, err := im.fsenc.EncryptedRootFsName()
@@ -284,8 +316,14 @@ func (im *Imager) MaybeEncryptRootfs() error {
 	if err != nil {
 		return err
 	}
+	// Do not hold inFlightOps across LuksEncrypt so a concurrent Cleanup() can
+	// invoke fsenc.Cleanup() to abort between luksFormat and cryptsetup open.
 	if err := im.fsenc.LuksEncrypt(im.rootDevice, luksDevice); err != nil {
 		return fmt.Errorf("LUKS encryption failed: %w", err)
+	}
+	if im.cleanupActiveOrRan() {
+		im.Cleanup()
+		return fmt.Errorf("cleanup interrupted LUKS encryption of %s", rootDevice)
 	}
 	im.SetRootDevice(luksDevice)
 	im.Print("New encrypted rootfs partition: %s\n", luksDevice)
@@ -297,9 +335,11 @@ func (im *Imager) FormatRootfs() error {
 		return errors.New("missing rootDevice, not set in NewImagerOptions")
 	}
 
-	label := "MR" + im.DatedFsLabel()
-	im.Print("Creating btrfs on %s (root)\n", im.rootDevice)
-	return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.rootDevice)
+	return im.runTrackedDeviceOp("format rootfs on "+im.rootDevice, func() error {
+		label := "MR" + im.DatedFsLabel()
+		im.Print("Creating btrfs on %s (root)\n", im.rootDevice)
+		return im.runCmd("mkfs.btrfs", "-f", "-L", label, im.rootDevice)
+	})
 }
 
 func (im *Imager) RootfsKernelArgs() []string {

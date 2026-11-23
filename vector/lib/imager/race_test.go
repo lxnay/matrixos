@@ -144,13 +144,21 @@ func TestImagerCleanup_ClosesFsencBeforeDetachingLoop(t *testing.T) {
 
 type orderTrackingFsenc struct {
 	*filesystems.MockFsenc
-	onCleanup func()
+	onCleanup     func()
+	onLuksEncrypt func()
 }
 
 func (o *orderTrackingFsenc) Cleanup() {
 	if o.onCleanup != nil {
 		o.onCleanup()
 	}
+}
+
+func (o *orderTrackingFsenc) LuksEncrypt(rootDevice, luksDevice string) error {
+	if o.onLuksEncrypt != nil {
+		o.onLuksEncrypt()
+	}
+	return o.MockFsenc.LuksEncrypt(rootDevice, luksDevice)
 }
 
 func TestParallelImage_NonPositiveParallelismReturnsError(t *testing.T) {
@@ -733,6 +741,124 @@ func TestImagerAttachImageLoop_RejectsEmptyDeviceAndHandlesConcurrentCleanup(t *
 		}
 		if dev != "/dev/loop42" {
 			t.Errorf("device = %q, want /dev/loop42", dev)
+		}
+	})
+}
+
+func TestImagerFormatAndPartition_CoordinatesWithCleanup(t *testing.T) {
+	t.Run("RefusesOpsAfterCleanup", func(t *testing.T) {
+		cfg := baseImageConfig()
+		mockFsenc := filesystems.DefaultMockFsenc()
+		mockFsenc.EncryptionEnabled_ = true
+		var luksInvoked atomic.Bool
+		fsenc := &orderTrackingFsenc{
+			MockFsenc:     mockFsenc,
+			onLuksEncrypt: func() { luksInvoked.Store(true) },
+		}
+
+		im, err := NewImager(cfg, &ostree.MockOstree{}, fsenc, nil)
+		if err != nil {
+			t.Fatalf("NewImager: %v", err)
+		}
+		im.SetStdout(io.Discard)
+		im.SetStderr(io.Discard)
+		im.SetDevicePath("/dev/loop9")
+		im.SetEfiDevice("/dev/loop9p1")
+		im.SetBootDevice("/dev/loop9p2")
+		im.SetRootDevice("/dev/loop9p3")
+
+		var cmdInvoked atomic.Bool
+		im.runner = func(cmd *runner.Cmd) error {
+			cmdInvoked.Store(true)
+			return nil
+		}
+
+		im.Cleanup()
+
+		if err := im.ClearPartitionTable(); err == nil {
+			t.Error("ClearPartitionTable succeeded after Cleanup()")
+		}
+		if err := im.PartitionDevices("512M", "1G", "10G"); err == nil {
+			t.Error("PartitionDevices succeeded after Cleanup()")
+		}
+		if err := im.FormatEfifs(); err == nil {
+			t.Error("FormatEfifs succeeded after Cleanup()")
+		}
+		if err := im.FormatBootfs(); err == nil {
+			t.Error("FormatBootfs succeeded after Cleanup()")
+		}
+		if err := im.FormatRootfs(); err == nil {
+			t.Error("FormatRootfs succeeded after Cleanup()")
+		}
+		if err := im.MaybeEncryptRootfs(); err == nil {
+			t.Error("MaybeEncryptRootfs succeeded after Cleanup()")
+		}
+		if cmdInvoked.Load() {
+			t.Fatal("destructive sgdisk/mkfs command executed after Cleanup()")
+		}
+		if luksInvoked.Load() {
+			t.Fatal("fsenc.LuksEncrypt executed after Cleanup()")
+		}
+	})
+
+	t.Run("CleanupWaitsForInFlightFormatBeforeClosingDevices", func(t *testing.T) {
+		cfg := baseImageConfig()
+		var fsencCleanedWhileFormatting atomic.Bool
+		var formatting atomic.Bool
+
+		fsenc := &orderTrackingFsenc{
+			MockFsenc: filesystems.DefaultMockFsenc(),
+			onCleanup: func() {
+				if formatting.Load() {
+					fsencCleanedWhileFormatting.Store(true)
+				}
+			},
+		}
+		im, err := NewImager(cfg, &ostree.MockOstree{}, fsenc, nil)
+		if err != nil {
+			t.Fatalf("NewImager: %v", err)
+		}
+		im.SetStdout(io.Discard)
+		im.SetStderr(io.Discard)
+		im.SetEfiDevice("/dev/loop9p1")
+
+		inFormat := make(chan struct{})
+		releaseFormat := make(chan struct{})
+		im.runner = func(cmd *runner.Cmd) error {
+			formatting.Store(true)
+			close(inFormat)
+			<-releaseFormat
+			formatting.Store(false)
+			return nil
+		}
+
+		fmtErrCh := make(chan error, 1)
+		go func() {
+			fmtErrCh <- im.FormatEfifs()
+		}()
+		<-inFormat
+
+		cleanupDone := make(chan struct{})
+		go func() {
+			im.Cleanup()
+			close(cleanupDone)
+		}()
+
+		select {
+		case <-cleanupDone:
+			close(releaseFormat)
+			<-fmtErrCh
+			t.Fatal("Imager.Cleanup() completed while FormatEfifs was still in flight")
+		case <-time.After(200 * time.Millisecond):
+			close(releaseFormat)
+		}
+
+		<-cleanupDone
+		if err := <-fmtErrCh; err == nil {
+			t.Fatal("expected FormatEfifs to return error when interrupted by Cleanup()")
+		}
+		if fsencCleanedWhileFormatting.Load() {
+			t.Fatal("Imager.Cleanup() ran fsenc/loop teardown while FormatEfifs was still running")
 		}
 	})
 }
