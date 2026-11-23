@@ -66,8 +66,12 @@ func (im *Imager) extractSeedName(data []byte) (string, error) {
 		seedName := strings.TrimPrefix(line, "SEED_NAME=")
 		// Version is the part after the last '-'.
 		if idx := strings.LastIndex(seedName, "-"); idx >= 0 {
-			releaseVersion = seedName[idx+1:]
-			im.Print("Extracted release version: %s\n", releaseVersion)
+			releaseVersion = strings.TrimSpace(seedName[idx+1:])
+			if releaseVersion != "" {
+				im.Print("Extracted release version: %s\n", releaseVersion)
+			} else {
+				im.PrintWarning("WARNING: SEED_NAME= has empty version after '-'\n")
+			}
 		} else {
 			im.PrintWarning("WARNING: SEED_NAME= value has no '-' separator\n")
 		}

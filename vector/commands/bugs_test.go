@@ -161,3 +161,140 @@ func TestResolveRefRemote_WarningLogsOriginalRef(t *testing.T) {
 		t.Errorf("warning did not include original remoted ref; got: %q", buf.String())
 	}
 }
+
+func TestJailbreakCleanConfigFixSrv_PreservesValidDirectorySymlink(t *testing.T) {
+	sysroot := t.TempDir()
+	varSrv := filepath.Join(sysroot, "var", "srv")
+	if err := os.MkdirAll(varSrv, 0755); err != nil {
+		t.Fatal(err)
+	}
+	dataFile := filepath.Join(varSrv, "service.dat")
+	if err := os.WriteFile(dataFile, []byte("keep-me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	srv := filepath.Join(sysroot, "srv")
+	if err := os.Symlink("var/srv", srv); err != nil {
+		t.Fatal(err)
+	}
+
+	r := defaultRunner()
+	r.stdout = io.Discard
+	r.stderr = io.Discard
+
+	cmd, err := newTestJailbreakCommand(defaultTestMockOstree(), defaultTestConfig(), r)
+	if err != nil {
+		t.Fatalf("newTestJailbreakCommand: %v", err)
+	}
+	if err := cmd.cleanConfigFixSrv(sysroot); err != nil {
+		t.Fatalf("cleanConfigFixSrv failed on valid /srv -> var/srv symlink: %v", err)
+	}
+
+	info, err := os.Lstat(srv)
+	if err != nil {
+		t.Fatalf("Lstat(%s): %v", srv, err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("cleanConfigFixSrv destroyed valid /srv -> var/srv symlink (mode=%v)", info.Mode())
+	}
+	got, err := os.ReadFile(filepath.Join(srv, "service.dat"))
+	if err != nil || string(got) != "keep-me" {
+		t.Fatalf("valid /srv target data became unreachable after cleanConfigFixSrv: got=%q err=%v", string(got), err)
+	}
+}
+
+type writerCapturingCmdRunner struct {
+	stdout io.Writer
+	stderr io.Writer
+}
+
+func (w *writerCapturingCmdRunner) Run() error              { return nil }
+func (w *writerCapturingCmdRunner) Output() ([]byte, error) { return []byte("1000\n"), nil }
+func (w *writerCapturingCmdRunner) SetStdin(_ io.Reader)    {}
+func (w *writerCapturingCmdRunner) SetStdout(out io.Writer) { w.stdout = out }
+func (w *writerCapturingCmdRunner) SetStderr(err io.Writer) { w.stderr = err }
+
+func TestSetupOSInteractiveCommands_BypassStyledWriter(t *testing.T) {
+	cmd := NewSetupOSCommand()
+	cmd.cfg = setupOSTestConfig()
+	cmd.StartUI()
+	cmd.SetupPrinters(cmd.Name())
+	cmd.run = defaultSetupOSRunner()
+	cmd.run.stdout = cmd.StdoutWriter()
+	cmd.run.stderr = cmd.StderrWriter()
+	cmd.run.readFile = func(path string) ([]byte, error) {
+		if path == "/proc/cmdline" {
+			return []byte("root=UUID=abc rd.luks.uuid=test-uuid rw"), nil
+		}
+		return nil, fmt.Errorf("not mocked: %s", path)
+	}
+	cmd.run.fileExists = func(path string) bool {
+		return path == "/dev/disk/by-uuid/test-uuid"
+	}
+
+	captured := map[string]*writerCapturingCmdRunner{}
+	cmd.run.execCommand = func(name string, args ...string) cmdRunner {
+		cap := &writerCapturingCmdRunner{}
+		captured[name] = cap
+		return cap
+	}
+
+	if err := cmd.changeUserPassword("matrix"); err != nil {
+		t.Fatalf("changeUserPassword: %v", err)
+	}
+	if err := cmd.changeLuksPassword(); err != nil {
+		t.Fatalf("changeLuksPassword: %v", err)
+	}
+	if err := cmd.setupLocalization(); err != nil {
+		t.Fatalf("setupLocalization: %v", err)
+	}
+
+	for _, name := range []string{"passwd", "cryptsetup", "systemd-firstboot"} {
+		cap := captured[name]
+		if cap == nil {
+			t.Fatalf("expected %s to be invoked", name)
+		}
+		if _, isStyled := cap.stdout.(*styledWriter); isStyled {
+			t.Errorf("%s stdout is wired to line-buffered *styledWriter (breaks interactive prompts)", name)
+		}
+		if _, isStyled := cap.stderr.(*styledWriter); isStyled {
+			t.Errorf("%s stderr is wired to line-buffered *styledWriter (breaks interactive prompts)", name)
+		}
+	}
+}
+
+func TestSetupOSCheckPartitionForWindows_LogsUmountFailure(t *testing.T) {
+	runner := testSetupOSRunner()
+	var stderrBuf bytes.Buffer
+	runner.stderr = &stderrBuf
+
+	tmpRoot := t.TempDir()
+	runner.mkdirTemp = func(_, pattern string) (string, error) {
+		return os.MkdirTemp(tmpRoot, pattern)
+	}
+	var removed bool
+	runner.removeFile = func(path string) error {
+		removed = true
+		return nil
+	}
+	runner.execCommand = func(name string, args ...string) cmdRunner {
+		switch name {
+		case "lsblk":
+			return &mockCmdRunner{outputVal: []byte("")}
+		case "umount":
+			return &mockCmdRunner{runErr: errors.New("target is busy")}
+		default:
+			return &mockCmdRunner{}
+		}
+	}
+
+	cmd := initSetupOSCmd(runner)
+	if err := cmd.checkPartitionForWindows("/dev/sda1", "/efi/grub.cfg", "/EFI/Microsoft/Boot/bootmgfw.efi"); err != nil {
+		t.Fatalf("checkPartitionForWindows: %v", err)
+	}
+	if removed {
+		t.Error("expected temp mount dir NOT to be removed when umount fails")
+	}
+	if !strings.Contains(stderrBuf.String(), "target is busy") {
+		t.Errorf("umount failure was silently ignored; stderr = %q", stderrBuf.String())
+	}
+}

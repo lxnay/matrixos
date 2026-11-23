@@ -662,8 +662,19 @@ func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 		return c.run.writeFile(filepath.Join(srv, ".keep"), []byte{}, 0644)
 	}
 
-	// If it's a symlink (including dangling) or non-directory, replace it with a directory.
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	needsReplace := false
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Preserve valid symlinks pointing to an existing directory (e.g.
+		// OSTree's /srv -> var/srv); only replace dangling or non-dir symlinks.
+		targetInfo, statErr := c.run.stat(srv)
+		if statErr != nil || !targetInfo.IsDir() {
+			needsReplace = true
+		}
+	} else if !info.IsDir() {
+		needsReplace = true
+	}
+
+	if needsReplace {
 		if err := c.run.removeFile(srv); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", srv, err)
 		}

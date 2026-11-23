@@ -3,6 +3,7 @@ package commands
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +19,11 @@ const maxLuksPasswordAttempts = 5
 // setupOSRunner abstracts OS-level operations so they can be replaced in tests.
 type setupOSRunner struct {
 	osRunner
+	// interactiveStdout/interactiveStderr bypass line-buffered styledWriter so
+	// interactive prompts (passwd, cryptsetup, systemd-firstboot) display
+	// without waiting for a trailing newline. Nil falls back to stdout/stderr.
+	interactiveStdout  io.Writer
+	interactiveStderr  io.Writer
 	mkdirTemp          func(dir, pattern string) (string, error)
 	fileExists         func(path string) bool
 	chmod              func(path string, mode os.FileMode) error
@@ -33,10 +39,26 @@ type setupOSRunner struct {
 	glob               func(pattern string) ([]string, error)
 }
 
+func (r *setupOSRunner) getInteractiveStdout() io.Writer {
+	if r.interactiveStdout != nil {
+		return r.interactiveStdout
+	}
+	return r.stdout
+}
+
+func (r *setupOSRunner) getInteractiveStderr() io.Writer {
+	if r.interactiveStderr != nil {
+		return r.interactiveStderr
+	}
+	return r.stderr
+}
+
 func defaultSetupOSRunner() *setupOSRunner {
 	return &setupOSRunner{
-		osRunner:  defaultOSRunner(),
-		mkdirTemp: os.MkdirTemp,
+		osRunner:          defaultOSRunner(),
+		interactiveStdout: os.Stdout,
+		interactiveStderr: os.Stderr,
+		mkdirTemp:         os.MkdirTemp,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
@@ -393,8 +415,8 @@ func (c *SetupOSCommand) changeUserPassword(targetUser string) error {
 
 	passwdCmd := c.run.execCommand("passwd", targetUser)
 	passwdCmd.SetStdin(c.run.stdin)
-	passwdCmd.SetStdout(c.run.stdout)
-	passwdCmd.SetStderr(c.run.stderr)
+	passwdCmd.SetStdout(c.run.getInteractiveStdout())
+	passwdCmd.SetStderr(c.run.getInteractiveStderr())
 	if err := passwdCmd.Run(); err != nil {
 		return fmt.Errorf("failed to change password for %s: %w", targetUser, err)
 	}
@@ -447,8 +469,8 @@ func (c *SetupOSCommand) changeLuksPassword() error {
 		c.FlushPrinters()
 		cryptsetupCmd := c.run.execCommand("cryptsetup", "luksChangeKey", luksDevice)
 		cryptsetupCmd.SetStdin(c.run.stdin)
-		cryptsetupCmd.SetStdout(c.run.stdout)
-		cryptsetupCmd.SetStderr(c.run.stderr)
+		cryptsetupCmd.SetStdout(c.run.getInteractiveStdout())
+		cryptsetupCmd.SetStderr(c.run.getInteractiveStderr())
 		lastErr = cryptsetupCmd.Run()
 		if lastErr == nil {
 			break
@@ -491,8 +513,8 @@ func (c *SetupOSCommand) setupLocalization() error {
 	c.FlushPrinters()
 	firstbootCmd := c.run.execCommand("systemd-firstboot", firstbootArgs...)
 	firstbootCmd.SetStdin(c.run.stdin)
-	firstbootCmd.SetStdout(c.run.stdout)
-	firstbootCmd.SetStderr(c.run.stderr)
+	firstbootCmd.SetStdout(c.run.getInteractiveStdout())
+	firstbootCmd.SetStderr(c.run.getInteractiveStderr())
 	if err := firstbootCmd.Run(); err != nil {
 		return fmt.Errorf("systemd-firstboot failed: %w", err)
 	}
@@ -727,9 +749,12 @@ func (c *SetupOSCommand) checkPartitionForWindows(part, grubCfg, msblPath string
 		mountPoint = tmpDir
 		defer func() {
 			umountCmd := c.run.execCommand("umount", mountPoint)
-			if err := umountCmd.Run(); err == nil {
-				_ = c.run.removeFile(mountPoint)
+			if err := umountCmd.Run(); err != nil {
+				fmt.Fprintf(c.run.stderr, "   %s%sWarning: failed to unmount %s: %v%s\n",
+					c.cYellow, c.iconWarn, mountPoint, err, c.cReset)
+				return
 			}
+			_ = c.run.removeFile(mountPoint)
 		}()
 	}
 

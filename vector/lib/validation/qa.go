@@ -82,6 +82,9 @@ func (q *QA) CheckMatrixOSPrivate() error {
 // matches the serial in the provided certificate file. It requires `openssl` or
 // can parse certificates directly.
 func (q *QA) CheckSecureBoot(imageDir, sbcertPath string) error {
+	if imageDir == "" {
+		return errors.New("missing imageDir parameter")
+	}
 	imageDir = filepath.Clean(imageDir)
 	modulesdir := filepath.Join(imageDir, "lib/modules")
 	var usbMods []string
@@ -111,7 +114,11 @@ func (q *QA) CheckSecureBoot(imageDir, sbcertPath string) error {
 	}
 
 	for _, mod := range usbMods {
-		rel := strings.TrimPrefix(mod, strings.TrimRight(imageDir, "/"))
+		relPath, err := filepath.Rel(imageDir, mod)
+		if err != nil {
+			return fmt.Errorf("failed to compute relative path for %s: %w", mod, err)
+		}
+		rel := "/" + filepath.ToSlash(relPath)
 
 		out, err := filesystems.ChrootOutput(imageDir, "modinfo", "-F", "sig_key", rel)
 		if err != nil {
@@ -140,12 +147,31 @@ func certSerialColon(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Try PEM decode directly (handles leading comments/whitespace before -----BEGIN).
-	// If no PEM block is found, fall back to raw DER parsing.
-	if blk, _ := pem.Decode(b); blk != nil {
-		b = blk.Bytes
+	// Scan all PEM blocks for a CERTIFICATE block (handles leading comments
+	// and multi-block PEM bundles). Fall back to raw DER only when no PEM
+	// blocks are present at all.
+	var certDER []byte
+	sawPEM := false
+	rest := b
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		sawPEM = true
+		if blk.Type == "CERTIFICATE" {
+			certDER = blk.Bytes
+			break
+		}
 	}
-	cert, err := x509.ParseCertificate(b)
+	if sawPEM && certDER == nil {
+		return "", errors.New("no CERTIFICATE PEM block found")
+	}
+	if certDER == nil {
+		certDER = b
+	}
+	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {
 		return "", err
 	}
@@ -166,6 +192,86 @@ func certSerialColon(path string) (string, error) {
 	return strings.ToLower(strings.Join(parts, ":")), nil
 }
 
+// statInRoot stats virtual path p confined to chroot root. When root == "/" it
+// delegates directly to os.Stat; otherwise it resolves symlinks component by
+// component strictly inside root (clamping ".." at virtual "/" and re-rooting
+// absolute symlink targets inside root so merged-usr layouts resolve cleanly
+// without escaping onto the host filesystem).
+func statInRoot(root, p string) (os.FileInfo, error) {
+	if root == "/" {
+		return os.Stat(p)
+	}
+	root = filepath.Clean(root)
+	cleanP := filepath.Clean("/" + p)
+	var pending []string
+	for _, seg := range strings.Split(cleanP, "/") {
+		if seg != "" {
+			pending = append(pending, seg)
+		}
+	}
+
+	const maxSymlinkHops = 40
+	var resolved []string
+	hops := 0
+
+	for len(pending) > 0 {
+		comp := pending[0]
+		pending = pending[1:]
+		if comp == "" || comp == "." {
+			continue
+		}
+		if comp == ".." {
+			if len(resolved) > 0 {
+				resolved = resolved[:len(resolved)-1]
+			}
+			continue
+		}
+
+		next := make([]string, len(resolved)+1)
+		copy(next, resolved)
+		next[len(resolved)] = comp
+
+		hostPath := filepath.Join(append([]string{root}, next...)...)
+		fi, err := os.Lstat(hostPath)
+		if err != nil {
+			return nil, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			hops++
+			if hops > maxSymlinkHops {
+				return nil, fmt.Errorf("too many levels of symbolic links resolving %s under %s", p, root)
+			}
+			target, err := os.Readlink(hostPath)
+			if err != nil {
+				return nil, err
+			}
+			var targetParts []string
+			for _, seg := range strings.Split(target, "/") {
+				if seg != "" {
+					targetParts = append(targetParts, seg)
+				}
+			}
+			if strings.HasPrefix(target, "/") {
+				resolved = nil
+			}
+			pending = append(targetParts, pending...)
+			continue
+		}
+		resolved = next
+		if len(pending) == 0 {
+			return fi, nil
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", hostPath)
+		}
+	}
+
+	if len(resolved) == 0 {
+		return os.Stat(root)
+	}
+	return os.Lstat(filepath.Join(append([]string{root}, resolved...)...))
+}
+
 // verifyEnvironmentSetup checks for the presence of executables and directories
 // inside an image directory. executables should be the list as used in the
 // shell script and dirs is the list of directories to verify (absolute paths).
@@ -178,13 +284,12 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 	for _, exe := range executables {
 		// path-like executable
 		if strings.Contains(exe, "/") {
-			// check file inside root
 			target := exe
 			if imageDir != "/" {
 				target = filepath.Join(imageDir, exe)
 			}
 
-			if st, err := os.Stat(target); err != nil || st.IsDir() || st.Mode()&0111 == 0 {
+			if st, err := statInRoot(imageDir, exe); err != nil || st.IsDir() || st.Mode()&0111 == 0 {
 				retErrs = append(retErrs, fmt.Sprintf("%s not found", target))
 			}
 			continue
@@ -200,15 +305,15 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 
 		// First, check common bin/sbin locations inside the image
 		tryPaths := []string{
-			filepath.Join(imageDir, "bin", exe),
-			filepath.Join(imageDir, "usr", "bin", exe),
-			filepath.Join(imageDir, "sbin", exe),
-			filepath.Join(imageDir, "usr", "sbin", exe),
+			filepath.Join("/bin", exe),
+			filepath.Join("/usr/bin", exe),
+			filepath.Join("/sbin", exe),
+			filepath.Join("/usr/sbin", exe),
 		}
 
 		found := false
 		for _, p := range tryPaths {
-			if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+			if st, err := statInRoot(imageDir, p); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
 				found = true
 				break
 			}
@@ -228,7 +333,7 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 
 	for _, d := range dirs {
 		p := filepath.Join(imageDir, d)
-		if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
+		if fi, err := statInRoot(imageDir, d); err != nil || !fi.IsDir() {
 			retErrs = append(retErrs, fmt.Sprintf("%s not found", p))
 		}
 	}

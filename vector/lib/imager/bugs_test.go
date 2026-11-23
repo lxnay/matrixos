@@ -22,6 +22,7 @@ func TestExtractReleaseVersion_KeepsDateFallbackWhenMetadataMissingSeedName(t *t
 		{name: "NoSeedNameLine", content: "BUILD_DATE=2026-02-15\n"},
 		{name: "SeedNameWithoutDash", content: "SEED_NAME=matrixos\n"},
 		{name: "SeedNameTrailingDash", content: "SEED_NAME=matrixos-gnome-\n"},
+		{name: "SeedNameTrailingSpaces", content: "SEED_NAME=matrixos-gnome-   \n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tmpDir := t.TempDir()

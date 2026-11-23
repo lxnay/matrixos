@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,5 +155,8 @@ func TestSeedsCleaner_RejectsHostRootPath(t *testing.T) {
 	err = cleaner.Run()
 	if err == nil {
 		t.Fatal("expected error rejecting host root '/', got nil")
+	}
+	if !strings.Contains(err.Error(), "IS MAPPED TO HOST ROOT") {
+		t.Fatalf("expected CheckDirIsRoot rejection error, got: %v", err)
 	}
 }

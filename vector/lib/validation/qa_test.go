@@ -302,4 +302,109 @@ func TestQA_BugsReproducers(t *testing.T) {
 			t.Errorf("expected kernel diagnostics in injected stderr, got %q", stderr.String())
 		}
 	})
+
+	t.Run("VerifyEnvironmentSetupConfinesSymlinksToImageDir", func(t *testing.T) {
+		orig := filesystems.ExecChrootOutput
+		filesystems.ExecChrootOutput = func(*runner.ChrootCmd) ([]byte, error) {
+			return nil, fmt.Errorf("chroot disabled in test")
+		}
+		t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+		t.Run("HostEscapeAbsoluteSymlinkDoesNotFalsePass", func(t *testing.T) {
+			tmp := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tmp, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// /bin/sh exists on the host, but NOT inside tmp.
+			if err := os.Symlink("/bin/sh", filepath.Join(tmp, "bin", "hostescape")); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyEnvironmentSetup(tmp, []string{"/bin/hostescape"}, nil); err == nil {
+				t.Fatal("verifyEnvironmentSetup followed absolute symlink onto host /bin/sh instead of resolving inside imageDir")
+			}
+		})
+
+		t.Run("MergedUsrAbsoluteSymlinksResolveInsideImageDir", func(t *testing.T) {
+			tmp := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tmp, "usr", "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tmp, "usr", "bin", "my-image-only-tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// Standard merged-usr absolute symlink /bin -> /usr/bin
+			if err := os.Symlink("/usr/bin", filepath.Join(tmp, "bin")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(tmp, "usr", "share", "real-shim"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("/usr/share/real-shim", filepath.Join(tmp, "usr", "share", "shim-link")); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := verifyEnvironmentSetup(tmp, []string{"/bin/my-image-only-tool", "my-image-only-tool"}, []string{"/usr/share/shim-link"}); err != nil {
+				t.Fatalf("verifyEnvironmentSetup failed to resolve merged-usr absolute symlinks inside imageDir: %v", err)
+			}
+		})
+	})
+
+	t.Run("CheckSecureBootRejectsEmptyAndRootsDotImageDir", func(t *testing.T) {
+		tmp := t.TempDir()
+		modDir := filepath.Join(tmp, "lib/modules/6.12.0")
+		if err := os.MkdirAll(modDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(modDir, "usb-storage.ko"), []byte("dummy"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tmpl := x509.Certificate{SerialNumber: big.NewInt(0xabcd)}
+		der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+		certPath := filepath.Join(tmp, "cert.pem")
+		if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var capturedModArg string
+		orig := filesystems.ExecChrootOutput
+		filesystems.ExecChrootOutput = func(c *runner.ChrootCmd) ([]byte, error) {
+			capturedModArg = c.Args[len(c.Args)-1]
+			return []byte("ab:cd\n"), nil
+		}
+		t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+		t.Chdir(tmp)
+		q, _ := New(&config.MockConfig{})
+		if err := q.CheckSecureBoot("", certPath); err == nil {
+			t.Error("CheckSecureBoot accepted empty imageDir instead of rejecting it")
+		}
+		if err := q.CheckSecureBoot(".", certPath); err != nil {
+			t.Fatalf("CheckSecureBoot('.'): %v", err)
+		}
+		if capturedModArg != "/lib/modules/6.12.0/usb-storage.ko" {
+			t.Errorf("CheckSecureBoot('.') passed unrooted path %q, want /lib/modules/6.12.0/usb-storage.ko", capturedModArg)
+		}
+	})
+
+	t.Run("CertSerialColonSkipsNonCertPEMBlocks", func(t *testing.T) {
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tmpl := x509.Certificate{SerialNumber: big.NewInt(0x1234)}
+		der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+		multiPEM := append(
+			pem.EncodeToMemory(&pem.Block{Type: "EC PARAMETERS", Bytes: []byte("dummy-params")}),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...,
+		)
+		p := filepath.Join(t.TempDir(), "multi.pem")
+		if err := os.WriteFile(p, multiPEM, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		serial, err := certSerialColon(p)
+		if err != nil {
+			t.Fatalf("certSerialColon failed on multi-block PEM: %v", err)
+		}
+		if serial != "12:34" {
+			t.Errorf("serial = %q, want 12:34", serial)
+		}
+	})
 }
