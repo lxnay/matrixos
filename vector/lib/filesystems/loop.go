@@ -99,6 +99,23 @@ func (l *Loop) BackingFile() string {
 	return path
 }
 
+// detachLoopFd issues LOOP_CLR_FD on fd, retrying briefly on transient EBUSY
+// (e.g. while udev finishes probing partitions after unmount/LUKS close).
+func detachLoopFd(fd int) error {
+	var detachErr error
+	for attempt := range loopDetachMaxRetries {
+		detachErr = ioctlSetInt(fd, unix.LOOP_CLR_FD, 0)
+		if detachErr == nil {
+			return nil
+		}
+		if !errors.Is(detachErr, unix.EBUSY) || attempt == loopDetachMaxRetries-1 {
+			return detachErr
+		}
+		time.Sleep(loopRetryDelay)
+	}
+	return detachErr
+}
+
 // Detach clears the file-descriptor association of the loop device,
 // equivalent to `losetup -d /dev/loopN`. Retries briefly on transient EBUSY
 // (e.g. while udev finishes probing partitions after unmount/LUKS close).
@@ -120,16 +137,8 @@ func (l *Loop) Detach() error {
 	}
 	defer closeFile(f)
 
-	var detachErr error
-	for attempt := range loopDetachMaxRetries {
-		detachErr = ioctlSetInt(int(f.Fd()), unix.LOOP_CLR_FD, 0)
-		if detachErr == nil {
-			break
-		}
-		if !errors.Is(detachErr, unix.EBUSY) || attempt == loopDetachMaxRetries-1 {
-			return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.device, detachErr)
-		}
-		time.Sleep(loopRetryDelay)
+	if detachErr := detachLoopFd(int(f.Fd())); detachErr != nil {
+		return fmt.Errorf("loop detach: LOOP_CLR_FD on %s: %w", l.device, detachErr)
 	}
 
 	l.device = ""
@@ -223,8 +232,8 @@ func (l *Loop) Attach() error {
 			time.Sleep(loopRetryDelay)
 		}
 		if statusErr != nil {
-			// Best-effort detach on failure.
-			beErr := ioctlSetInt(loopFd, unix.LOOP_CLR_FD, 0)
+			// Best-effort detach on failure (retrying transient EBUSY).
+			beErr := detachLoopFd(loopFd)
 			closeFile(loopFile)
 			if beErr != nil {
 				return fmt.Errorf(

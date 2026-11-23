@@ -2,6 +2,7 @@ package filesystems
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -304,10 +305,15 @@ func formatMountEntries(entries []*MountInfoEntry) string {
 // tag is the blkid attribute name: UUID, PARTUUID, LABEL, PARTTYPE, etc.
 func defaultBlkidLookup(devPath, tag string) (string, error) {
 	cmd := exec.Command("blkid", "-o", "value", "-s", tag, devPath)
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 
 	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return "", fmt.Errorf("blkid lookup failed for %s tag %s: %w: %s", devPath, tag, err, msg)
+		}
 		return "", fmt.Errorf("blkid lookup failed for %s tag %s: %w", devPath, tag, err)
 	}
 	val := strings.TrimSpace(string(out))

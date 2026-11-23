@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/runner"
@@ -52,7 +53,7 @@ type Fsenc struct {
 	stdout         io.Writer
 	stderr         io.Writer
 	openMu         sync.Mutex
-	closed         bool
+	closed         atomic.Bool
 	openMappers    []string
 	opening        func(string)
 	opened         func(string)
@@ -105,10 +106,14 @@ func (f *Fsenc) getStderr() io.Writer {
 }
 
 func (f *Fsenc) Cleanup() {
+	// Mark closed before acquiring openMu so an in-flight cryptsetup open
+	// observes Cleanup() immediately upon finishing instead of returning nil
+	// to FormatRootfs while Cleanup() is still waiting to close the mapper.
+	f.closed.Store(true)
+
 	f.openMu.Lock()
 	defer f.openMu.Unlock()
 
-	f.closed = true
 	if len(f.openMappers) == 0 {
 		return
 	}
@@ -172,6 +177,10 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 
 	luksName := filepath.Base(desiredLuksDevice)
 
+	if f.closed.Load() {
+		return fmt.Errorf("cleanup already ran; refusing to format LUKS device %s", devicePath)
+	}
+
 	// Format the device with LUKS encryption.
 	fmt.Fprintf(stdout, "Formatting %s using LUKS Encryption ...\n", devicePath)
 	err = f.runner(&runner.Cmd{
@@ -200,10 +209,7 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 		stdin = nil
 	}
 
-	f.openMu.Lock()
-	alreadyClosed := f.closed
-	f.openMu.Unlock()
-	if alreadyClosed {
+	if f.closed.Load() {
 		return fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
 	}
 
@@ -212,14 +218,17 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 	}
 	// Hold openMu across closed-check, tracking, and cryptsetup open so a
 	// concurrent Cleanup() cannot race with open and leak /dev/mapper/<luksName>.
+	var closedErr error
+	var closedDuringOpen bool
 	err = func() error {
 		f.openMu.Lock()
 		defer f.openMu.Unlock()
-		if f.closed {
-			return fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
+		if f.closed.Load() {
+			closedErr = fmt.Errorf("cleanup already ran; refusing to open LUKS device %s", luksName)
+			return nil
 		}
 		f.openMappers = append(f.openMappers, luksName)
-		return f.runner(&runner.Cmd{
+		runErr := f.runner(&runner.Cmd{
 			Name: "cryptsetup",
 			Args: []string{
 				"open",
@@ -232,10 +241,19 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 			Stdout: stdout,
 			Stderr: stderr,
 		})
+		closedDuringOpen = f.closed.Load()
+		return runErr
 	}()
+	if closedErr != nil {
+		return closedErr
+	}
 	if err != nil {
 		return fmt.Errorf("cryptsetup open failed on %s: %w", devicePath, err)
 	}
+	if closedDuringOpen || f.closed.Load() {
+		return fmt.Errorf("cleanup interrupted LUKS open for %s", luksName)
+	}
+
 	if f.opened != nil {
 		f.opened(luksName)
 	}
@@ -245,6 +263,10 @@ func (f *Fsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {
 
 	if _, err := os.Stat(desiredLuksDevice); err != nil {
 		return fmt.Errorf("%s does not exist: cannot set up LUKS Encryption: %w", desiredLuksDevice, err)
+	}
+
+	if f.closed.Load() {
+		return fmt.Errorf("cleanup interrupted LUKS open for %s", luksName)
 	}
 
 	return nil

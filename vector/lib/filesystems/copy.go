@@ -79,15 +79,20 @@ func CopyDirPreserve(src, dst string) error {
 		return fmt.Errorf("source %s is not a directory", src)
 	}
 
-	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()); err != nil {
-		return fmt.Errorf("failed to create destination %s: %w", dst, err)
-	}
-	// Explicitly preserve exact permissions and special bits regardless of umask.
-	if err := os.Chmod(dst, srcInfo.Mode()); err != nil {
-		return fmt.Errorf("failed to chmod destination %s: %w", dst, err)
+	type dirMode struct {
+		path string
+		mode fs.FileMode
 	}
 
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+	// Create directories with owner rwx during the walk so non-root copies can
+	// populate read-only (e.g. 0555/0500) source directories, then restore exact
+	// permissions and special bits bottom-up once all children are written.
+	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()|0700); err != nil {
+		return fmt.Errorf("failed to create destination %s: %w", dst, err)
+	}
+	dirs := []dirMode{{path: dst, mode: srcInfo.Mode()}}
+
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -115,13 +120,13 @@ func CopyDirPreserve(src, dst string) error {
 		// Handle directories.
 		if d.IsDir() {
 			if relPath == "." {
-				return nil // already created and chmodded above
+				return nil // already created above
 			}
-			if err := os.MkdirAll(dstPath, info.Mode().Perm()); err != nil {
+			if err := os.MkdirAll(dstPath, info.Mode().Perm()|0700); err != nil {
 				return err
 			}
-			// Preserve exact perms and sticky/setuid/setgid bits regardless of umask.
-			return os.Chmod(dstPath, info.Mode())
+			dirs = append(dirs, dirMode{path: dstPath, mode: info.Mode()})
+			return nil
 		}
 
 		// Handle named pipes (FIFOs) without blocking on os.Open.
@@ -141,6 +146,16 @@ func CopyDirPreserve(src, dst string) error {
 		// Handle regular files.
 		return CopyFilePreserveXattrs(path, dstPath)
 	})
+	if err != nil {
+		return err
+	}
+
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := os.Chmod(dirs[i].path, dirs[i].mode); err != nil {
+			return fmt.Errorf("failed to chmod destination %s: %w", dirs[i].path, err)
+		}
+	}
+	return nil
 }
 
 // CopyFilePreserveXattrs copies a file from src to dst, preserving permissions
@@ -207,9 +222,12 @@ func CopyFileReflink(src, dst string) error {
 		return fmt.Errorf("missing dst parameter")
 	}
 	cmd := exec.Command("cp", "-a", "--reflink=auto", "--preserve=links", src, dst)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("cp --reflink=auto failed: %w: %s", err, msg)
+		}
 		return fmt.Errorf("cp --reflink=auto failed: %w", err)
 	}
 	return nil

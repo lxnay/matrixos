@@ -80,11 +80,13 @@ func (im *Imager) mountPartition(device, missingDeviceMsg, mountPoint, missingMo
 	}
 
 	im.Print("Mounting %s to %s\n", device, mountPoint)
-	gen := im.trackMount(mountPoint)
+	if !im.trackMountIfOpen(mountPoint) {
+		return fmt.Errorf("cleanup already ran; refusing to mount %s", mountPoint)
+	}
 	if err := im.runCmd("mount", mountArgs...); err != nil {
 		return err
 	}
-	if im.cleanupActiveOrRanSince(gen) {
+	if im.cleanupActiveOrRan() {
 		im.trackMount(mountPoint)
 		im.Cleanup()
 		return fmt.Errorf("cleanup interrupted mount of %s", mountPoint)

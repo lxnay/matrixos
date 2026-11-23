@@ -341,3 +341,159 @@ func TestParallelImage_FlushesPoolAndWorkerWriters(t *testing.T) {
 		t.Error("expected workerStdout writer to be flushed")
 	}
 }
+
+func TestImagerCleanup_RetainsTmpDirWhenActiveMountRemains(t *testing.T) {
+	cfg := baseImageConfig()
+	im := newTestImager(cfg, &ostree.MockOstree{})
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+
+	tmpDir := t.TempDir()
+	marker := tmpDir + "/keep.txt"
+	if err := os.WriteFile(marker, []byte("precious"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	im.trackTmpDir(tmpDir)
+
+	origReadMountInfo := filesystems.ReadMountInfo
+	filesystems.ReadMountInfo = func() ([]*filesystems.MountInfoEntry, error) {
+		return []*filesystems.MountInfoEntry{
+			{Mountpoint: tmpDir, Source: "/dev/loop99p3", FSType: "btrfs"},
+		}, nil
+	}
+	t.Cleanup(func() { filesystems.ReadMountInfo = origReadMountInfo })
+
+	im.Cleanup()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("Imager.Cleanup removed tmpDir %s while an active mount was present: %v", tmpDir, err)
+	}
+	im.trackMu.Lock()
+	retained := len(im.trackedTmpDirs)
+	im.trackMu.Unlock()
+	if retained != 1 {
+		t.Fatalf("expected tmpDir with active mount to stay retained in trackedTmpDirs, got %d", retained)
+	}
+}
+
+func TestImagerCleanup_UnmountsLateReTrackedMountBeforeRemovingTmpDir(t *testing.T) {
+	cfg := baseImageConfig()
+	tmpDir := t.TempDir()
+	marker := tmpDir + "/data.txt"
+	if err := os.WriteFile(marker, []byte("mounted-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mounted atomic.Bool
+	var unmountedBeforeDelete atomic.Bool
+
+	origReadMountInfo := filesystems.ReadMountInfo
+	origUnmount := filesystems.Unmount
+	filesystems.ReadMountInfo = func() ([]*filesystems.MountInfoEntry, error) {
+		if mounted.Load() {
+			return []*filesystems.MountInfoEntry{
+				{Mountpoint: tmpDir, Source: "/dev/loop99p3", FSType: "btrfs"},
+			}, nil
+		}
+		return nil, nil
+	}
+	filesystems.Unmount = func(target string, flags int) error {
+		if target == tmpDir {
+			if _, err := os.Stat(marker); err == nil {
+				unmountedBeforeDelete.Store(true)
+			}
+			mounted.Store(false)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		filesystems.ReadMountInfo = origReadMountInfo
+		filesystems.Unmount = origUnmount
+	})
+
+	inFsenc := make(chan struct{})
+	releaseFsenc := make(chan struct{})
+	var fsencCalls atomic.Int32
+
+	fsenc := &orderTrackingFsenc{
+		MockFsenc: filesystems.DefaultMockFsenc(),
+		onCleanup: func() {
+			if fsencCalls.Add(1) == 1 {
+				close(inFsenc)
+				<-releaseFsenc
+			}
+		},
+	}
+
+	im, err := NewImager(cfg, &ostree.MockOstree{}, fsenc, nil)
+	if err != nil {
+		t.Fatalf("NewImager: %v", err)
+	}
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.SetRootDevice("/dev/loop99p3")
+	im.trackTmpDir(tmpDir)
+
+	inMount := make(chan struct{})
+	releaseMount := make(chan struct{})
+	im.runner = func(cmd *runner.Cmd) error {
+		close(inMount)
+		<-releaseMount
+		mounted.Store(true)
+		return nil
+	}
+
+	mountErrCh := make(chan error, 1)
+	go func() {
+		mountErrCh <- im.MountRootfs(tmpDir)
+	}()
+	<-inMount
+
+	cleanup1Done := make(chan struct{})
+	go func() {
+		im.Cleanup()
+		close(cleanup1Done)
+	}()
+	<-inFsenc
+
+	// Let MountRootfs finish while Cleanup #1 is still in fsenc.Cleanup();
+	// MountRootfs will detect cleanup, re-track tmpDir, and block on Cleanup #2.
+	close(releaseMount)
+	time.Sleep(40 * time.Millisecond)
+	close(releaseFsenc)
+
+	<-cleanup1Done
+	if err := <-mountErrCh; err == nil {
+		t.Fatal("expected MountRootfs to return error after overlapping Cleanup")
+	}
+
+	if !unmountedBeforeDelete.Load() {
+		t.Fatal("Imager.Cleanup removed tmpDir before unmounting late re-tracked mount")
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("expected tmpDir %s to be removed after unmounting, stat err = %v", tmpDir, err)
+	}
+}
+
+func TestImagerMount_RefusesMountAfterPriorCleanupCompleted(t *testing.T) {
+	cfg := baseImageConfig()
+	im := newTestImager(cfg, &ostree.MockOstree{})
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.SetRootDevice("/dev/loop0p3")
+
+	var mountCalled atomic.Bool
+	im.runner = func(cmd *runner.Cmd) error {
+		mountCalled.Store(true)
+		return nil
+	}
+
+	im.Cleanup()
+
+	if err := im.MountRootfs(t.TempDir()); err == nil {
+		t.Fatal("expected MountRootfs to fail after Cleanup() already ran")
+	}
+	if mountCalled.Load() {
+		t.Fatal("mount command was invoked even though Cleanup() had already completed")
+	}
+}

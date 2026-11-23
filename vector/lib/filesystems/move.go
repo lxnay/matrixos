@@ -77,20 +77,19 @@ func moveSymlinkCrossDevice(src, dst string) error {
 	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory %s: %w", dstDir, err)
 	}
-	// Create a temporary symlink in dstDir and atomically rename it onto dst.
-	tmpFile, err := os.CreateTemp(dstDir, ".move-link-*.tmp")
+	// Create the symlink inside a private 0700 temp directory in dstDir, then
+	// atomically rename it onto dst without any remove-then-symlink TOCTOU window.
+	tmpDir, err := os.MkdirTemp(dstDir, ".move-link-*")
 	if err != nil {
-		return fmt.Errorf("failed to allocate temp symlink path in %s: %w", dstDir, err)
+		return fmt.Errorf("failed to create temp dir for symlink in %s: %w", dstDir, err)
 	}
-	tmpPath := tmpFile.Name()
-	_ = tmpFile.Close()
-	_ = os.Remove(tmpPath)
+	defer os.RemoveAll(tmpDir)
 
+	tmpPath := filepath.Join(tmpDir, "link")
 	if err := os.Symlink(target, tmpPath); err != nil {
 		return fmt.Errorf("failed to create symlink %s -> %s: %w", dst, target, err)
 	}
 	if err := os.Rename(tmpPath, dst); err != nil {
-		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to place symlink %s: %w", dst, err)
 	}
 	if err := os.Remove(src); err != nil {

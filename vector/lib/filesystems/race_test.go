@@ -354,8 +354,8 @@ func TestFsenc_CleanupWaitsForInFlightCryptsetupOpen(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	close(releaseOpen)
 
-	if err := <-encryptDone; err != nil {
-		t.Fatalf("LuksEncrypt: %v", err)
+	if err := <-encryptDone; err == nil {
+		t.Fatal("expected LuksEncrypt to return error when Cleanup() ran concurrently with cryptsetup open")
 	}
 	<-cleanupDone
 
@@ -732,4 +732,208 @@ func TestAcquireFileLock_DoubleUnlockIsSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestFsenc_LuksEncryptRefusesFormatAfterCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+	if err := os.WriteFile(desiredDevice, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	var formatCalled atomic.Bool
+	f.runner = func(cmd *runner.Cmd) error {
+		if containsArg(cmd.Args, "luksFormat") {
+			formatCalled.Store(true)
+		}
+		return nil
+	}
+
+	f.Cleanup()
+
+	if err := f.LuksEncrypt("/dev/loop0p3", desiredDevice); err == nil {
+		t.Fatal("expected LuksEncrypt to fail when Cleanup() already ran before luksFormat")
+	}
+	if formatCalled.Load() {
+		t.Fatal("cryptsetup luksFormat ran even though Cleanup() already ran")
+	}
+}
+
+func TestFsenc_LuksEncryptFailsWhenCleanupClosesMapperAfterOpen(t *testing.T) {
+	tmpDir := t.TempDir()
+	desiredDevice := filepath.Join(tmpDir, "matrixosroot")
+
+	origExecRun := execRun
+	execRun = func(*runner.Cmd) error { return nil }
+	t.Cleanup(func() { execRun = origExecRun })
+
+	f, err := NewFsenc(baseFsencConfig(), noop, noop)
+	if err != nil {
+		t.Fatalf("NewFsenc: %v", err)
+	}
+	f.cleanupDevices = func(devices []string, _, _ io.Writer) []string {
+		return nil
+	}
+
+	inOpen := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	f.runner = func(cmd *runner.Cmd) error {
+		if containsArg(cmd.Args, "open") {
+			close(inOpen)
+			<-releaseOpen
+			_ = os.WriteFile(desiredDevice, []byte{}, 0600)
+		}
+		return nil
+	}
+
+	encryptDone := make(chan error, 1)
+	go func() {
+		encryptDone <- f.LuksEncrypt("/dev/loop0p3", desiredDevice)
+	}()
+
+	<-inOpen
+	cleanupDone := make(chan struct{})
+	go func() {
+		f.Cleanup()
+		close(cleanupDone)
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	close(releaseOpen)
+
+	<-cleanupDone
+	if err := <-encryptDone; err == nil {
+		t.Fatal("LuksEncrypt returned nil even though Cleanup() ran and closed the mapper")
+	}
+}
+
+func TestCopyDirPreserve_ReadOnlyDirWithFiles(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses DAC read-only directory checks")
+	}
+	src := filepath.Join(t.TempDir(), "src")
+	roSub := filepath.Join(src, "rosub")
+	if err := os.MkdirAll(roSub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "top.txt"), []byte("top"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(roSub, "inner.txt"), []byte("inner"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make both sub-dir and root src read-only (0555).
+	if err := os.Chmod(roSub, 0555); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(src, 0555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(src, 0755)
+		_ = os.Chmod(roSub, 0755)
+	})
+
+	dst := filepath.Join(t.TempDir(), "dst")
+	t.Cleanup(func() {
+		_ = os.Chmod(dst, 0755)
+		_ = os.Chmod(filepath.Join(dst, "rosub"), 0755)
+	})
+
+	if err := CopyDirPreserve(src, dst); err != nil {
+		t.Fatalf("CopyDirPreserve failed on read-only 0555 directory tree: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dst, "rosub", "inner.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(dst/rosub/inner.txt): %v", err)
+	}
+	if string(got) != "inner" {
+		t.Errorf("inner.txt = %q, want inner", string(got))
+	}
+	for _, p := range []string{dst, filepath.Join(dst, "rosub")} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", p, err)
+		}
+		if info.Mode().Perm() != 0555 {
+			t.Errorf("%s perms = %04o, want 0555", p, info.Mode().Perm())
+		}
+	}
+}
+
+func TestLoop_AttachRollbackRetriesOnEBUSY(t *testing.T) {
+	setupMockLoop(t)
+
+	f, err := os.CreateTemp(t.TempDir(), "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	openFile = func(name string, flag int, perm os.FileMode) (*os.File, error) {
+		return f, nil
+	}
+	ioctlLoopInfo = func(fd int, info *unix.LoopInfo64) error {
+		return unix.EINVAL
+	}
+	clrAttempts := 0
+	ioctlSetInt = func(fd int, req uint, val int) error {
+		if req == unix.LOOP_CLR_FD {
+			clrAttempts++
+			if clrAttempts < 3 {
+				return unix.EBUSY
+			}
+		}
+		return nil
+	}
+
+	l, err := NewLoop("/tmp/rollback.img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = l.Attach()
+	if err == nil {
+		t.Fatal("expected error when LOOP_SET_STATUS64 fails")
+	}
+	if strings.Contains(err.Error(), "also failed to detach") {
+		t.Fatalf("rollback LOOP_CLR_FD did not retry transient EBUSY: %v", err)
+	}
+	if clrAttempts != 3 {
+		t.Errorf("rollback LOOP_CLR_FD attempts = %d, want 3", clrAttempts)
+	}
+}
+
+func TestCopyFileReflink_CapturesStderrInError(t *testing.T) {
+	tmp := t.TempDir()
+	err := CopyFileReflink(filepath.Join(tmp, "does-not-exist"), filepath.Join(tmp, "dst"))
+	if err == nil {
+		t.Fatal("expected error for nonexistent source")
+	}
+	// cp prints the missing path to stderr; it must be captured in the error, not leaked to os.Stderr.
+	if !strings.Contains(err.Error(), "does-not-exist") {
+		t.Fatalf("CopyFileReflink error did not capture cp stderr: %v", err)
+	}
+}
+
+func TestDefaultBlkidLookup_CapturesStderrInError(t *testing.T) {
+	binDir := t.TempDir()
+	fakeBlkid := filepath.Join(binDir, "blkid")
+	script := "#!/bin/sh\necho 'blkid-custom-stderr-marker' >&2\nexit 2\n"
+	if err := os.WriteFile(fakeBlkid, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	_, err := defaultBlkidLookup("/dev/fake0", "UUID")
+	if err == nil {
+		t.Fatal("expected error from failing blkid")
+	}
+	if !strings.Contains(err.Error(), "blkid-custom-stderr-marker") {
+		t.Fatalf("defaultBlkidLookup error did not capture stderr: %v", err)
+	}
 }
