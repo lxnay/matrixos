@@ -124,6 +124,9 @@ func (o *Ostree) ListContents(commit, path string) (*[]filesystems.PathInfo, err
 }
 
 func (o *Ostree) listContentsOfPath(commit, repoDir, path string) (*[]filesystems.PathInfo, error) {
+	unlock := LockRepo(repoDir)
+	defer unlock()
+
 	stdout, err := o.ostreeRunCapture(
 		"--repo="+repoDir,
 		"ls",

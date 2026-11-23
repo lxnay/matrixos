@@ -407,4 +407,108 @@ func TestQA_BugsReproducers(t *testing.T) {
 			t.Errorf("serial = %q, want 12:34", serial)
 		}
 	})
+
+	t.Run("CheckSecureBootConfinesMergedUsrAndSymlinkedLibModules", func(t *testing.T) {
+		priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tmpl := x509.Certificate{SerialNumber: big.NewInt(0xabcd)}
+		der, _ := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+
+		for _, tc := range []struct {
+			name  string
+			setup func(tmp string) error
+		}{
+			{
+				name: "AbsoluteMergedUsrLibSymlink",
+				setup: func(tmp string) error {
+					modDir := filepath.Join(tmp, "usr", "lib", "modules", "6.99.0-img-only")
+					if err := os.MkdirAll(modDir, 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(modDir, "usb-storage.ko"), []byte("dummy"), 0o644); err != nil {
+						return err
+					}
+					return os.Symlink("/usr/lib", filepath.Join(tmp, "lib"))
+				},
+			},
+			{
+				name: "SymlinkedLibModules",
+				setup: func(tmp string) error {
+					modDir := filepath.Join(tmp, "usr", "lib", "modules", "6.99.0-img-only")
+					if err := os.MkdirAll(modDir, 0o755); err != nil {
+						return err
+					}
+					if err := os.WriteFile(filepath.Join(modDir, "usb-storage.ko"), []byte("dummy"), 0o644); err != nil {
+						return err
+					}
+					if err := os.MkdirAll(filepath.Join(tmp, "lib"), 0o755); err != nil {
+						return err
+					}
+					return os.Symlink("../usr/lib/modules", filepath.Join(tmp, "lib", "modules"))
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmp := t.TempDir()
+				if err := tc.setup(tmp); err != nil {
+					t.Fatal(err)
+				}
+				certPath := filepath.Join(tmp, "cert.pem")
+				if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+					t.Fatal(err)
+				}
+
+				var captured []string
+				orig := filesystems.ExecChrootOutput
+				filesystems.ExecChrootOutput = func(c *runner.ChrootCmd) ([]byte, error) {
+					captured = append(captured, c.Args[len(c.Args)-1])
+					return []byte("ab:cd\n"), nil
+				}
+				t.Cleanup(func() { filesystems.ExecChrootOutput = orig })
+
+				q, _ := New(&config.MockConfig{})
+				if err := q.CheckSecureBoot(tmp, certPath); err != nil {
+					t.Fatalf("CheckSecureBoot failed: %v", err)
+				}
+				if len(captured) != 1 || captured[0] != "/usr/lib/modules/6.99.0-img-only/usb-storage.ko" {
+					t.Fatalf("modinfo checked %v, want [/usr/lib/modules/6.99.0-img-only/usb-storage.ko]", captured)
+				}
+			})
+		}
+	})
+
+	t.Run("StatInRootDotDotTrailingSlashAndUncleanedRoot", func(t *testing.T) {
+		tmp := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(tmp, "usr", "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(tmp, "usr", "share", "foo"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmp, "usr", "bin", "sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/usr/bin", filepath.Join(tmp, "bin")); err != nil {
+			t.Fatal(err)
+		}
+
+		// Symlink must expand BEFORE ".." is applied: /bin/../share/foo -> /usr/share/foo.
+		fi, err := statInRoot(tmp, "/bin/../share/foo")
+		if err != nil || !fi.IsDir() {
+			t.Errorf("statInRoot(/bin/../share/foo) = (%v, %v), want existing directory", fi, err)
+		}
+		// Nonexistent component before ".." must fail instead of lexically collapsing away.
+		if _, err := statInRoot(tmp, "/nonexistent/../usr/bin/sh"); err == nil {
+			t.Error("statInRoot(/nonexistent/../usr/bin/sh) succeeded despite nonexistent intermediate dir")
+		}
+		// Trailing slash on a regular file must fail with ENOTDIR.
+		if _, err := statInRoot(tmp, "/usr/bin/sh/"); err == nil {
+			t.Error("statInRoot(/usr/bin/sh/) succeeded on regular file with trailing slash")
+		}
+		// Uncleaned "/" (e.g. "/.") must select matrixOS.PrivateGitRepoPath, not DefaultPrivateGitRepoPath.
+		q, _ := New(&config.MockConfig{Items: map[string][]string{}})
+		err = q.verifyWithPrivateRepo("/.", nil)
+		if err == nil || !strings.Contains(err.Error(), "matrixOS.PrivateGitRepoPath") {
+			t.Errorf("verifyWithPrivateRepo('/.') error = %v, want error mentioning matrixOS.PrivateGitRepoPath", err)
+		}
+	})
 }

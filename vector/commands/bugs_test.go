@@ -253,11 +253,11 @@ func TestSetupOSInteractiveCommands_BypassStyledWriter(t *testing.T) {
 		if cap == nil {
 			t.Fatalf("expected %s to be invoked", name)
 		}
-		if _, isStyled := cap.stdout.(*styledWriter); isStyled {
-			t.Errorf("%s stdout is wired to line-buffered *styledWriter (breaks interactive prompts)", name)
+		if cap.stdout != os.Stdout {
+			t.Errorf("%s stdout = %T, want raw os.Stdout (must not be nil or line-buffered *styledWriter)", name, cap.stdout)
 		}
-		if _, isStyled := cap.stderr.(*styledWriter); isStyled {
-			t.Errorf("%s stderr is wired to line-buffered *styledWriter (breaks interactive prompts)", name)
+		if cap.stderr != os.Stderr {
+			t.Errorf("%s stderr = %T, want raw os.Stderr (must not be nil or line-buffered *styledWriter)", name, cap.stderr)
 		}
 	}
 }
@@ -297,4 +297,64 @@ func TestSetupOSCheckPartitionForWindows_LogsUmountFailure(t *testing.T) {
 	if !strings.Contains(stderrBuf.String(), "target is busy") {
 		t.Errorf("umount failure was silently ignored; stderr = %q", stderrBuf.String())
 	}
+}
+
+func TestJailbreakCleanConfigFixSrv_ConfinesAbsoluteSymlinkToSysroot(t *testing.T) {
+	t.Run("ValidAbsoluteTargetInsideSysrootPreserved", func(t *testing.T) {
+		sysroot := t.TempDir()
+		targetDir := filepath.Join(sysroot, "unique-jailbreak-srv-target")
+		if err := os.MkdirAll(targetDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		srv := filepath.Join(sysroot, "srv")
+		// Absolute target exists inside sysroot, does NOT exist on host.
+		if err := os.Symlink("/unique-jailbreak-srv-target", srv); err != nil {
+			t.Fatal(err)
+		}
+
+		r := defaultRunner()
+		r.stdout = io.Discard
+		r.stderr = io.Discard
+		cmd, err := newTestJailbreakCommand(defaultTestMockOstree(), defaultTestConfig(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.cleanConfigFixSrv(sysroot); err != nil {
+			t.Fatalf("cleanConfigFixSrv: %v", err)
+		}
+		info, err := os.Lstat(srv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("cleanConfigFixSrv destroyed valid absolute /srv symlink pointing inside sysroot")
+		}
+	})
+
+	t.Run("DanglingInsideSysrootReplacedEvenIfExistsOnHost", func(t *testing.T) {
+		sysroot := t.TempDir()
+		srv := filepath.Join(sysroot, "srv")
+		// /tmp exists on host, but sysroot/tmp does NOT exist inside sysroot.
+		if err := os.Symlink("/tmp", srv); err != nil {
+			t.Fatal(err)
+		}
+
+		r := defaultRunner()
+		r.stdout = io.Discard
+		r.stderr = io.Discard
+		cmd, err := newTestJailbreakCommand(defaultTestMockOstree(), defaultTestConfig(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.cleanConfigFixSrv(sysroot); err != nil {
+			t.Fatalf("cleanConfigFixSrv: %v", err)
+		}
+		info, err := os.Lstat(srv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			t.Fatalf("cleanConfigFixSrv preserved /srv -> /tmp that is dangling inside sysroot (mode=%v)", info.Mode())
+		}
+	})
 }

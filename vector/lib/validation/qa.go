@@ -86,9 +86,18 @@ func (q *QA) CheckSecureBoot(imageDir, sbcertPath string) error {
 		return errors.New("missing imageDir parameter")
 	}
 	imageDir = filepath.Clean(imageDir)
-	modulesdir := filepath.Join(imageDir, "lib/modules")
+	modulesdir, modInfo, err := filesystems.ResolvePathInRoot(imageDir, "/lib/modules")
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("No usb-storage.ko found in %s: %w", filepath.Join(imageDir, "lib/modules"), err)
+		}
+		return fmt.Errorf("failed to resolve /lib/modules in %s: %w", imageDir, err)
+	}
+	if !modInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", modulesdir)
+	}
 	var usbMods []string
-	// Walk the modulesdir to find usb-storage.ko*
+	// Walk the confined modulesdir to find usb-storage.ko*
 	if err := filepath.WalkDir(modulesdir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -116,7 +125,10 @@ func (q *QA) CheckSecureBoot(imageDir, sbcertPath string) error {
 	for _, mod := range usbMods {
 		relPath, err := filepath.Rel(imageDir, mod)
 		if err != nil {
-			return fmt.Errorf("failed to compute relative path for %s: %w", mod, err)
+			return fmt.Errorf("failed to compute relative path for %s under %s: %w", mod, imageDir, err)
+		}
+		if relPath == ".." || strings.HasPrefix(relPath, "../") {
+			return fmt.Errorf("module path %s escaped imageDir %s", mod, imageDir)
 		}
 		rel := "/" + filepath.ToSlash(relPath)
 
@@ -192,84 +204,10 @@ func certSerialColon(path string) (string, error) {
 	return strings.ToLower(strings.Join(parts, ":")), nil
 }
 
-// statInRoot stats virtual path p confined to chroot root. When root == "/" it
-// delegates directly to os.Stat; otherwise it resolves symlinks component by
-// component strictly inside root (clamping ".." at virtual "/" and re-rooting
-// absolute symlink targets inside root so merged-usr layouts resolve cleanly
-// without escaping onto the host filesystem).
+// statInRoot stats virtual path p confined to chroot root.
 func statInRoot(root, p string) (os.FileInfo, error) {
-	if root == "/" {
-		return os.Stat(p)
-	}
-	root = filepath.Clean(root)
-	cleanP := filepath.Clean("/" + p)
-	var pending []string
-	for _, seg := range strings.Split(cleanP, "/") {
-		if seg != "" {
-			pending = append(pending, seg)
-		}
-	}
-
-	const maxSymlinkHops = 40
-	var resolved []string
-	hops := 0
-
-	for len(pending) > 0 {
-		comp := pending[0]
-		pending = pending[1:]
-		if comp == "" || comp == "." {
-			continue
-		}
-		if comp == ".." {
-			if len(resolved) > 0 {
-				resolved = resolved[:len(resolved)-1]
-			}
-			continue
-		}
-
-		next := make([]string, len(resolved)+1)
-		copy(next, resolved)
-		next[len(resolved)] = comp
-
-		hostPath := filepath.Join(append([]string{root}, next...)...)
-		fi, err := os.Lstat(hostPath)
-		if err != nil {
-			return nil, err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			hops++
-			if hops > maxSymlinkHops {
-				return nil, fmt.Errorf("too many levels of symbolic links resolving %s under %s", p, root)
-			}
-			target, err := os.Readlink(hostPath)
-			if err != nil {
-				return nil, err
-			}
-			var targetParts []string
-			for _, seg := range strings.Split(target, "/") {
-				if seg != "" {
-					targetParts = append(targetParts, seg)
-				}
-			}
-			if strings.HasPrefix(target, "/") {
-				resolved = nil
-			}
-			pending = append(targetParts, pending...)
-			continue
-		}
-		resolved = next
-		if len(pending) == 0 {
-			return fi, nil
-		}
-		if !fi.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory", hostPath)
-		}
-	}
-
-	if len(resolved) == 0 {
-		return os.Stat(root)
-	}
-	return os.Lstat(filepath.Join(append([]string{root}, resolved...)...))
+	_, fi, err := filesystems.ResolvePathInRoot(root, p)
+	return fi, err
 }
 
 // verifyEnvironmentSetup checks for the presence of executables and directories
@@ -279,6 +217,7 @@ func verifyEnvironmentSetup(imageDir string, executables, dirs []string) error {
 	if imageDir == "" {
 		return errors.New("missing parameter imageDir")
 	}
+	imageDir = filepath.Clean(imageDir)
 
 	var retErrs []string
 	for _, exe := range executables {
@@ -369,6 +308,10 @@ var imagerBaseExecutables = []string{
 
 // VerifyDistroRootfsEnvironmentSetup checks the typical distro binaries and dirs
 func (q *QA) VerifyDistroRootfsEnvironmentSetup(imageDir string) error {
+	if imageDir == "" {
+		return errors.New("missing parameter imageDir")
+	}
+	imageDir = filepath.Clean(imageDir)
 	executables := append(append([]string{}, imagerBaseExecutables...), "find", "git", "wget")
 	if imageDir != "/" {
 		executables = append(executables, "/usr/bin/grub-install")
@@ -380,6 +323,7 @@ func (q *QA) verifyWithPrivateRepo(imageDir string, executables []string) error 
 	if imageDir == "" {
 		return errors.New("missing parameter imageDir")
 	}
+	imageDir = filepath.Clean(imageDir)
 	key := "matrixOS.DefaultPrivateGitRepoPath"
 	if imageDir == "/" {
 		key = "matrixOS.PrivateGitRepoPath"

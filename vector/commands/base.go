@@ -413,6 +413,7 @@ type osRunner struct {
 	mkdirAll    func(path string, perm os.FileMode) error
 	stat        func(path string) (os.FileInfo, error)
 	lstat       func(path string) (os.FileInfo, error)
+	readlink    func(path string) (string, error)
 	removeFile  func(path string) error
 	copyFile    func(src, dst string) error
 	stdin       io.Reader
@@ -429,6 +430,7 @@ func defaultOSRunner() osRunner {
 		mkdirAll:    os.MkdirAll,
 		stat:        os.Stat,
 		lstat:       os.Lstat,
+		readlink:    os.Readlink,
 		removeFile:  os.Remove,
 		copyFile:    filesystems.CopyFile,
 		stdin:       os.Stdin,

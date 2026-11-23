@@ -644,6 +644,17 @@ func (c *JailbreakCommand) cleanConfigSetupVarDbPkg(sysroot string) error {
 	return c.run.rename(src, varDbPkg)
 }
 
+// statInSysroot resolves virtual path p strictly inside sysroot using lstat
+// and readlink so absolute or escaping symlinks (e.g. /srv -> /var/srv) are
+// evaluated against sysroot rather than the live host filesystem.
+func (c *JailbreakCommand) statInSysroot(sysroot, p string) (os.FileInfo, error) {
+	if c.run.lstat == nil || c.run.readlink == nil {
+		return c.run.stat(filepath.Join(filepath.Clean(sysroot), p))
+	}
+	_, fi, err := filesystems.ResolvePathInRootWith(sysroot, p, c.run.lstat, c.run.stat, c.run.readlink)
+	return fi, err
+}
+
 func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 	fmt.Fprintf(c.run.stdout, "%s%sFixing /srv ...%s\n",
 		c.cBold, c.iconGear, c.cReset)
@@ -664,9 +675,10 @@ func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 
 	needsReplace := false
 	if info.Mode()&os.ModeSymlink != 0 {
-		// Preserve valid symlinks pointing to an existing directory (e.g.
-		// OSTree's /srv -> var/srv); only replace dangling or non-dir symlinks.
-		targetInfo, statErr := c.run.stat(srv)
+		// Preserve valid symlinks pointing to an existing directory inside
+		// sysroot (e.g. OSTree's /srv -> var/srv); only replace symlinks that
+		// are dangling or point to non-directories within sysroot.
+		targetInfo, statErr := c.statInSysroot(sysroot, "/srv")
 		if statErr != nil || !targetInfo.IsDir() {
 			needsReplace = true
 		}

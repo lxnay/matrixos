@@ -295,8 +295,8 @@ func TestOstree_AddRemotePullAndLastCommitSerializeWithLockRepo(t *testing.T) {
 	if err := os.MkdirAll(repoDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Also exercise a non-canonical equivalent path ("repo/.").
-	altRepoDir := filepath.Join(repoDir, ".", "sub", "..")
+	// Also exercise a genuinely uncleaned equivalent path ("repo/./sub/..").
+	altRepoDir := repoDir + "/./sub/.."
 
 	makeCfg := func(dir string) *config.MockConfig {
 		return &config.MockConfig{
@@ -476,5 +476,74 @@ func TestOstree_LocalAndRemoteRefsSerializeWithLockRepo(t *testing.T) {
 
 	if got := maxInFlight.Load(); got > 1 {
 		t.Fatalf("LocalRefs/RemoteRefs overlapped with AddRemote on same repo: maxInFlight = %d, want 1", got)
+	}
+}
+
+func TestOstree_ListContentsAndPackagesSerializeWithLockRepo(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "ostree", "repo")
+	if err := os.MkdirAll(repoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Ostree.Root":          {root},
+			"Ostree.RepoDir":       {repoDir},
+			"Ostree.Remote":        {"origin"},
+			"Ostree.RemoteUrl":     {"http://example.com"},
+			"Releaser.ReadOnlyVdb": {"/var/db/pkg"},
+		},
+		Bools: map[string]bool{
+			"Ostree.Gpg": false,
+		},
+	}
+
+	var inFlight, maxInFlight atomic.Int32
+	mockRunner := func(cmd *runner.Cmd) error {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxInFlight.Load()
+			if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+		inFlight.Add(-1)
+		if slices.Contains(cmd.Args, "ls") && cmd.Stdout != nil {
+			fmt.Fprintln(cmd.Stdout, "d00755 0 0 0 aaa bbb /var/db/pkg/sys-apps/systemd")
+		}
+		return nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if err := o.AddRemote(); err != nil {
+			t.Errorf("AddRemote: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if _, err := o.ListContents("deadbeef", "/var/db/pkg"); err != nil {
+			t.Errorf("ListContents: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		o, _ := NewOstree(NewOstreeOptions{Config: cfg})
+		o.runner = mockRunner
+		if _, err := o.ListPackages("deadbeef"); err != nil {
+			t.Errorf("ListPackages: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	if got := maxInFlight.Load(); got > 1 {
+		t.Fatalf("ListContents/ListPackages overlapped with AddRemote on same repo: maxInFlight = %d, want 1", got)
 	}
 }
