@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -888,9 +889,95 @@ func TestSignalGuard_DisarmDoesNotWipeReArmedCleanups(t *testing.T) {
 	<-exitCh
 	<-disarmDone
 
+	if freshRan.Load() {
+		t.Fatal("gen-1 runCleanups stole and executed cleanup pushed after concurrent re-Arm")
+	}
+
 	sg.RunCleanups()
 	sg.Disarm()
 	if !freshRan.Load() {
 		t.Fatal("stale Disarm wiped cleanup pushed after concurrent re-Arm")
+	}
+}
+
+func TestSignalGuard_DisarmInsideSignalTriggeredCleanupDoesNotDeadlock(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 1)
+	signalExit = func(code int) { exitCh <- code }
+	t.Cleanup(func() { signalExit = origExit })
+
+	var outer, inner SignalGuard
+	outer.Arm()
+	inner.Arm()
+	inner.PushCleanup(func() {
+		inner.Disarm()
+		outer.Disarm()
+	})
+
+	sigCoordMu.Lock()
+	ch := globalSigCh
+	sigCoordMu.Unlock()
+	ch <- syscall.SIGINT
+
+	select {
+	case <-exitCh:
+	case <-time.After(400 * time.Millisecond):
+		t.Fatal("Disarm() called inside a signal-triggered cleanup deadlocked on sigCleanupDone")
+	}
+}
+
+func TestSignalGuard_SecondSignalAbsorbedDuringCleanup(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 1)
+	signalExit = func(code int) { exitCh <- code }
+	t.Cleanup(func() { signalExit = origExit })
+
+	// Backup channel prevents SIG_DFL from killing the test process if the bug
+	// is present while still letting us observe whether sigCh stayed registered.
+	backup := make(chan os.Signal, 2)
+	signal.Notify(backup, syscall.SIGINT)
+	defer signal.Stop(backup)
+
+	var sg SignalGuard
+	inCleanup := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	sg.Arm()
+	sg.PushCleanup(func() {
+		close(inCleanup)
+		<-releaseCleanup
+	})
+
+	sigCoordMu.Lock()
+	ch := globalSigCh
+	sigCoordMu.Unlock()
+	ch <- syscall.SIGINT
+
+	<-inCleanup
+
+	// Deliver a real second SIGINT while cleanups are actively running.
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		close(releaseCleanup)
+		t.Fatalf("kill SIGINT: %v", err)
+	}
+	select {
+	case <-backup:
+	case <-time.After(time.Second):
+		close(releaseCleanup)
+		t.Fatal("timed out waiting for OS SIGINT delivery")
+	}
+	// Give Go's signal router a brief moment to fan out to all registered channels.
+	absorbed := false
+	select {
+	case <-ch:
+		absorbed = true
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseCleanup)
+	<-exitCh
+	sg.Disarm()
+
+	if !absorbed {
+		t.Fatal("signal.Stop(sigCh) was called before runCleanups finished, reverting SIGINT to SIG_DFL mid-cleanup")
 	}
 }
