@@ -3,6 +3,7 @@ package filesystems
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -27,21 +28,24 @@ func Move(src, dst string) error {
 	}
 
 	// If rename failed because the destination parent doesn't exist,
-	// create it and retry (still same-device).
+	// create it and retry (still same-device), but only when src actually
+	// exists so a missing src never leaves empty destination parents behind.
 	if errors.Is(err, syscall.ENOENT) {
-		dstDir := filepath.Dir(dst)
-		if _, statErr := os.Stat(dstDir); os.IsNotExist(statErr) {
-			if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
-				return fmt.Errorf("failed to create destination directory %s: %w", dstDir, mkErr)
+		if _, srcErr := os.Lstat(src); srcErr == nil {
+			dstDir := filepath.Dir(filepath.Clean(dst))
+			if _, statErr := os.Stat(dstDir); os.IsNotExist(statErr) {
+				if mkErr := os.MkdirAll(dstDir, 0755); mkErr != nil {
+					return fmt.Errorf("failed to create destination directory %s: %w", dstDir, mkErr)
+				}
+				err = os.Rename(src, dst)
+				if err == nil {
+					return nil
+				}
+				if !isCrossDeviceError(err) {
+					return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+				}
+				// If the retry got EXDEV, fall through to the cross-device path.
 			}
-			err = os.Rename(src, dst)
-			if err == nil {
-				return nil
-			}
-			if !isCrossDeviceError(err) {
-				return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
-			}
-			// If the retry got EXDEV, fall through to the cross-device path.
 		}
 	}
 
@@ -155,14 +159,45 @@ func moveFileCrossDevice(src, dst string) error {
 	return nil
 }
 
-// moveDirCrossDevice copies a directory across devices and removes the source.
+// removeTreeBestEffort restores owner rwx on subdirectories before calling
+// os.RemoveAll so non-root staging cleanup succeeds even after CopyDirPreserve
+// applied read-only (e.g. 0555) directory modes.
+func removeTreeBestEffort(root string) {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			_ = os.Chmod(path, 0700)
+		}
+		return nil
+	})
+	_ = os.RemoveAll(root)
+}
+
+// moveDirCrossDevice copies a directory into a private staging directory on
+// the destination filesystem, atomically renames it into place, and removes
+// the source only after placement succeeds.
 func moveDirCrossDevice(src, dst string) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	dst = filepath.Clean(dst)
+	dstParent := filepath.Dir(dst)
+	if err := os.MkdirAll(dstParent, 0755); err != nil {
 		return fmt.Errorf("failed to create parent of destination %s: %w", dst, err)
 	}
 
-	if err := CopyDirPreserve(src, dst); err != nil {
+	stageParent, err := os.MkdirTemp(dstParent, ".move-dir-*")
+	if err != nil {
+		return fmt.Errorf("failed to create staging dir in %s: %w", dstParent, err)
+	}
+	defer removeTreeBestEffort(stageParent)
+
+	stageDst := filepath.Join(stageParent, "dir")
+	if err := CopyDirPreserve(src, stageDst); err != nil {
 		return fmt.Errorf("failed to copy directory %s to %s: %w", src, dst, err)
+	}
+
+	if err := os.Rename(stageDst, dst); err != nil {
+		return fmt.Errorf("failed to place directory %s at %s: %w", src, dst, err)
 	}
 
 	if err := os.RemoveAll(src); err != nil {

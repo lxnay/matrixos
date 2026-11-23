@@ -55,6 +55,38 @@ func TestMountpointToDevice(t *testing.T) {
 			t.Errorf("Expected most recent device /dev/sda2, got %s", device)
 		}
 	})
+
+	t.Run("AutofsTriggersBackingMount", func(t *testing.T) {
+		entries := []*MountInfoEntry{
+			{MountID: 1, Mountpoint: "/", Source: "/dev/sda1", FSType: "btrfs"},
+			{MountID: 85, Mountpoint: "/efi", Source: "systemd-1", FSType: "autofs"},
+		}
+		triggered := []*MountInfoEntry{
+			{MountID: 1, Mountpoint: "/", Source: "/dev/sda1", FSType: "btrfs"},
+			{MountID: 85, Mountpoint: "/efi", Source: "systemd-1", FSType: "autofs"},
+			{MountID: 90, ParentID: 85, Mountpoint: "/efi", Source: "/dev/sda2", FSType: "vfat"},
+		}
+		origRead := ReadMountInfo
+		ReadMountInfo = func() ([]*MountInfoEntry, error) { return entries, nil }
+		t.Cleanup(func() { ReadMountInfo = origRead })
+
+		var triggeredPath string
+		setupMockTriggerAutomount(t, func(p string) {
+			triggeredPath = p
+			entries = triggered
+		})
+
+		device, err := MountpointToDevice("/efi")
+		if err != nil {
+			t.Fatalf("MountpointToDevice(/efi) failed: %v", err)
+		}
+		if triggeredPath != "/efi" {
+			t.Errorf("triggerAutomount path = %q, want /efi", triggeredPath)
+		}
+		if device != "/dev/sda2" {
+			t.Errorf("MountpointToDevice(/efi) = %q, want /dev/sda2", device)
+		}
+	})
 }
 
 func TestMountpointToUUID(t *testing.T) {

@@ -115,7 +115,7 @@ func parseMountInfoLine(line string) (*MountInfoEntry, error) {
 		Mountpoint: unescapeOctal(left[4]),
 		Options:    left[5],
 		FSType:     right[0],
-		Source:     right[1],
+		Source:     unescapeOctal(right[1]),
 	}
 	if len(right) >= 3 {
 		entry.SuperOpts = right[2]
@@ -179,6 +179,46 @@ func resolvePath(p string) string {
 		return filepath.Clean(p)
 	}
 	return resolved
+}
+
+// exactMountForPath returns the topmost entry whose mountpoint equals resolved,
+// preferring a non-autofs backing mount over an autofs stub at the same path.
+func exactMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntry {
+	var best *MountInfoEntry
+	for i := range entries {
+		if entries[i].Mountpoint != resolved {
+			continue
+		}
+		if best == nil || best.FSType == "autofs" || entries[i].FSType != "autofs" {
+			best = entries[i]
+		}
+	}
+	return best
+}
+
+// findMountByTargetResolveAutofs returns the mount entry for an exact
+// mountpoint match, triggering systemd autofs stubs when necessary so callers
+// such as MountpointToDevice observe the real backing block device instead of
+// "systemd-1".
+func findMountByTargetResolveAutofs(mnt string) (*MountInfoEntry, error) {
+	entries, err := ReadMountInfo()
+	if err != nil {
+		return nil, err
+	}
+	resolved := resolvePath(mnt)
+	best := exactMountForPath(entries, resolved)
+	if best != nil && best.FSType == "autofs" {
+		triggerAutomount(resolved)
+		if refreshed, rErr := ReadMountInfo(); rErr == nil {
+			if b := exactMountForPath(refreshed, resolved); b != nil {
+				best = b
+			}
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("%w for target %s", errMountNotFound, mnt)
+	}
+	return best, nil
 }
 
 // findMountByTarget returns the mount entry for an exact mountpoint match.

@@ -614,9 +614,32 @@ func TestCopyDirPreserve(t *testing.T) {
 		if err := unix.Lsetxattr(fileInDir, fileAttr, fileAttrVal, 0); err != nil {
 			t.Skipf("filesystem does not support user xattrs: %v", err)
 		}
+		// Make the source subdir read-only to verify directory xattrs are
+		// applied before bottom-up chmod restores 0555 permissions.
+		if err := os.Chmod(subDir, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(subDir, 0755)
+			_ = os.Chmod(filepath.Join(dst, "xattrdir"), 0755)
+		})
 
 		if err := CopyDirPreserve(src, dst); err != nil {
 			t.Fatalf("CopyDirPreserve failed: %v", err)
+		}
+
+		// Verify directory xattrs were preserved (including on read-only dirs).
+		dstDir := filepath.Join(dst, "xattrdir")
+		dirSz, err := unix.Lgetxattr(dstDir, attrName, nil)
+		if err != nil {
+			t.Fatalf("directory xattr %q not found on %s: %v", attrName, dstDir, err)
+		}
+		dirBuf := make([]byte, dirSz)
+		if _, err := unix.Lgetxattr(dstDir, attrName, dirBuf); err != nil {
+			t.Fatalf("failed to read directory xattr: %v", err)
+		}
+		if string(dirBuf) != string(attrVal) {
+			t.Errorf("directory xattr: got %q, want %q", dirBuf, attrVal)
 		}
 
 		// Verify file xattrs were preserved.

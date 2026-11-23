@@ -79,18 +79,20 @@ func CopyDirPreserve(src, dst string) error {
 		return fmt.Errorf("source %s is not a directory", src)
 	}
 
-	type dirMode struct {
-		path string
+	type dirMeta struct {
+		src  string
+		dst  string
 		mode fs.FileMode
 	}
 
 	// Create directories with owner rwx during the walk so non-root copies can
-	// populate read-only (e.g. 0555/0500) source directories, then restore exact
-	// permissions and special bits bottom-up once all children are written.
+	// populate read-only (e.g. 0555/0500) source directories and apply directory
+	// xattrs, then restore exact permissions and special bits bottom-up once all
+	// children are written.
 	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()|0700); err != nil {
 		return fmt.Errorf("failed to create destination %s: %w", dst, err)
 	}
-	dirs := []dirMode{{path: dst, mode: srcInfo.Mode()}}
+	dirs := []dirMeta{{src: src, dst: dst, mode: srcInfo.Mode()}}
 
 	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -125,7 +127,7 @@ func CopyDirPreserve(src, dst string) error {
 			if err := os.MkdirAll(dstPath, info.Mode().Perm()|0700); err != nil {
 				return err
 			}
-			dirs = append(dirs, dirMode{path: dstPath, mode: info.Mode()})
+			dirs = append(dirs, dirMeta{src: path, dst: dstPath, mode: info.Mode()})
 			return nil
 		}
 
@@ -151,8 +153,27 @@ func CopyDirPreserve(src, dst string) error {
 	}
 
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := os.Chmod(dirs[i].path, dirs[i].mode); err != nil {
-			return fmt.Errorf("failed to chmod destination %s: %w", dirs[i].path, err)
+		if err := copyXattrs(dirs[i].src, dirs[i].dst); err != nil {
+			return err
+		}
+		if err := os.Chmod(dirs[i].dst, dirs[i].mode); err != nil {
+			return fmt.Errorf("failed to chmod destination %s: %w", dirs[i].dst, err)
+		}
+	}
+	return nil
+}
+
+// copyXattrs copies extended attributes (including security.capability and
+// user.*) from src to dst without following symlinks.
+func copyXattrs(src, dst string) error {
+	xattrs, err := readXattrs(src, false)
+	if err != nil || len(xattrs) == 0 {
+		return nil
+	}
+	for _, xa := range xattrs {
+		name := strings.TrimSuffix(string(xa.Name), "\x00")
+		if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
+			return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
 		}
 	}
 	return nil
@@ -197,14 +218,8 @@ func CopyFilePreserveXattrs(src, dst string) (retErr error) {
 	}
 
 	// Copy extended attributes (includes security.capability and user.*).
-	xattrs, err := readXattrs(src, false)
-	if err == nil && len(xattrs) > 0 {
-		for _, xa := range xattrs {
-			name := strings.TrimSuffix(string(xa.Name), "\x00")
-			if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
-				return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
-			}
-		}
+	if err := copyXattrs(src, dst); err != nil {
+		return err
 	}
 
 	// Preserve exact permissions and special bits regardless of umask or pre-existing dst.

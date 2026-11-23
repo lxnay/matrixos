@@ -4,8 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // --- Move (same device / fast path) ---
@@ -68,6 +71,14 @@ func TestMove_SrcNotFound(t *testing.T) {
 	err := Move(filepath.Join(tmp, "nonexistent"), filepath.Join(tmp, "dst"))
 	if err == nil {
 		t.Error("expected error for nonexistent source")
+	}
+
+	nestedDst := filepath.Join(tmp, "newparent", "nested", "dst")
+	if err := Move(filepath.Join(tmp, "missing-src"), nestedDst); err == nil {
+		t.Error("expected error for nonexistent source with missing dst parent")
+	}
+	if _, statErr := os.Stat(filepath.Join(tmp, "newparent")); !os.IsNotExist(statErr) {
+		t.Errorf("Move created destination parent directory despite missing source: stat err = %v", statErr)
 	}
 }
 
@@ -252,6 +263,89 @@ func TestMoveFileCrossDevice_SrcNotFound(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent source")
 	}
+}
+
+func TestMoveDirCrossDevice_AtomicStagingAndCleanupOnError(t *testing.T) {
+	t.Run("NoPartialDstOnFailure", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src")
+		dstParent := filepath.Join(tmp, "dstparent")
+		dst := filepath.Join(dstParent, "dst")
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mknod(filepath.Join(src, "z.sock"), unix.S_IFSOCK|0600, 0); err != nil {
+			t.Fatalf("Mknod S_IFSOCK: %v", err)
+		}
+
+		err := moveDirCrossDevice(src, dst)
+		if err == nil {
+			t.Fatal("expected moveDirCrossDevice to fail on unix socket inside src")
+		}
+		if _, statErr := os.Lstat(dst); !os.IsNotExist(statErr) {
+			t.Fatalf("moveDirCrossDevice left partial destination %s on failure (stat err=%v)", dst, statErr)
+		}
+		entries, readErr := os.ReadDir(dstParent)
+		if readErr == nil {
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), ".move-dir-") {
+					t.Errorf("moveDirCrossDevice leaked staging dir %s", e.Name())
+				}
+			}
+		}
+	})
+
+	t.Run("RejectsExistingNonEmptyDstWithoutMerging", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src")
+		dst := filepath.Join(tmp, "dst")
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "from_src.txt"), []byte("src"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dst, "existing.txt"), []byte("dst"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := moveDirCrossDevice(src, dst); err == nil {
+			t.Fatal("expected moveDirCrossDevice to fail when dst is a non-empty directory")
+		}
+		if _, err := os.Stat(filepath.Join(dst, "from_src.txt")); !os.IsNotExist(err) {
+			t.Fatal("moveDirCrossDevice merged src into existing non-empty dst")
+		}
+		if _, err := os.Stat(filepath.Join(dst, "existing.txt")); err != nil {
+			t.Fatalf("existing dst contents damaged: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(src, "from_src.txt")); err != nil {
+			t.Fatalf("src contents should remain intact on error: %v", err)
+		}
+	})
+
+	t.Run("TrailingSlashOnDst", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src")
+		dst := filepath.Join(tmp, "dst") + "/"
+		if err := os.MkdirAll(src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("ok"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveDirCrossDevice(src, dst); err != nil {
+			t.Fatalf("moveDirCrossDevice with trailing slash on dst failed: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(tmp, "dst", "f.txt")); err != nil {
+			t.Fatalf("expected moved file at dst/f.txt: %v", err)
+		}
+	})
 }
 
 // --- Real cross-device tests (require root to mount tmpfs) ---

@@ -24,7 +24,7 @@ func MountpointToDevice(mnt string) (string, error) {
 		return "", fmt.Errorf("missing mnt parameter")
 	}
 
-	entry, err := findMountByTarget(mnt)
+	entry, err := findMountByTargetResolveAutofs(mnt)
 	if err != nil {
 		return "", fmt.Errorf("no device found for mountpoint %s", mnt)
 	}

@@ -105,13 +105,16 @@ func TestParseMountInfoLine(t *testing.T) {
 	})
 
 	t.Run("OctalEscapes", func(t *testing.T) {
-		line := `25 1 8:1 / /mnt/my\040dir rw,relatime shared:1 - ext4 /dev/sda1 rw`
+		line := `25 1 8:1 / /mnt/my\040dir rw,relatime shared:1 - ext4 /mnt/src\040dir rw`
 		entry, err := parseMountInfoLine(line)
 		if err != nil {
 			t.Fatalf("parseMountInfoLine failed: %v", err)
 		}
 		if entry.Mountpoint != "/mnt/my dir" {
 			t.Errorf("Expected '/mnt/my dir', got %q", entry.Mountpoint)
+		}
+		if entry.Source != "/mnt/src dir" {
+			t.Errorf("Expected Source '/mnt/src dir', got %q", entry.Source)
 		}
 	})
 
