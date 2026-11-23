@@ -1772,6 +1772,88 @@ func TestSetupChrootDNS_CreatesEtcDir(t *testing.T) {
 	}
 }
 
+func TestSetupChrootDNS_ConfinesSymlinksAndReplacesResolvSymlink(t *testing.T) {
+	if _, err := os.Stat("/etc/resolv.conf"); os.IsNotExist(err) {
+		t.Skip("skipping: /etc/resolv.conf not found")
+	}
+
+	t.Run("DoesNotOverwriteHostTargetThroughResolvSymlink", func(t *testing.T) {
+		outsideDir := t.TempDir()
+		outsideFile := filepath.Join(outsideDir, "host-secret")
+		if err := os.WriteFile(outsideFile, []byte("DO-NOT-OVERWRITE"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		chrootDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(chrootDir, "etc"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		resolvPath := filepath.Join(chrootDir, "etc", "resolv.conf")
+		if err := os.Symlink(outsideFile, resolvPath); err != nil {
+			t.Fatal(err)
+		}
+
+		sd := newTestSeederWithConfig(workerTestConfig())
+		if err := sd.SetupChrootDNS(chrootDir); err != nil {
+			t.Fatalf("SetupChrootDNS: %v", err)
+		}
+
+		gotOutside, err := os.ReadFile(outsideFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotOutside) != "DO-NOT-OVERWRITE" {
+			t.Fatalf("SetupChrootDNS followed symlink and overwrote host file %s with %q", outsideFile, string(gotOutside))
+		}
+		info, err := os.Lstat(resolvPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("expected %s to be replaced by a regular file, still a symlink", resolvPath)
+		}
+	})
+
+	t.Run("ReplacesDanglingResolvSymlink", func(t *testing.T) {
+		chrootDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(chrootDir, "etc"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		resolvPath := filepath.Join(chrootDir, "etc", "resolv.conf")
+		if err := os.Symlink("/nonexistent/systemd/resolve/stub-resolv.conf", resolvPath); err != nil {
+			t.Fatal(err)
+		}
+
+		sd := newTestSeederWithConfig(workerTestConfig())
+		if err := sd.SetupChrootDNS(chrootDir); err != nil {
+			t.Fatalf("SetupChrootDNS failed on dangling resolv.conf symlink: %v", err)
+		}
+		info, err := os.Lstat(resolvPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			t.Fatalf("expected regular file at %s, got mode=%v", resolvPath, info.Mode())
+		}
+	})
+
+	t.Run("RejectsEscapingEtcSymlink", func(t *testing.T) {
+		outsideDir := t.TempDir()
+		chrootDir := t.TempDir()
+		if err := os.Symlink(outsideDir, filepath.Join(chrootDir, "etc")); err != nil {
+			t.Fatal(err)
+		}
+
+		sd := newTestSeederWithConfig(workerTestConfig())
+		if err := sd.SetupChrootDNS(chrootDir); err == nil {
+			t.Fatal("SetupChrootDNS succeeded when chroot /etc symlink escaped to host directory")
+		}
+		if _, err := os.Stat(filepath.Join(outsideDir, "resolv.conf")); !os.IsNotExist(err) {
+			t.Fatalf("SetupChrootDNS wrote resolv.conf outside chroot into %s", outsideDir)
+		}
+	})
+}
+
 // --- SetupChrootDirs tests ---
 
 func TestSetupChrootDirs_CreatesPhasesDirAndCallsSetupDevDir(t *testing.T) {

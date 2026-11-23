@@ -981,3 +981,141 @@ func TestSignalGuard_SecondSignalAbsorbedDuringCleanup(t *testing.T) {
 		t.Fatal("signal.Stop(sigCh) was called before runCleanups finished, reverting SIGINT to SIG_DFL mid-cleanup")
 	}
 }
+
+func TestSignalGuard_ArmDuringCleanupDoesNotSpawnSecondListenerOrExitEarly(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 4)
+	var cleanupFinished atomic.Bool
+	var exitedEarly atomic.Bool
+	signalExit = func(code int) {
+		if !cleanupFinished.Load() {
+			exitedEarly.Store(true)
+		}
+		exitCh <- code
+	}
+	t.Cleanup(func() { signalExit = origExit })
+
+	backup := make(chan os.Signal, 2)
+	signal.Notify(backup, syscall.SIGINT)
+	defer signal.Stop(backup)
+
+	var g1, g2 SignalGuard
+	inCleanup := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+
+	g1.Arm()
+	g1.PushCleanup(func() {
+		close(inCleanup)
+		<-releaseCleanup
+		cleanupFinished.Store(true)
+	})
+
+	sigCoordMu.Lock()
+	ch1 := globalSigCh
+	sigCoordMu.Unlock()
+	ch1 <- syscall.SIGINT
+
+	<-inCleanup
+
+	// Disarm g1 concurrently so it leaves activeGuards while waiting on cleanupDone.
+	disarm1Done := make(chan struct{})
+	go func() {
+		g1.Disarm()
+		close(disarm1Done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		sigCoordMu.Lock()
+		armed := g1.armed
+		sigCoordMu.Unlock()
+		if !armed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Arming g2 while signal cleanup is in progress must NOT spawn a second listener.
+	g2.Arm()
+	defer g2.Disarm()
+
+	// Deliver a real second SIGINT while g1's slow cleanup is still blocked.
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		close(releaseCleanup)
+		t.Fatalf("kill SIGINT: %v", err)
+	}
+	select {
+	case <-backup:
+	case <-time.After(time.Second):
+		close(releaseCleanup)
+		t.Fatal("timed out waiting for second SIGINT delivery")
+	}
+
+	// Give any buggy second listener a window to fire signalExit prematurely.
+	select {
+	case <-exitCh:
+		close(releaseCleanup)
+		<-disarm1Done
+		t.Fatal("second SIGINT triggered premature signalExit while first guard cleanup was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseCleanup)
+	select {
+	case <-exitCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first signalExit after cleanup completed")
+	}
+	<-disarm1Done
+
+	if exitedEarly.Load() {
+		t.Fatal("signalExit ran before g1 cleanup finished")
+	}
+}
+
+func TestSignalGuard_SignalSnapshotCapturesArmGenPreventingGen2Steal(t *testing.T) {
+	origExit := signalExit
+	exitCh := make(chan int, 2)
+	signalExit = func(code int) { exitCh <- code }
+	t.Cleanup(func() { signalExit = origExit })
+
+	var outer, inner SignalGuard
+	var outerGen2Ran atomic.Bool
+
+	outer.Arm() // gen 1
+	outer.PushCleanup(func() {})
+
+	inner.Arm() // gen 1
+	inner.PushCleanup(func() {
+		// Disarm outer (gen 1) and re-arm outer (gen 2) with a fresh cleanup
+		// before runSignalCleanups advances from inner to outer.
+		outer.Disarm()
+		outer.Arm() // gen 2
+		outer.PushCleanup(func() {
+			outerGen2Ran.Store(true)
+		})
+	})
+
+	sigCoordMu.Lock()
+	ch := globalSigCh
+	sigCoordMu.Unlock()
+	ch <- syscall.SIGINT
+
+	select {
+	case <-exitCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for signalExit")
+	}
+	inner.Disarm()
+
+	if outerGen2Ran.Load() {
+		outer.Disarm()
+		t.Fatal("gen-1 signal teardown stole and executed gen-2 cleanup pushed after re-Arm")
+	}
+
+	// Verify gen-2 cleanup is still intact and executes when gen-2 runs cleanups.
+	outer.RunCleanups()
+	outer.Disarm()
+	if !outerGen2Ran.Load() {
+		t.Fatal("gen-2 cleanup was lost instead of preserved for gen-2")
+	}
+}

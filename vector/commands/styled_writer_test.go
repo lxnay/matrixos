@@ -171,6 +171,33 @@ func TestWriteCRLF(t *testing.T) {
 	}
 }
 
+func TestWriteLFFollowedByCRLF(t *testing.T) {
+	t.Run("PreservesPrefixOnBothLines", func(t *testing.T) {
+		var buf bytes.Buffer
+		sw := newStyledWriter(&buf, "[P]", "", "", false)
+
+		if _, err := sw.Write([]byte("line1\nline2\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		want := "[P] line1\n[P] line2\n"
+		if got := buf.String(); got != want {
+			t.Errorf("Write(\"line1\\nline2\\r\\n\") = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("PreservesTwoBlankLines", func(t *testing.T) {
+		var buf bytes.Buffer
+		sw := newStyledWriter(&buf, "[P]", "", "", false)
+
+		if _, err := sw.Write([]byte("\n\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := buf.String(); got != "\n\n" {
+			t.Errorf("Write(\"\\n\\r\\n\") = %q, want \"\\n\\n\"", got)
+		}
+	})
+}
+
 func TestWriteCROverwriteTTY(t *testing.T) {
 	var buf bytes.Buffer
 	sw := newStyledWriter(&buf, "", "", "", true)

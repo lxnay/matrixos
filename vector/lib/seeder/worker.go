@@ -434,13 +434,34 @@ func (s *Seeder) ExecutePrepper(info SeederInfo, params *SeederParams, opts *Pre
 
 // --- Chroot DNS ---
 
-// SetupChrootDNS copies /etc/resolv.conf into the chroot.
+// SetupChrootDNS copies /etc/resolv.conf into the chroot without following
+// symlinks outside chrootDir or overwriting host targets through a symlinked
+// /etc/resolv.conf.
 func (s *Seeder) SetupChrootDNS(chrootDir string) error {
+	if chrootDir == "" {
+		return fmt.Errorf("missing chrootDir parameter")
+	}
 	src := "/etc/resolv.conf"
-	dst := filepath.Join(chrootDir, "etc", "resolv.conf")
+	chrootDir = filepath.Clean(chrootDir)
 
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("failed to create %s: %w", filepath.Dir(dst), err)
+	etcPath := filepath.Join(chrootDir, "etc")
+	var etcDir string
+	if _, err := os.Lstat(etcPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(etcPath, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", etcPath, err)
+		}
+		etcDir = etcPath
+	} else if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", etcPath, err)
+	} else {
+		resolved, fi, err := filesystems.ResolvePathInRoot(chrootDir, "/etc")
+		if err != nil {
+			return fmt.Errorf("failed to resolve /etc inside %s: %w", chrootDir, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", resolved)
+		}
+		etcDir = resolved
 	}
 
 	data, err := os.ReadFile(src)
@@ -448,8 +469,37 @@ func (s *Seeder) SetupChrootDNS(chrootDir string) error {
 		return fmt.Errorf("failed to read %s: %w", src, err)
 	}
 
+	dst := filepath.Join(etcDir, "resolv.conf")
 	s.Print("Copying %s to %s\n", src, dst)
-	return os.WriteFile(dst, data, 0644)
+
+	tmpFile, err := os.CreateTemp(etcDir, ".resolv.conf.*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp resolv.conf in %s: %w", etcDir, err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Chmod(0644); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("failed to chmod %s: %w", tmpPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return fmt.Errorf("failed to replace %s: %w", dst, err)
+	}
+	cleanupTmp = false
+	return nil
 }
 
 // --- Chroot directory setup ---

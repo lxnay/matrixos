@@ -377,11 +377,26 @@ func (p *WorkerPool) AcquireSysProcAttr(workerIndex int) (*syscall.SysProcAttr, 
 	}, release
 }
 
+// killCgroupTasks best-effort kills any lingering processes in dir using
+// cgroup v2's edge-triggered cgroup.kill interface (Linux 5.14+), if present.
+func killCgroupTasks(dir string) {
+	killPath := filepath.Join(dir, "cgroup.kill")
+	if _, err := os.Stat(killPath); err == nil {
+		_ = os.WriteFile(killPath, []byte("1"), 0644)
+	}
+}
+
 // removeCgroupDir removes a cgroup directory, retrying briefly only on
 // transient EBUSY while the kernel finishes reaping killed cgroup tasks.
-func removeCgroupDir(dir string) error {
+// When killTasks is true, cgroup.kill is written before each attempt so any
+// task spawned into the cgroup via a duplicated CgroupFD right after an
+// earlier kill is also terminated before the next retry.
+func removeCgroupDir(dir string, killTasks bool) error {
 	var err error
 	for attempt := range cgroupRemoveMaxRetries {
+		if killTasks {
+			killCgroupTasks(dir)
+		}
 		err = cgroupRemoveFunc(dir)
 		if err == nil || os.IsNotExist(err) {
 			return nil
@@ -414,20 +429,14 @@ func (p *WorkerPool) Close() {
 
 	var remaining []string
 	for _, dir := range p.staleDirs {
-		// Best-effort kill any lingering processes in this worker cgroup
-		// (cgroup v2 cgroup.kill, Linux 5.14+) if the kernel interface exists.
-		killPath := filepath.Join(dir, "cgroup.kill")
-		if _, err := os.Stat(killPath); err == nil {
-			_ = os.WriteFile(killPath, []byte("1"), 0644)
-		}
-		if err := removeCgroupDir(dir); err != nil {
+		if err := removeCgroupDir(dir, true); err != nil {
 			remaining = append(remaining, dir)
 		}
 	}
 	p.staleDirs = remaining
 
 	if p.parentDir != "" {
-		if err := removeCgroupDir(p.parentDir); err == nil {
+		if err := removeCgroupDir(p.parentDir, false); err == nil {
 			p.parentDir = ""
 		}
 	}

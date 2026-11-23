@@ -282,3 +282,70 @@ func TestWorkerPool_CloseRetriesTransientEBUSY(t *testing.T) {
 		t.Fatalf("parentDir %s still exists after EBUSY retries", parentDir)
 	}
 }
+
+func TestWorkerPool_CloseRewritesCgroupKillOnEBUSYRetries(t *testing.T) {
+	root := fakeCgroupRoot(t)
+	pool, err := NewWorkerPool(&WorkerPoolOptions{
+		Parallelism:       1,
+		NumCPUs:           2,
+		MemPerWorkerBytes: 1 << 30,
+		TotalMemBytes:     1 << 30,
+		CgroupRoot:        root,
+	})
+	if err != nil {
+		t.Fatalf("NewWorkerPool: %v", err)
+	}
+
+	workerDir := pool.workers[0].dir
+	parentDir := pool.parentDir
+
+	// Replace workerDir contents with just a fake cgroup.kill file.
+	entries, err := os.ReadDir(workerDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		_ = os.Remove(filepath.Join(workerDir, e.Name()))
+	}
+	killPath := filepath.Join(workerDir, "cgroup.kill")
+	if err := os.WriteFile(killPath, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(parentDir, "cgroup.subtree_control"))
+
+	origRemove := cgroupRemoveFunc
+	origDelay := cgroupRemoveRetryDelay
+	cgroupRemoveRetryDelay = time.Millisecond
+
+	var attempts int
+	var killWritesObserved int
+	cgroupRemoveFunc = func(path string) error {
+		if path == workerDir {
+			attempts++
+			data, _ := os.ReadFile(killPath)
+			if string(data) == "1" {
+				killWritesObserved++
+				// Clear cgroup.kill after observing it so we detect whether a
+				// subsequent retry writes "1" again (for a late clone3 task).
+				_ = os.WriteFile(killPath, nil, 0644)
+			}
+			if killWritesObserved < 2 {
+				return &os.PathError{Op: "remove", Path: path, Err: syscall.EBUSY}
+			}
+			_ = os.Remove(killPath)
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() {
+		cgroupRemoveFunc = origRemove
+		cgroupRemoveRetryDelay = origDelay
+	})
+
+	pool.Close()
+	if killWritesObserved < 2 {
+		t.Fatalf("cgroup.kill written only %d time(s) across %d EBUSY attempts, want >= 2", killWritesObserved, attempts)
+	}
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Fatalf("workerDir %s still exists after EBUSY retries", workerDir)
+	}
+}

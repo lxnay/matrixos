@@ -114,8 +114,10 @@ func (w *styledWriter) Write(p []byte) (int, error) {
 			break
 		}
 
-		// Treat \r\n as a regular newline.
-		if crIdx >= 0 && crIdx+1 < len(w.buf) && w.buf[crIdx+1] == '\n' {
+		// Treat \r\n as a regular newline only when \r immediately precedes the
+		// earliest \n in the buffer; otherwise earlier standalone \n lines must
+		// be emitted first.
+		if crIdx >= 0 && nlIdx == crIdx+1 {
 			line := string(w.buf[:crIdx])
 			w.buf = w.buf[crIdx+2:]
 			if err := w.writeCompleteLine(line); err != nil {
