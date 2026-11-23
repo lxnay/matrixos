@@ -1095,7 +1095,11 @@ func TestSeedsParallelUsedWhenConfigured(t *testing.T) {
 	// without RunWithGuard.
 	fdEntries, fdErr := os.ReadDir("/proc/self/fd")
 	if fdErr == nil {
-		cgPrefix := cmd.cgroupRoot + string(os.PathSeparator)
+		cgRoot := cmd.cgroupRoot
+		if resolved, err := filepath.EvalSymlinks(cgRoot); err == nil {
+			cgRoot = resolved
+		}
+		cgPrefix := cgRoot + string(os.PathSeparator)
 		for _, e := range fdEntries {
 			if target, lerr := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); lerr == nil && strings.HasPrefix(target, cgPrefix) {
 				t.Errorf("runSeeds() leaked open cgroup FD %s -> %s", e.Name(), target)

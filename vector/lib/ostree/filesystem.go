@@ -10,6 +10,9 @@ import (
 )
 
 func (o *Ostree) SetupEtc(rootfs string) error {
+	if err := filesystems.CheckDirIsRoot(rootfs); err != nil {
+		return err
+	}
 	o.Print("Setting up /etc...\n")
 	etcDir := filepath.Join(rootfs, "etc")
 	usrEtcDir := filepath.Join(rootfs, "usr", "etc")

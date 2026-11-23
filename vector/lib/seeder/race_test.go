@@ -363,3 +363,80 @@ func TestParallelSeed_AcquireSysProcAttrReleasesFD(t *testing.T) {
 		t.Error("AcquireSysProcAttr release callback was not called after Seed completed")
 	}
 }
+
+func TestParallelSeed_AbortsWhenCgroupUnavailableOrCancelledBeforeAcquire(t *testing.T) {
+	t.Run("NilCgroupRefusesUnconfinedSeed", func(t *testing.T) {
+		infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+		paramsMap := map[string]*SeederParams{
+			"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+		}
+		var seedRan atomic.Bool
+		err := ParallelSeed(context.Background(), &ParallelSeedOptions{
+			Seeders:      infos,
+			ParamsByName: paramsMap,
+			Parallelism:  1,
+			AcquireSysProcAttr: func(int) (*syscall.SysProcAttr, func()) {
+				return nil, nil
+			},
+			NewSeeder: func(_ *NewSeederOptions) (ISeeder, error) {
+				return &attrTrackingSeeder{
+					MockSeeder: DefaultMockSeeder(),
+					onSeed: func(*SeedOptions) error {
+						seedRan.Store(true)
+						return nil
+					},
+				}, nil
+			},
+			NewStdoutWriter: noopWriter,
+			NewStderrWriter: noopWriter,
+			PushCleanup:     noopCleanup,
+		})
+		if err == nil || !strings.Contains(err.Error(), "worker cgroup unavailable") {
+			t.Fatalf("expected worker cgroup unavailable error, got: %v", err)
+		}
+		if seedRan.Load() {
+			t.Fatal("Seed ran unconfined despite configured cgroup callback returning nil")
+		}
+	})
+
+	t.Run("CancelledDuringAcquireAbortsBeforeSeed", func(t *testing.T) {
+		infos, chrootDirs := setupParallelSeeders(t, []string{"00-bedrock"})
+		paramsMap := map[string]*SeederParams{
+			"00-bedrock": {ChrootName: "bedrock", PreferredChrootDir: chrootDirs["00-bedrock"]},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		var seedRan, released atomic.Bool
+		err := ParallelSeed(ctx, &ParallelSeedOptions{
+			Seeders:      infos,
+			ParamsByName: paramsMap,
+			Parallelism:  1,
+			AcquireSysProcAttr: func(int) (*syscall.SysProcAttr, func()) {
+				cancel()
+				return &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: 42}, func() {
+					released.Store(true)
+				}
+			},
+			NewSeeder: func(_ *NewSeederOptions) (ISeeder, error) {
+				return &attrTrackingSeeder{
+					MockSeeder: DefaultMockSeeder(),
+					onSeed: func(*SeedOptions) error {
+						seedRan.Store(true)
+						return nil
+					},
+				}, nil
+			},
+			NewStdoutWriter: noopWriter,
+			NewStderrWriter: noopWriter,
+			PushCleanup:     noopCleanup,
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		if seedRan.Load() {
+			t.Fatal("Seed ran despite context cancellation during AcquireSysProcAttr")
+		}
+		if !released.Load() {
+			t.Fatal("AcquireSysProcAttr release callback did not run on post-acquire cancellation")
+		}
+	})
+}

@@ -578,6 +578,14 @@ func seedWorker(ctx context.Context, sw *seedWorkerOpts) error {
 	} else if opts.SysProcAttr != nil {
 		sysProcAttr = opts.SysProcAttr(sw.workerIdx)
 	}
+	// Re-check cancellation after acquiring the cgroup FD and refuse to
+	// spawn unconfined if a configured cgroup callback returned nil.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if (opts.AcquireSysProcAttr != nil || opts.SysProcAttr != nil) && sysProcAttr == nil {
+		return fmt.Errorf("[%s] worker cgroup unavailable for worker %d", info.Name, sw.workerIdx)
+	}
 	sd.Print(
 		"[%s] Running seeder inside %s ...\n",
 		info.Name, chrootDir,

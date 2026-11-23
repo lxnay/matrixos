@@ -292,7 +292,7 @@ func TestOstree_CommitAndUpdateSummarySerializeWithGpgMu(t *testing.T) {
 func TestOstree_AddRemotePullAndLastCommitSerializeWithLockRepo(t *testing.T) {
 	tmp := t.TempDir()
 	repoDir := filepath.Join(tmp, "repo")
-	if err := os.MkdirAll(repoDir, 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(repoDir, "sub"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	// Also exercise a genuinely uncleaned equivalent path ("repo/./sub/..").
@@ -413,6 +413,23 @@ func TestPrepareFilesystemHierarchy_RejectsRootAndEmpty(t *testing.T) {
 	}
 	if err := o.PrepareFilesystemHierarchy("/"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "root") {
 		t.Fatalf("expected root safety error for '/', got: %v", err)
+	}
+}
+
+func TestOstree_SetupEtcRejectsHostRoot(t *testing.T) {
+	o, err := NewOstree(NewOstreeOptions{Config: &config.MockConfig{Items: map[string][]string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SetupEtc("/"); err == nil || !strings.Contains(err.Error(), "IS MAPPED TO HOST ROOT") {
+		t.Fatalf("SetupEtc(\"/\") = %v, want host-root guard error", err)
+	}
+	rootLink := filepath.Join(t.TempDir(), "rootlink")
+	if err := os.Symlink("/", rootLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SetupEtc(rootLink); err == nil || !strings.Contains(err.Error(), "IS MAPPED TO HOST ROOT") {
+		t.Fatalf("SetupEtc(symlink->/) = %v, want host-root guard error", err)
 	}
 }
 
