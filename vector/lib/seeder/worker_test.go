@@ -422,6 +422,48 @@ func TestParseSeederParams_PartialChrootDirs(t *testing.T) {
 	}
 }
 
+func TestParseSeederParams_CleansPaths(t *testing.T) {
+	tmp := t.TempDir()
+
+	writeParamsScriptFull(t, tmp,
+		"bedrock",
+		"bedrock-20260228",
+		"/mnt/chroots/",
+		"/mnt/chroots//bedrock-20260228/",
+		"/mnt/chroots//bedrock-20260228/",
+		[]string{"/mnt/chroots//bedrock-20260228/", "/mnt/chroots/./bedrock-20260104///"},
+		[]string{"/mnt/chroots//bedrock-20260301/"},
+	)
+
+	sd := newRealSeeder(tmp)
+	params, err := sd.ParseSeederParams(SeederInfo{Name: "00-bedrock", Dir: tmp})
+	if err != nil {
+		t.Fatalf("ParseSeederParams: %v", err)
+	}
+
+	if params.ChrootsDir != "/mnt/chroots" {
+		t.Errorf("ChrootsDir = %q, want %q", params.ChrootsDir, "/mnt/chroots")
+	}
+	if params.PreferredChrootDir != "/mnt/chroots/bedrock-20260228" {
+		t.Errorf("PreferredChrootDir = %q, want %q", params.PreferredChrootDir, "/mnt/chroots/bedrock-20260228")
+	}
+	if params.LatestAvailableChrootDir != "/mnt/chroots/bedrock-20260228" {
+		t.Errorf("LatestAvailableChrootDir = %q, want %q", params.LatestAvailableChrootDir, "/mnt/chroots/bedrock-20260228")
+	}
+	wantComplete := []string{"/mnt/chroots/bedrock-20260228", "/mnt/chroots/bedrock-20260104"}
+	if len(params.CompleteChrootDirs) != len(wantComplete) {
+		t.Fatalf("CompleteChrootDirs = %v, want %v", params.CompleteChrootDirs, wantComplete)
+	}
+	for i, want := range wantComplete {
+		if params.CompleteChrootDirs[i] != want {
+			t.Errorf("CompleteChrootDirs[%d] = %q, want %q", i, params.CompleteChrootDirs[i], want)
+		}
+	}
+	if len(params.PartialChrootDirs) != 1 || params.PartialChrootDirs[0] != "/mnt/chroots/bedrock-20260301" {
+		t.Errorf("PartialChrootDirs = %v, want [/mnt/chroots/bedrock-20260301]", params.PartialChrootDirs)
+	}
+}
+
 func TestParseSeederParams_UsesDevDir(t *testing.T) {
 	tmp := t.TempDir()
 	latestDir := filepath.Join(tmp, "latest-chroot")

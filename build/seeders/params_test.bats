@@ -339,3 +339,36 @@ teardown() {
     [[ "${result}" == *"cosmic-20250601"* ]]
     [[ "${result}" != *"cosmic-20250608"* ]]
 }
+
+@test "bedrock params: trailing slash in MATRIXOS_DEV_DIR and SEEDER_CHROOTS_DIR does not produce double slashes" {
+    export MATRIXOS_DEV_DIR="${REPO_ROOT}/"
+    source "${BATS_TEST_DIRNAME}/00-bedrock/params.sh"
+
+    [ "${SEEDER_CHROOTS_DIR}" = "${REPO_ROOT}/out/seeder/chroots" ]
+    [ "${PREFERRED_SEEDER_CHROOT_DIR}" = "${REPO_ROOT}/out/seeder/chroots/bedrock-20250609" ]
+
+    SEEDER_CHROOTS_DIR="${TEST_TMPDIR}/chroots/"
+    mkdir -p "${TEST_TMPDIR}/chroots/bedrock-20250601/phases"
+    touch "${TEST_TMPDIR}/chroots/bedrock-20250601/phases/done-prefix_myseeder"
+    mkdir -p "${TEST_TMPDIR}/chroots/bedrock-20250608"
+
+    local complete partial
+    complete=$(bedrock_params.find_all_chroot_dirs "myseeder" 2>/dev/null)
+    partial=$(bedrock_params.find_partial_chroot_dirs "myseeder" 2>/dev/null)
+
+    [ "${complete}" = "${TEST_TMPDIR}/chroots/bedrock-20250601" ]
+    [ "${partial}" = "${TEST_TMPDIR}/chroots/bedrock-20250608" ]
+}
+
+@test "derived params: trailing slash in MATRIXOS_DEV_DIR does not produce double slashes" {
+    export MATRIXOS_DEV_DIR="${REPO_ROOT}/"
+    for entry in "10-server:server" "20-gnome:gnome" "21-cosmic:cosmic"; do
+        local dir="${entry%%:*}"
+        local prefix="${entry##*:}"
+        (
+            source "${BATS_TEST_DIRNAME}/${dir}/params.sh"
+            [ "${SEEDER_CHROOTS_DIR}" = "${REPO_ROOT}/out/seeder/chroots" ]
+            [ "${PREFERRED_SEEDER_CHROOT_DIR}" = "${REPO_ROOT}/out/seeder/chroots/${prefix}-20250609" ]
+        )
+    done
+}

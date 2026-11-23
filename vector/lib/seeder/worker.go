@@ -198,6 +198,19 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 			"PREFERRED_SEEDER_CHROOT_DIR is empty in %s", paramsPath,
 		)
 	}
+
+	params.ChrootsDir = filepath.Clean(params.ChrootsDir)
+	params.PreferredChrootDir = filepath.Clean(params.PreferredChrootDir)
+	if params.LatestAvailableChrootDir != "" {
+		params.LatestAvailableChrootDir = filepath.Clean(params.LatestAvailableChrootDir)
+	}
+	for i, d := range params.CompleteChrootDirs {
+		params.CompleteChrootDirs[i] = filepath.Clean(d)
+	}
+	for i, d := range params.PartialChrootDirs {
+		params.PartialChrootDirs[i] = filepath.Clean(d)
+	}
+
 	return params, nil
 }
 
