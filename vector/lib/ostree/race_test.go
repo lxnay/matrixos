@@ -547,3 +547,68 @@ func TestOstree_ListContentsAndPackagesSerializeWithLockRepo(t *testing.T) {
 		t.Fatalf("ListContents/ListPackages overlapped with AddRemote on same repo: maxInFlight = %d, want 1", got)
 	}
 }
+
+func TestOstree_LockRepoSerializesSymlinkedAndDotDotPaths(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realRepo := filepath.Join(tmp, "sysroot", "ostree", "repo")
+	if err := os.MkdirAll(filepath.Join(realRepo, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkOstree := filepath.Join(tmp, "ostree")
+	if err := os.Symlink(filepath.Join(tmp, "sysroot", "ostree"), linkOstree); err != nil {
+		t.Fatal(err)
+	}
+	linkRepo := filepath.Join(linkOstree, "repo")
+	otherDir := filepath.Join(tmp, "other")
+	if err := os.MkdirAll(otherDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(realRepo, "sub"), filepath.Join(otherDir, "sublink")); err != nil {
+		t.Fatal(err)
+	}
+	dotDotRepo := filepath.Join(otherDir, "sublink") + "/.."
+
+	// Also verify nonexistent leaf under symlinked parent hashes identically
+	// to nonexistent leaf under real parent (e.g. before MaybeInitializeRemote).
+	uninitReal := filepath.Join(tmp, "sysroot", "ostree", "newrepo")
+	uninitLink := filepath.Join(linkOstree, "newrepo")
+
+	for _, tc := range []struct {
+		name string
+		p1   string
+		p2   string
+	}{
+		{"RealVsSymlink", realRepo, linkRepo},
+		{"RealVsSymlinkDotDot", realRepo, dotDotRepo},
+		{"NonExistentLeafUnderSymlink", uninitReal, uninitLink},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var inFlight, maxInFlight atomic.Int32
+			var wg sync.WaitGroup
+			wg.Add(2)
+			for _, p := range []string{tc.p1, tc.p2} {
+				go func(repoPath string) {
+					defer wg.Done()
+					unlock := LockRepo(repoPath)
+					defer unlock()
+					cur := inFlight.Add(1)
+					for {
+						prev := maxInFlight.Load()
+						if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+							break
+						}
+					}
+					time.Sleep(40 * time.Millisecond)
+					inFlight.Add(-1)
+				}(p)
+			}
+			wg.Wait()
+			if got := maxInFlight.Load(); got > 1 {
+				t.Fatalf("LockRepo(%q) and LockRepo(%q) ran concurrently (maxInFlight=%d, want 1)", tc.p1, tc.p2, got)
+			}
+		})
+	}
+}

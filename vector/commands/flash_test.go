@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -558,27 +559,44 @@ func TestResolveDevicesInteractiveCancelled(t *testing.T) {
 	withRootEuid(t)
 	withNoSleep(t)
 
-	ot := &ostree.MockOstree{}
-	cfg := defaultFlashTestConfig()
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"PartitionPromptEOF", "no\n"},
+		{"WholeDevicePromptEOF", "yes\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ot := &ostree.MockOstree{}
+			cfg := defaultFlashTestConfig()
+			cfg.Items["Imager.EspPartitionType"] = []string{"c12a7328-f81f-11d2-ba4b-00a0c93ec93b"}
+			cfg.Items["Imager.BootPartitionType"] = []string{"bc13c2ff-59e6-4262-a352-b275fd6f7172"}
+			cfg.Items["Imager.RootPartitionType"] = []string{"4f68bce3-e8cd-4db1-96e7-fbcaf984b709"}
 
-	cmd, err := newTestFlashCommand(ot, imager.DefaultMockImager(), cfg,
-		[]string{})
-	if err != nil {
-		t.Fatalf("newTestFlashCommand failed: %v", err)
-	}
-	cmd.SetupPrinters("flash")
+			cmd, err := newTestFlashCommand(ot, imager.DefaultMockImager(), cfg, []string{})
+			if err != nil {
+				t.Fatalf("newTestFlashCommand failed: %v", err)
+			}
+			cmd.SetupPrinters("flash")
+			cmd.printer = newStyledWriter(io.Discard, "", "", "", false)
+			cmd.errPrinter = newStyledWriter(io.Discard, "", "", "", false)
+			cmd.prompter = NewPrompter(strings.NewReader(tc.input), io.Discard, io.Discard, &cmd.UI)
 
-	// Provide an input that triggers "no" for whole device, then EOF which
-	// causes AskInput to return the default "" for the partition prompt,
-	// which fails because devPathPattern doesn't match "".
-	input := strings.NewReader("no\n")
-	cmd.prompter = NewPrompter(input, os.Stdout, os.Stderr, &cmd.UI)
+			errCh := make(chan error, 1)
+			go func() {
+				_, rErr := cmd.resolveDevicesInteractive(&imager.BuildOptions{})
+				errCh <- rErr
+			}()
 
-	opts := &imager.BuildOptions{}
-	_, err = cmd.resolveDevicesInteractive(opts)
-	// This will fail because we can't provide valid partitions via EOF.
-	if err == nil {
-		t.Fatal("Expected error from interactive with insufficient input")
+			select {
+			case err = <-errCh:
+				if err == nil {
+					t.Fatal("Expected error from interactive prompt on EOF")
+				}
+			case <-time.After(300 * time.Millisecond):
+				t.Fatalf("resolveDevicesInteractive(%q) spun in an infinite busy-loop on stdin EOF", tc.input)
+			}
+		})
 	}
 }
 

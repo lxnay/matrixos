@@ -350,7 +350,7 @@ func (c *UpgradeCommand) deploymentRoot(commit string) (string, error) {
 	for _, dep := range deployments {
 		if dep.Checksum == commit {
 			return ostree.BuildDeploymentRootfs(
-				root, dep.Stateroot, commit, dep.Index,
+				root, dep.Stateroot, commit, dep.Serial,
 			), nil
 		}
 	}

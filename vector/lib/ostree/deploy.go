@@ -25,15 +25,15 @@ type Deployment struct {
 }
 
 // BuildDeploymentRootfs builds the path to the deployed rootfs given a sysroot, osName,
-// commit and index.
-func BuildDeploymentRootfs(sysroot, osName, commit string, index int) string {
+// commit, and deployment serial.
+func BuildDeploymentRootfs(sysroot, osName, commit string, serial int) string {
 	return filepath.Join(
 		sysroot,
 		"ostree",
 		"deploy",
 		osName,
 		"deploy",
-		commit+"."+strconv.Itoa(index),
+		commit+"."+strconv.Itoa(serial),
 	)
 }
 

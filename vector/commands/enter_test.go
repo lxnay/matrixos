@@ -1672,4 +1672,32 @@ func TestNormalizeChrootPath(t *testing.T) {
 	if containsNormalizedPath([]string{"", "/a/b"}, "") {
 		t.Error("containsNormalizedPath should return false for empty target")
 	}
+
+	t.Run("SymlinkDotDotPosixOrder", func(t *testing.T) {
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c1 := filepath.Join(tmp, "real", "chroots", "bedrock-20260101")
+		c2 := filepath.Join(tmp, "real", "chroots", "bedrock-20260102")
+		other := filepath.Join(tmp, "other")
+		for _, d := range []string{c1, c2, other} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(c2, filepath.Join(other, "latest")); err != nil {
+			t.Fatal(err)
+		}
+
+		absViaLink := filepath.Join(other, "latest") + "/../bedrock-20260101"
+		if got := normalizeChrootPath(absViaLink); got != c1 {
+			t.Errorf("normalizeChrootPath(%q) = %q, want %q", absViaLink, got, c1)
+		}
+
+		t.Chdir(other)
+		if got := normalizeChrootPath("latest/../bedrock-20260101"); got != c1 {
+			t.Errorf("normalizeChrootPath(relative) = %q, want %q", got, c1)
+		}
+	})
 }

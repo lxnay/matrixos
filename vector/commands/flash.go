@@ -410,6 +410,9 @@ func (c *FlashCommand) promptWholeDevice(opts *imager.BuildOptions) error {
 		if err != nil {
 			return err
 		}
+		if prompt.EOF() {
+			return fmt.Errorf("unexpected end of input while prompting for block device")
+		}
 		if dev == "" || !filesystems.PathExists(dev) {
 			c.PrintErrf("Device %s does not exist. Try again.\n", dev)
 			continue
@@ -473,6 +476,9 @@ func (c *FlashCommand) promptPartition(target *string, label, expectedType strin
 			"", devPathPattern)
 		if err != nil {
 			return err
+		}
+		if prompt.EOF() {
+			return fmt.Errorf("unexpected end of input while prompting for %s partition", label)
 		}
 		if dev == "" || !filesystems.PathExists(dev) {
 			c.PrintErrf("Partition %s does not exist. Try again.\n", dev)

@@ -21,6 +21,12 @@ type Prompter struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	UI      *UI
+	eof     bool
+}
+
+// EOF reports whether the underlying input scanner has reached end-of-file.
+func (p *Prompter) EOF() bool {
+	return p.eof
 }
 
 // flusher is implemented by writers that buffer partial lines (e.g. styledWriter).
@@ -80,6 +86,7 @@ func (p *Prompter) AskInput(prompt, defaultVal string, pattern *regexp.Regexp) (
 				return "", fmt.Errorf("failed to read input: %w", err)
 			}
 			// EOF — use default.
+			p.eof = true
 			return defaultVal, nil
 		}
 		input := strings.TrimSpace(p.Scanner.Text())
@@ -104,6 +111,9 @@ func (p *Prompter) AskConfirm(prompt string) bool {
 	flushWriterInline(p.Stdout)
 
 	if !p.Scanner.Scan() {
+		if p.Scanner.Err() == nil {
+			p.eof = true
+		}
 		return false
 	}
 	response := strings.ToLower(strings.TrimSpace(p.Scanner.Text()))
