@@ -478,6 +478,33 @@ func (c *VMCommand) displayArgs() []string {
 	return qemuArgs
 }
 
+// startGuardedVM registers QEMU cancellation and teardown cleanups before
+// calling start so SIGINT/SIGTERM kills and reaps QEMU before temporary disks
+// are removed. The returned stop function is idempotent and should be deferred.
+func (c *VMCommand) startGuardedVM(cancel context.CancelFunc, start, stop func() error) (func(), error) {
+	var mu sync.Mutex
+	started := false
+	stopOnce := sync.OnceFunc(func() {
+		cancel()
+		mu.Lock()
+		wasStarted := started
+		mu.Unlock()
+		if wasStarted {
+			_ = stop()
+		}
+	})
+	c.PushPreCleanup(cancel)
+	c.PushCleanup(stopOnce)
+
+	mu.Lock()
+	err := start()
+	if err == nil {
+		started = true
+	}
+	mu.Unlock()
+	return stopOnce, err
+}
+
 func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	c.Println("Starting VM in interactive mode...")
 	c.FlushPrinters()
@@ -496,39 +523,18 @@ func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	}
 	cmd.WaitDelay = 5 * time.Second
 
-	var startMu sync.Mutex
-	started := false
 	var waitOnce sync.Once
 	var waitErr error
 	waitCmd := func() error {
-		waitOnce.Do(func() {
-			waitErr = cmd.Wait()
-		})
+		waitOnce.Do(func() { waitErr = cmd.Wait() })
 		return waitErr
 	}
-	stopVM := sync.OnceFunc(func() {
-		cancel()
-		startMu.Lock()
-		wasStarted := started
-		startMu.Unlock()
-		if wasStarted {
-			_ = waitCmd()
-		}
-	})
-	// Register QEMU teardown BEFORE cmd.Start() (synchronized by startMu) so
-	// SIGINT/SIGTERM arriving at any point after os.StartProcess kills and
-	// reaps QEMU before temporary OVMF/test disks are removed.
-	c.PushPreCleanup(cancel)
-	c.PushCleanup(stopVM)
-	defer stopVM()
 
-	startMu.Lock()
-	if err := cmd.Start(); err != nil {
-		startMu.Unlock()
+	stopVM, err := c.startGuardedVM(cancel, cmd.Start, waitCmd)
+	defer stopVM()
+	if err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
-	started = true
-	startMu.Unlock()
 
 	if err := waitCmd(); err != nil {
 		return fmt.Errorf("VM exited with error: %w", err)
@@ -553,32 +559,18 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 		return fmt.Errorf("failed to init VM: %w", err)
 	}
 	vm.display = os.Stdout
-	var startMu sync.Mutex
-	started := false
-	stopVM := sync.OnceFunc(func() {
-		cancel()
-		startMu.Lock()
-		wasStarted := started
-		startMu.Unlock()
-		if wasStarted {
-			_ = vm.Close()
-		}
-	})
-	// Register QEMU teardown BEFORE vm.Start() (synchronized by startMu) so
-	// SIGINT/SIGTERM arriving at any point after os.StartProcess kills and
-	// reaps QEMU before tempDir/testImagePath/extraDiskPath are removed.
-	c.PushPreCleanup(cancel)
-	c.PushCleanup(stopVM)
-	defer stopVM()
 
-	startMu.Lock()
-	if err := vm.Start(); err != nil {
-		_ = vm.Close()
-		startMu.Unlock()
+	stopVM, err := c.startGuardedVM(cancel, func() error {
+		if err := vm.Start(); err != nil {
+			_ = vm.Close()
+			return err
+		}
+		return nil
+	}, vm.Close)
+	defer stopVM()
+	if err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
-	started = true
-	startMu.Unlock()
 
 	startTime := time.Now()
 

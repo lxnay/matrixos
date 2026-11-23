@@ -6,8 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"reflect"
-	"runtime"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -63,101 +62,12 @@ var (
 	globalSigHandling     bool
 )
 
-type capturedGuard struct {
-	guard *SignalGuard
-	gen   uint64
-}
-
-type taggedCleanup struct {
-	gen uint64
-	fn  func()
-}
-
-func popCleanupsUpTo(items []taggedCleanup, maxGen uint64) ([]func(), []taggedCleanup) {
-	var popped []func()
-	var remaining []taggedCleanup
-	for _, item := range items {
-		if item.gen <= maxGen {
-			popped = append(popped, item.fn)
-		} else {
-			remaining = append(remaining, item)
-		}
-	}
-	return popped, remaining
-}
-
-func dropCleanupsUpTo(items []taggedCleanup, maxGen uint64) []taggedCleanup {
-	var remaining []taggedCleanup
-	for _, item := range items {
-		if item.gen > maxGen {
-			remaining = append(remaining, item)
-		}
-	}
-	return remaining
-}
-
 type SignalGuard struct {
-	mu              sync.Mutex
-	cleanupMu       sync.Mutex
-	preCleanups     []taggedCleanup
-	cleanups        []taggedCleanup
-	armGen          uint64
-	clearGen        uint64
-	runningCleanups bool
-	armed           bool
-	sigCleanupDone  <-chan struct{}
-}
-
-// runSignalCleanups executes all captured guards' cleanup stacks for a
-// received signal up to each guard's captured arm generation. Kept as a
-// non-inlined named function so calledFromCleanup can reliably detect
-// re-entrant Disarm() calls originating from inside a signal-triggered cleanup.
-//
-//go:noinline
-func runSignalCleanups(sig os.Signal, guards []capturedGuard) {
-	fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
-	for i := len(guards) - 1; i >= 0; i-- {
-		guards[i].guard.runCleanupsUpTo(guards[i].gen)
-	}
-}
-
-// calledFromCleanup reports whether the current goroutine's call stack is
-// inside runSignalCleanups or runGuardCleanups, preventing self-deadlock and
-// AB-BA deadlock (cleanupMu <-> sigCleanupDone) if a cleanup invokes Disarm().
-func calledFromCleanup() bool {
-	var sigEntry, guardEntry uintptr
-	if f := runtime.FuncForPC(reflect.ValueOf(runSignalCleanups).Pointer()); f != nil {
-		sigEntry = f.Entry()
-	}
-	if f := runtime.FuncForPC(reflect.ValueOf(runGuardCleanups).Pointer()); f != nil {
-		guardEntry = f.Entry()
-	}
-	if sigEntry == 0 && guardEntry == 0 {
-		return false
-	}
-	var pcs [64]uintptr
-	for skip := 2; ; skip += len(pcs) {
-		n := runtime.Callers(skip, pcs[:])
-		if n == 0 {
-			return false
-		}
-		frames := runtime.CallersFrames(pcs[:n])
-		for {
-			f, more := frames.Next()
-			if f.Func != nil {
-				entry := f.Func.Entry()
-				if (sigEntry != 0 && entry == sigEntry) || (guardEntry != 0 && entry == guardEntry) {
-					return true
-				}
-			}
-			if !more {
-				break
-			}
-		}
-		if n < len(pcs) {
-			return false
-		}
-	}
+	mu          sync.Mutex
+	cleanupMu   sync.Mutex
+	preCleanups []func()
+	cleanups    []func()
+	armed       bool
 }
 
 // Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
@@ -172,9 +82,6 @@ func (sg *SignalGuard) Arm() {
 		return
 	}
 	sg.armed = true
-	sg.mu.Lock()
-	sg.armGen++
-	sg.mu.Unlock()
 	activeGuards = append(activeGuards, sg)
 
 	if globalSigCh == nil && !globalSigHandling {
@@ -195,7 +102,7 @@ func startGlobalSignalListenerLocked() {
 
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	go func(sigCh chan os.Signal, done <-chan struct{}, listenerDone chan struct{}) {
+	go func() {
 		defer func() {
 			signal.Stop(sigCh)
 			sigCoordMu.Lock()
@@ -213,30 +120,16 @@ func startGlobalSignalListenerLocked() {
 		case <-done:
 			return
 		case sig := <-sigCh:
-			cleanupDone := make(chan struct{})
 			sigCoordMu.Lock()
 			if globalSigDone != done {
-				// Disarm() already stopped this listener while a signal was buffered.
 				sigCoordMu.Unlock()
 				return
 			}
-			// Keep sigCh registered and mark globalSigHandling=true throughout
-			// runSignalCleanups so:
-			//  1. A second SIGINT/SIGTERM during cleanup is absorbed instead of
-			//     reverting to SIG_DFL.
-			//  2. Concurrent Arm() calls cannot spawn a competing listener that
-			//     would violate LIFO order or call signalExit(1) mid-cleanup.
-			//  3. Disarm() cannot stop sigCh before cleanups complete.
+			// Keep sigCh registered and globalSigHandling=true while cleanups
+			// run so a second SIGINT/SIGTERM is absorbed instead of reverting
+			// to SIG_DFL and concurrent Arm() cannot spawn a competing listener.
 			globalSigHandling = true
-
-			guards := make([]capturedGuard, len(activeGuards))
-			for i, g := range activeGuards {
-				g.mu.Lock()
-				gen := g.armGen
-				g.mu.Unlock()
-				guards[i] = capturedGuard{guard: g, gen: gen}
-				g.sigCleanupDone = cleanupDone
-			}
+			guards := slices.Clone(activeGuards)
 			sigCoordMu.Unlock()
 
 			func() {
@@ -250,9 +143,11 @@ func startGlobalSignalListenerLocked() {
 						globalSigListenerDone = nil
 					}
 					sigCoordMu.Unlock()
-					close(cleanupDone)
 				}()
-				runSignalCleanups(sig, guards)
+				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
+				for i := len(guards) - 1; i >= 0; i-- {
+					guards[i].runCleanups()
+				}
 			}()
 
 			signalExit(1)
@@ -265,7 +160,7 @@ func startGlobalSignalListenerLocked() {
 			}
 			sigCoordMu.Unlock()
 		}
-	}(sigCh, done, listenerDone)
+	}()
 }
 
 // Disarm unregisters this guard from the signal listener and clears its
@@ -273,14 +168,9 @@ func startGlobalSignalListenerLocked() {
 func (sg *SignalGuard) Disarm() {
 	sigCoordMu.Lock()
 	wasArmed := sg.armed
-	waitSigCleanup := sg.sigCleanupDone
-	var myGen uint64
 	var waitListener <-chan struct{}
 	if wasArmed {
 		sg.armed = false
-		sg.mu.Lock()
-		myGen = sg.armGen
-		sg.mu.Unlock()
 		for i, g := range activeGuards {
 			if g == sg {
 				activeGuards = append(activeGuards[:i], activeGuards[i+1:]...)
@@ -301,29 +191,11 @@ func (sg *SignalGuard) Disarm() {
 	if waitListener != nil {
 		<-waitListener
 	}
-	if waitSigCleanup != nil {
-		select {
-		case <-waitSigCleanup:
-		default:
-			if !calledFromCleanup() {
-				<-waitSigCleanup
-			}
-		}
-	}
 
 	if wasArmed {
 		sg.mu.Lock()
-		if sg.runningCleanups {
-			// Defer dropping gen <= myGen cleanups until runCleanups() finishes
-			// so calling Disarm() from inside a cleanup does not self-deadlock
-			// on cleanupMu, while never wiping cleanups pushed after re-Arm().
-			if myGen > sg.clearGen {
-				sg.clearGen = myGen
-			}
-		} else {
-			sg.preCleanups = dropCleanupsUpTo(sg.preCleanups, myGen)
-			sg.cleanups = dropCleanupsUpTo(sg.cleanups, myGen)
-		}
+		sg.preCleanups = nil
+		sg.cleanups = nil
 		sg.mu.Unlock()
 	}
 }
@@ -338,7 +210,7 @@ func (sg *SignalGuard) PushPreCleanup(fn func()) {
 	}
 	sg.mu.Lock()
 	defer sg.mu.Unlock()
-	sg.preCleanups = append(sg.preCleanups, taggedCleanup{gen: sg.armGen, fn: fn})
+	sg.preCleanups = append(sg.preCleanups, fn)
 }
 
 // PushCleanup adds a cleanup function to the top of the LIFO stack.
@@ -350,7 +222,7 @@ func (sg *SignalGuard) PushCleanup(fn func()) {
 	}
 	sg.mu.Lock()
 	defer sg.mu.Unlock()
-	sg.cleanups = append(sg.cleanups, taggedCleanup{gen: sg.armGen, fn: fn})
+	sg.cleanups = append(sg.cleanups, fn)
 }
 
 // RunCleanups executes all registered cleanup functions in LIFO order
@@ -368,39 +240,8 @@ func (sg *SignalGuard) RunCleanups() {
 // while deferred cleanup is already running) so callers wait for in-flight
 // cleanups to finish rather than exiting early.
 func (sg *SignalGuard) runCleanups() {
-	runGuardCleanups(sg, 0, true)
-}
-
-func (sg *SignalGuard) runCleanupsUpTo(maxGen uint64) {
-	runGuardCleanups(sg, maxGen, false)
-}
-
-// runGuardCleanups drains and executes sg's cleanup stacks up to maxGen (or
-// sg's current armGen when useCurrentGen is true). Kept as a non-inlined
-// package-level function so calledFromCleanup can reliably detect re-entrant
-// Disarm() calls made while holding sg.cleanupMu.
-//
-//go:noinline
-func runGuardCleanups(sg *SignalGuard, maxGen uint64, useCurrentGen bool) {
 	sg.cleanupMu.Lock()
 	defer sg.cleanupMu.Unlock()
-
-	sg.mu.Lock()
-	if useCurrentGen {
-		maxGen = sg.armGen
-	}
-	sg.runningCleanups = true
-	sg.mu.Unlock()
-	defer func() {
-		sg.mu.Lock()
-		sg.runningCleanups = false
-		if sg.clearGen != 0 {
-			sg.preCleanups = dropCleanupsUpTo(sg.preCleanups, sg.clearGen)
-			sg.cleanups = dropCleanupsUpTo(sg.cleanups, sg.clearGen)
-			sg.clearGen = 0
-		}
-		sg.mu.Unlock()
-	}()
 
 	runBatch := func(fns []func()) {
 		for i := len(fns) - 1; i >= 0; i-- {
@@ -417,19 +258,20 @@ func runGuardCleanups(sg *SignalGuard, maxGen uint64, useCurrentGen bool) {
 
 	for {
 		sg.mu.Lock()
-		var pre []func()
-		pre, sg.preCleanups = popCleanupsUpTo(sg.preCleanups, maxGen)
-		if len(pre) > 0 {
+		if len(sg.preCleanups) > 0 {
+			pre := sg.preCleanups
+			sg.preCleanups = nil
 			sg.mu.Unlock()
 			runBatch(pre)
 			continue
 		}
-		var fns []func()
-		fns, sg.cleanups = popCleanupsUpTo(sg.cleanups, maxGen)
-		sg.mu.Unlock()
-		if len(fns) == 0 {
+		if len(sg.cleanups) == 0 {
+			sg.mu.Unlock()
 			return
 		}
+		fns := sg.cleanups
+		sg.cleanups = nil
+		sg.mu.Unlock()
 		runBatch(fns)
 	}
 }

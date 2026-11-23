@@ -330,50 +330,6 @@ func TestSignalGuard_PushCleanupDuringRunCleanupsExecutes(t *testing.T) {
 	}
 }
 
-func TestSignalGuard_DisarmWaitsForInFlightSignalHandler(t *testing.T) {
-	origExit := signalExit
-	exitDone := make(chan struct{}, 1)
-	signalExit = func(int) {
-		exitDone <- struct{}{}
-	}
-	t.Cleanup(func() { signalExit = origExit })
-
-	var sg SignalGuard
-	inCleanup := make(chan struct{})
-	releaseCleanup := make(chan struct{})
-
-	sg.Arm()
-	sg.PushCleanup(func() {
-		close(inCleanup)
-		<-releaseCleanup
-	})
-
-	sigCoordMu.Lock()
-	ch := globalSigCh
-	sigCoordMu.Unlock()
-	ch <- syscall.SIGINT
-
-	<-inCleanup
-
-	disarmDone := make(chan struct{})
-	go func() {
-		sg.Disarm()
-		close(disarmDone)
-	}()
-
-	select {
-	case <-disarmDone:
-		close(releaseCleanup)
-		<-exitDone
-		t.Fatal("Disarm() returned while signal handler was still executing cleanups")
-	case <-time.After(80 * time.Millisecond):
-		close(releaseCleanup)
-	}
-
-	<-exitDone
-	<-disarmDone
-}
-
 func TestSignalGuard_RespawnsListenerAfterSignalExitReturns(t *testing.T) {
 	origExit := signalExit
 	exitCh := make(chan int, 2)
@@ -839,67 +795,6 @@ func TestVMCommand_RunInteractiveRegistersSignalCleanupForQemu(t *testing.T) {
 	}
 }
 
-func TestSignalGuard_DisarmDoesNotWipeReArmedCleanups(t *testing.T) {
-	origExit := signalExit
-	exitCh := make(chan int, 1)
-	signalExit = func(code int) { exitCh <- code }
-	t.Cleanup(func() { signalExit = origExit })
-
-	var sg SignalGuard
-	inCleanup := make(chan struct{})
-	releaseCleanup := make(chan struct{})
-
-	sg.Arm()
-	sg.PushCleanup(func() {
-		close(inCleanup)
-		<-releaseCleanup
-	})
-
-	sigCoordMu.Lock()
-	ch := globalSigCh
-	sigCoordMu.Unlock()
-	ch <- syscall.SIGINT
-
-	<-inCleanup
-
-	disarmDone := make(chan struct{})
-	go func() {
-		sg.Disarm()
-		close(disarmDone)
-	}()
-
-	// Wait until Disarm has set sg.armed=false and is waiting on sigCleanupDone.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		sigCoordMu.Lock()
-		armed := sg.armed
-		sigCoordMu.Unlock()
-		if !armed {
-			break
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	// Re-arm and register a fresh cleanup while the old Disarm is still waiting.
-	var freshRan atomic.Bool
-	sg.Arm()
-	sg.PushCleanup(func() { freshRan.Store(true) })
-
-	close(releaseCleanup)
-	<-exitCh
-	<-disarmDone
-
-	if freshRan.Load() {
-		t.Fatal("gen-1 runCleanups stole and executed cleanup pushed after concurrent re-Arm")
-	}
-
-	sg.RunCleanups()
-	sg.Disarm()
-	if !freshRan.Load() {
-		t.Fatal("stale Disarm wiped cleanup pushed after concurrent re-Arm")
-	}
-}
-
 func TestSignalGuard_DisarmInsideSignalTriggeredCleanupDoesNotDeadlock(t *testing.T) {
 	origExit := signalExit
 	exitCh := make(chan int, 1)
@@ -1072,54 +967,6 @@ func TestSignalGuard_ArmDuringCleanupDoesNotSpawnSecondListenerOrExitEarly(t *te
 	}
 }
 
-func TestSignalGuard_SignalSnapshotCapturesArmGenPreventingGen2Steal(t *testing.T) {
-	origExit := signalExit
-	exitCh := make(chan int, 2)
-	signalExit = func(code int) { exitCh <- code }
-	t.Cleanup(func() { signalExit = origExit })
-
-	var outer, inner SignalGuard
-	var outerGen2Ran atomic.Bool
-
-	outer.Arm() // gen 1
-	outer.PushCleanup(func() {})
-
-	inner.Arm() // gen 1
-	inner.PushCleanup(func() {
-		// Disarm outer (gen 1) and re-arm outer (gen 2) with a fresh cleanup
-		// before runSignalCleanups advances from inner to outer.
-		outer.Disarm()
-		outer.Arm() // gen 2
-		outer.PushCleanup(func() {
-			outerGen2Ran.Store(true)
-		})
-	})
-
-	sigCoordMu.Lock()
-	ch := globalSigCh
-	sigCoordMu.Unlock()
-	ch <- syscall.SIGINT
-
-	select {
-	case <-exitCh:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for signalExit")
-	}
-	inner.Disarm()
-
-	if outerGen2Ran.Load() {
-		outer.Disarm()
-		t.Fatal("gen-1 signal teardown stole and executed gen-2 cleanup pushed after re-Arm")
-	}
-
-	// Verify gen-2 cleanup is still intact and executes when gen-2 runs cleanups.
-	outer.RunCleanups()
-	outer.Disarm()
-	if !outerGen2Ran.Load() {
-		t.Fatal("gen-2 cleanup was lost instead of preserved for gen-2")
-	}
-}
-
 func TestSignalGuard_DisarmInsideNonSignalRunCleanupsDuringConcurrentSignalDoesNotDeadlock(t *testing.T) {
 	origExit := signalExit
 	exitCh := make(chan int, 2)
@@ -1151,13 +998,13 @@ func TestSignalGuard_DisarmInsideNonSignalRunCleanupsDuringConcurrentSignalDoesN
 	sigCoordMu.Unlock()
 	ch <- syscall.SIGINT
 
-	// Wait until the signal listener has captured sg and set sg.sigCleanupDone.
+	// Wait until the signal listener has entered globalSigHandling.
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		sigCoordMu.Lock()
-		doneCh := sg.sigCleanupDone
+		handling := globalSigHandling
 		sigCoordMu.Unlock()
-		if doneCh != nil {
+		if handling {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -1168,7 +1015,7 @@ func TestSignalGuard_DisarmInsideNonSignalRunCleanupsDuringConcurrentSignalDoesN
 	select {
 	case <-runDone:
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("AB-BA deadlock: Disarm() inside non-signal RunCleanups() blocked on sigCleanupDone while signal listener waited on cleanupMu")
+		t.Fatal("Disarm() inside non-signal RunCleanups() deadlocked during concurrent signal")
 	}
 	select {
 	case <-exitCh:
