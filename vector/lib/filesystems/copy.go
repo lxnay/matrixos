@@ -24,6 +24,14 @@ func CopyFile(src, dst string) error {
 // source permissions (including special mode bits), fsyncs, and atomically
 // renames to dst.
 func copyFileAtomic(src, dst, tmpPattern string) error {
+	srcStat, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcStat.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcStat.Mode())
+	}
+
 	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -33,6 +41,9 @@ func copyFileAtomic(src, dst, tmpPattern string) error {
 	srcInfo, err := sourceFile.Stat()
 	if err != nil {
 		return err
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcInfo.Mode())
 	}
 
 	destFile, err := os.CreateTemp(filepath.Dir(dst), tmpPattern)
@@ -77,6 +88,9 @@ func CopyDirPreserve(src, dst string) error {
 	}
 	if !srcInfo.IsDir() {
 		return fmt.Errorf("source %s is not a directory", src)
+	}
+	if isSameOrSubpath(src, dst) {
+		return fmt.Errorf("cannot copy directory %s into itself (%s): %w", src, dst, syscall.EINVAL)
 	}
 
 	type dirMeta struct {
@@ -182,6 +196,14 @@ func copyXattrs(src, dst string) error {
 // CopyFilePreserveXattrs copies a file from src to dst, preserving permissions
 // and extended attributes (xattrs). This is equivalent to "cp -a" for regular files.
 func CopyFilePreserveXattrs(src, dst string) (retErr error) {
+	srcStat, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcStat.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcStat.Mode())
+	}
+
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -191,6 +213,17 @@ func CopyFilePreserveXattrs(src, dst string) (retErr error) {
 	srcInfo, err := srcFile.Stat()
 	if err != nil {
 		return err
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcInfo.Mode())
+	}
+	if dstInfo, statErr := os.Stat(dst); statErr == nil {
+		if os.SameFile(srcInfo, dstInfo) {
+			return nil
+		}
+		if !dstInfo.Mode().IsRegular() {
+			return fmt.Errorf("cannot overwrite non-regular destination %s (mode %s)", dst, dstInfo.Mode())
+		}
 	}
 
 	// Create destination with owner rw so non-root copies can still set user.*

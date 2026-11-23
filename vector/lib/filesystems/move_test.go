@@ -464,6 +464,170 @@ func TestMoveCrossDevice_NonDirTrailingSlashDoesNotCreateDir(t *testing.T) {
 	}
 }
 
+func TestMoveDirCrossDevice_ReadOnlyTopLevelSourceDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses DAC write checks on read-only directories")
+	}
+	for _, perm := range []os.FileMode{0555, 0500} {
+		t.Run(perm.String(), func(t *testing.T) {
+			tmp := t.TempDir()
+			src := filepath.Join(tmp, "src")
+			dst := filepath.Join(tmp, "dst")
+			if err := os.MkdirAll(src, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(src, "inner.txt"), []byte("keep"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(src, perm); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = os.Chmod(src, 0755)
+				_ = os.Chmod(dst, 0755)
+			})
+
+			if err := moveDirCrossDevice(src, dst); err != nil {
+				t.Fatalf("moveDirCrossDevice failed on %04o top-level dir: %v", perm, err)
+			}
+			if _, err := os.Lstat(src); !os.IsNotExist(err) {
+				t.Fatalf("source %s still exists after move (err=%v)", src, err)
+			}
+			data, err := os.ReadFile(filepath.Join(dst, "inner.txt"))
+			if err != nil || string(data) != "keep" {
+				t.Fatalf("dst/inner.txt = (%q, %v), want (\"keep\", nil)", string(data), err)
+			}
+			info, err := os.Lstat(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != perm {
+				t.Errorf("dst perms = %04o, want %04o", info.Mode().Perm(), perm)
+			}
+		})
+	}
+}
+
+func TestCopyDirPreserveAndMoveDir_RejectSelfAndDescendantDst(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	keepFile := filepath.Join(src, "keep.txt")
+	if err := os.WriteFile(keepFile, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CopyDirPreserve(src, src); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("CopyDirPreserve(src, src) = %v, want EINVAL", err)
+	}
+	if data, err := os.ReadFile(keepFile); err != nil || string(data) != "keep" {
+		t.Fatalf("keep.txt damaged after CopyDirPreserve(src, src): %q, %v", string(data), err)
+	}
+
+	subDst := filepath.Join(src, "sub")
+	if err := CopyDirPreserve(src, subDst); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("CopyDirPreserve(src, src/sub) = %v, want EINVAL", err)
+	}
+	if _, err := os.Lstat(subDst); !os.IsNotExist(err) {
+		t.Fatalf("CopyDirPreserve(src, src/sub) created %s", subDst)
+	}
+
+	nestedDst := filepath.Join(src, "newparent", "sub")
+	if err := moveDirCrossDevice(src, nestedDst); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("moveDirCrossDevice(src, src/newparent/sub) = %v, want EINVAL", err)
+	}
+	if _, err := os.Lstat(filepath.Join(src, "newparent")); !os.IsNotExist(err) {
+		t.Fatalf("moveDirCrossDevice created dst parent inside src")
+	}
+	if data, err := os.ReadFile(keepFile); err != nil || string(data) != "keep" {
+		t.Fatalf("keep.txt damaged after moveDirCrossDevice self-descendant rejection: %q, %v", string(data), err)
+	}
+
+	if err := moveDirCrossDevice("/", filepath.Join(tmp, "rootdst")); err == nil || !strings.Contains(err.Error(), "IS MAPPED TO HOST ROOT") {
+		t.Fatalf("moveDirCrossDevice(\"/\", dst) = %v, want host-root guard error", err)
+	}
+}
+
+func TestMoveCrossDevice_SamePathDoesNotDeleteSource(t *testing.T) {
+	t.Run("RegularFile", func(t *testing.T) {
+		tmp := t.TempDir()
+		f := filepath.Join(tmp, "f.txt")
+		if err := os.WriteFile(f, []byte("precious"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveCrossDevice(f, f); err != nil {
+			t.Fatalf("moveCrossDevice(f, f): %v", err)
+		}
+		if data, err := os.ReadFile(f); err != nil || string(data) != "precious" {
+			t.Fatalf("file lost or corrupted: (%q, %v)", string(data), err)
+		}
+	})
+
+	t.Run("HardLink", func(t *testing.T) {
+		tmp := t.TempDir()
+		a := filepath.Join(tmp, "a.txt")
+		b := filepath.Join(tmp, "b.txt")
+		if err := os.WriteFile(a, []byte("shared"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(a, b); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveCrossDevice(a, b); err != nil {
+			t.Fatalf("moveCrossDevice(a, hardlink): %v", err)
+		}
+		for _, p := range []string{a, b} {
+			if data, err := os.ReadFile(p); err != nil || string(data) != "shared" {
+				t.Fatalf("hardlink %s lost or corrupted: (%q, %v)", p, string(data), err)
+			}
+		}
+	})
+
+	t.Run("EmptyDir", func(t *testing.T) {
+		tmp := t.TempDir()
+		d := filepath.Join(tmp, "dir")
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveCrossDevice(d, d); err != nil {
+			t.Fatalf("moveCrossDevice(d, d): %v", err)
+		}
+		if info, err := os.Lstat(d); err != nil || !info.IsDir() {
+			t.Fatalf("dir lost: (%v, %v)", info, err)
+		}
+	})
+
+	t.Run("Symlink", func(t *testing.T) {
+		tmp := t.TempDir()
+		l := filepath.Join(tmp, "link")
+		if err := os.Symlink("target", l); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveCrossDevice(l, l); err != nil {
+			t.Fatalf("moveCrossDevice(l, l): %v", err)
+		}
+		if target, err := os.Readlink(l); err != nil || target != "target" {
+			t.Fatalf("symlink lost: (%q, %v)", target, err)
+		}
+	})
+
+	t.Run("FIFO", func(t *testing.T) {
+		tmp := t.TempDir()
+		p := filepath.Join(tmp, "pipe")
+		if err := unix.Mkfifo(p, 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := moveCrossDevice(p, p); err != nil {
+			t.Fatalf("moveCrossDevice(p, p): %v", err)
+		}
+		if info, err := os.Lstat(p); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			t.Fatalf("FIFO lost: (%v, %v)", info, err)
+		}
+	})
+}
+
 // --- Real cross-device tests (require root to mount tmpfs) ---
 
 // mountTmpfs mounts a tmpfs at the given path. The caller must unmount it.

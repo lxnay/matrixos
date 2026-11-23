@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -258,6 +259,84 @@ func TestCopyFilePreserveXattrs(t *testing.T) {
 		if err == nil {
 			t.Error("expected error when sysLsetxattr fails on destination")
 		}
+	})
+
+	t.Run("RejectsNonRegularSrcAndDst", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "srcdir")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingDst := filepath.Join(tmp, "existing.txt")
+		if err := os.WriteFile(existingDst, []byte("preserve me"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		newDst := filepath.Join(tmp, "should-not-exist.txt")
+
+		if err := CopyFilePreserveXattrs(srcDir, existingDst); err == nil {
+			t.Fatal("expected error copying directory with CopyFilePreserveXattrs")
+		}
+		if data, err := os.ReadFile(existingDst); err != nil || string(data) != "preserve me" {
+			t.Fatalf("existing dst damaged: (%q, %v)", string(data), err)
+		}
+		if err := CopyFilePreserveXattrs(srcDir, newDst); err == nil {
+			t.Fatal("expected error copying directory to new dst")
+		}
+		if _, err := os.Lstat(newDst); !os.IsNotExist(err) {
+			t.Fatalf("newDst was created despite directory src (err=%v)", err)
+		}
+
+		// Same-file copy must be a no-op rather than truncating src to 0 bytes.
+		regSrc := filepath.Join(tmp, "reg.txt")
+		if err := os.WriteFile(regSrc, []byte("keep content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := CopyFilePreserveXattrs(regSrc, regSrc); err != nil {
+			t.Fatalf("CopyFilePreserveXattrs(f, f): %v", err)
+		}
+		if data, err := os.ReadFile(regSrc); err != nil || string(data) != "keep content" {
+			t.Fatalf("same-file copy damaged file: (%q, %v)", string(data), err)
+		}
+
+		// FIFO src and FIFO/symlink-to-FIFO dst must fail promptly without blocking.
+		fifoSrc := filepath.Join(tmp, "src.fifo")
+		if err := unix.Mkfifo(fifoSrc, 0640); err != nil {
+			t.Fatal(err)
+		}
+		fifoDst := filepath.Join(tmp, "dst.fifo")
+		if err := unix.Mkfifo(fifoDst, 0640); err != nil {
+			t.Fatal(err)
+		}
+		linkToFifo := filepath.Join(tmp, "link-to-fifo")
+		if err := os.Symlink(fifoDst, linkToFifo); err != nil {
+			t.Fatal(err)
+		}
+
+		mustFailPromptly := func(name string, fn func() error) {
+			t.Helper()
+			done := make(chan error, 1)
+			go func() { done <- fn() }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Errorf("%s succeeded on FIFO, want error", name)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("%s blocked on FIFO", name)
+			}
+		}
+		mustFailPromptly("CopyFile(fifoSrc, dst)", func() error {
+			return CopyFile(fifoSrc, filepath.Join(tmp, "copy-fifo.out"))
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(fifoSrc, dst)", func() error {
+			return CopyFilePreserveXattrs(fifoSrc, filepath.Join(tmp, "xattr-fifo.out"))
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(regSrc, fifoDst)", func() error {
+			return CopyFilePreserveXattrs(regSrc, fifoDst)
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(regSrc, linkToFifo)", func() error {
+			return CopyFilePreserveXattrs(regSrc, linkToFifo)
+		})
 	})
 }
 

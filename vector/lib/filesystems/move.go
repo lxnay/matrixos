@@ -85,6 +85,43 @@ func validateCrossDeviceDst(dst string, isDir bool) (string, error) {
 	return trimmed, nil
 }
 
+// isSameEntry reports whether dst already exists as the same directory entry
+// or hard-linked inode as srcInfo (via Lstat so symlinks compare their own inode).
+func isSameEntry(srcInfo os.FileInfo, dst string) bool {
+	dstInfo, err := os.Lstat(dst)
+	return err == nil && os.SameFile(srcInfo, dstInfo)
+}
+
+// canonicalAbs resolves symlinks on the deepest existing ancestor of p and
+// returns a clean absolute path for directory containment checks.
+func canonicalAbs(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = filepath.Clean(p)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(abs)
+	if dir != abs {
+		return filepath.Join(canonicalAbs(dir), filepath.Base(abs))
+	}
+	return abs
+}
+
+// isSameOrSubpath reports whether dst equals src or lies beneath src.
+func isSameOrSubpath(src, dst string) bool {
+	cSrc := canonicalAbs(src)
+	cDst := canonicalAbs(dst)
+	if cSrc == cDst {
+		return true
+	}
+	if cSrc == string(filepath.Separator) {
+		return strings.HasPrefix(cDst, string(filepath.Separator))
+	}
+	return strings.HasPrefix(cDst, cSrc+string(filepath.Separator))
+}
+
 func moveCrossDevice(src, dst string) error {
 	srcInfo, err := os.Lstat(src)
 	if err != nil {
@@ -94,6 +131,9 @@ func moveCrossDevice(src, dst string) error {
 	cleanDst, err := validateCrossDeviceDst(dst, srcInfo.IsDir())
 	if err != nil {
 		return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+	}
+	if isSameEntry(srcInfo, cleanDst) {
+		return nil
 	}
 
 	if srcInfo.Mode()&os.ModeSymlink != 0 {
@@ -211,26 +251,45 @@ func removeTree(root string) error {
 	return os.RemoveAll(root)
 }
 
-// moveDirCrossDevice copies a directory into a private staging directory on
-// the destination filesystem, atomically renames it into place, and removes
-// the source only after placement succeeds.
+// moveDirCrossDevice copies a directory into a private staging directory in
+// the destination's parent directory, atomically renames it into place, and
+// removes the source only after placement succeeds.
 func moveDirCrossDevice(src, dst string) error {
+	if err := CheckDirIsRoot(src); err != nil {
+		return err
+	}
+	srcInfo, err := os.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("failed to stat source %s: %w", src, err)
+	}
 	cleanDst, err := validateCrossDeviceDst(dst, true)
 	if err != nil {
 		return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+	}
+	if isSameEntry(srcInfo, cleanDst) {
+		return nil
+	}
+	if isSameOrSubpath(src, cleanDst) {
+		return fmt.Errorf("cannot move directory %s into itself (%s): %w", src, dst, syscall.EINVAL)
 	}
 	dstParent := filepath.Dir(cleanDst)
 	if err := os.MkdirAll(dstParent, 0755); err != nil {
 		return fmt.Errorf("failed to create parent of destination %s: %w", cleanDst, err)
 	}
 
-	stageParent, err := os.MkdirTemp(dstParent, ".move-dir-*")
+	// Stage directly inside dstParent so os.Rename moves within the same
+	// parent directory and succeeds as non-root even on 0555/0500 source dirs.
+	stageDst, err := os.MkdirTemp(dstParent, ".move-dir-*")
 	if err != nil {
 		return fmt.Errorf("failed to create staging dir in %s: %w", dstParent, err)
 	}
-	defer func() { _ = removeTree(stageParent) }()
+	placed := false
+	defer func() {
+		if !placed {
+			_ = removeTree(stageDst)
+		}
+	}()
 
-	stageDst := filepath.Join(stageParent, "dir")
 	if err := CopyDirPreserve(src, stageDst); err != nil {
 		return fmt.Errorf("failed to copy directory %s to %s: %w", src, cleanDst, err)
 	}
@@ -238,6 +297,7 @@ func moveDirCrossDevice(src, dst string) error {
 	if err := os.Rename(stageDst, cleanDst); err != nil {
 		return fmt.Errorf("failed to place directory %s at %s: %w", src, cleanDst, err)
 	}
+	placed = true
 
 	if err := removeTree(src); err != nil {
 		return fmt.Errorf("failed to remove source directory %s after move: %w", src, err)
