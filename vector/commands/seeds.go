@@ -257,6 +257,9 @@ func (c *SeedsCommand) runSeeds() error {
 	if err != nil {
 		return err
 	}
+	if cgPool != nil {
+		defer cgPool.Close()
+	}
 
 	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
 	// stop dequeuing new work before resource cleanups execute.

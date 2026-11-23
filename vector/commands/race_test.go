@@ -1176,3 +1176,67 @@ func TestSignalGuard_DisarmInsideNonSignalRunCleanupsDuringConcurrentSignalDoesN
 		t.Fatal("timed out waiting for signalExit after RunCleanups finished")
 	}
 }
+
+func TestVMCommand_RunUsesMatrixOSRootForVMSuitePath(t *testing.T) {
+	mroot := t.TempDir()
+	dataDir := filepath.Join(mroot, "vector", "tests", "data")
+	suiteDir := filepath.Join(mroot, "vector", "tests", "vm-suite")
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(suiteDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "OVMF_CODE.fd"), []byte("code"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "OVMF_VARS.fd"), []byte("vars"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	imgPath := filepath.Join(t.TempDir(), "test.img")
+	if err := os.WriteFile(imgPath, []byte("img"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "mkfs.args")
+	// Fake truncate succeeds; fake mkfs.ext4 records args and fails to abort run() before QEMU.
+	if err := os.WriteFile(filepath.Join(binDir, "truncate"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mkfsScript := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "mkfs.ext4"), []byte(mkfsScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Run from a directory that is NOT <mroot>/vector.
+	t.Chdir(t.TempDir())
+
+	c := NewVMCommand()
+	c.cfg = &config.MockConfig{
+		Items: map[string][]string{
+			"matrixOS.Root": {mroot},
+		},
+	}
+	c.StartUI()
+	c.imagePath = imgPath
+
+	_ = c.run()
+
+	raw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("fake mkfs.ext4 was never invoked: %v", err)
+	}
+	gotArgs := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	var gotSuiteArg string
+	for i := 0; i < len(gotArgs)-1; i++ {
+		if gotArgs[i] == "-d" {
+			gotSuiteArg = gotArgs[i+1]
+			break
+		}
+	}
+	if gotSuiteArg != suiteDir {
+		t.Fatalf("mkfs.ext4 -d arg = %q, want %q (CWD-relative path fails outside vector/)", gotSuiteArg, suiteDir)
+	}
+}

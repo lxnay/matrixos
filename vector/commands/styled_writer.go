@@ -106,55 +106,69 @@ func (w *styledWriter) Write(p []byte) (int, error) {
 	w.buf = append(w.buf, p...)
 	total := len(p)
 
+	if err := w.drainBufLocked(true); err != nil {
+		return total, err
+	}
+
+	return total, nil
+}
+
+// drainBufLocked parses all complete lines and standalone \r overwrite segments
+// currently in w.buf. When stopOnErr is true, it returns immediately on the
+// first destination write error (preserving io.Writer semantics). When
+// stopOnErr is false (used by flushLocked), it drains remaining complete lines
+// so logDest receives properly parsed output even after an earlier dest error.
+func (w *styledWriter) drainBufLocked(stopOnErr bool) error {
 	for {
 		nlIdx := bytes.IndexByte(w.buf, '\n')
 		crIdx := bytes.IndexByte(w.buf, '\r')
 
 		if nlIdx < 0 && crIdx < 0 {
-			break
+			return nil
 		}
 
-		// Treat \r\n as a regular newline only when \r immediately precedes the
-		// earliest \n in the buffer; otherwise earlier standalone \n lines must
-		// be emitted first.
-		if crIdx >= 0 && nlIdx == crIdx+1 {
-			line := string(w.buf[:crIdx])
-			w.buf = w.buf[crIdx+2:]
-			if err := w.writeCompleteLine(line); err != nil {
-				return total, err
-			}
-			continue
-		}
-
-		// Standalone \r – the process is overwriting the current line
-		// (e.g. a progress bar).  However, if \r is the very last byte
-		// in the buffer we cannot tell yet whether a \n follows (making
-		// it a \r\n pair).  Keep it buffered and wait for the next Write.
+		// If \r appears before \n (or there is no \n), inspect the full
+		// contiguous run of \r bytes starting at crIdx so \r\r\n and trailing
+		// \r\r before Flush do not prematurely discard line content.
 		if crIdx >= 0 && (nlIdx < 0 || crIdx < nlIdx) {
-			if crIdx == len(w.buf)-1 {
-				break // wait for more data
+			crEnd := crIdx
+			for crEnd < len(w.buf) && w.buf[crEnd] == '\r' {
+				crEnd++
 			}
+			// Run reaches end of buffer: wait for more data to know whether
+			// \n follows (making it a line terminator) or overwrite text follows.
+			if crEnd == len(w.buf) {
+				return nil
+			}
+			// Contiguous \r run immediately followed by \n (e.g. \r\n or \r\r\n).
+			if w.buf[crEnd] == '\n' {
+				line := string(w.buf[:crIdx])
+				w.buf = w.buf[crEnd+1:]
+				if err := w.writeCompleteLine(line); err != nil && stopOnErr {
+					return err
+				}
+				continue
+			}
+			// Standalone \r run followed by overwriting text (e.g. progress bar).
 			content := string(w.buf[:crIdx])
-			w.buf = w.buf[crIdx+1:]
+			w.buf = w.buf[crEnd:]
 
 			if w.isTTY && strings.TrimSpace(content) != "" {
-				if err := w.writeOverwriteLine(content); err != nil {
-					return total, err
+				if err := w.writeOverwriteLine(content); err != nil && stopOnErr {
+					return err
 				}
 			}
 			// In non-TTY mode the overwritten segment is simply discarded.
 			continue
 		}
 
-		// Regular newline.
+		// Regular newline before any \r.
 		line := string(w.buf[:nlIdx])
 		w.buf = w.buf[nlIdx+1:]
-		if err := w.writeCompleteLine(line); err != nil {
-			return total, err
+		if err := w.writeCompleteLine(line); err != nil && stopOnErr {
+			return err
 		}
 	}
-
-	return total, nil
 }
 
 // cleanLine strips ANSI sequences from line when not writing to a TTY.
@@ -232,6 +246,10 @@ func (w *styledWriter) FlushInline() {
 // When addNewline is true the output ends with \n; otherwise the cursor
 // stays at the end of the line.
 func (w *styledWriter) flushLocked(addNewline bool) {
+	// Drain any complete lines or \r overwrite segments left buffered after an
+	// earlier dest write error so logDest and dest never receive raw unparsed chunks.
+	_ = w.drainBufLocked(false)
+
 	if w.isTTY && w.hasOverwrite {
 		_, _ = io.WriteString(w.dest, "\r\033[2K")
 		w.hasOverwrite = false

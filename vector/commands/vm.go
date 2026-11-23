@@ -371,7 +371,7 @@ func (c *VMCommand) run() error {
 		"mkfs.ext4",
 		"-L", "TESTDATA",
 		"-F",
-		"-d", "tests/vm-suite",
+		"-d", filepath.Join(mroot, "vector/tests/vm-suite"),
 		testImagePath,
 	}
 	c.Printf("Generating test filesystem with command: %v\n", mkfsTestImgArgs)

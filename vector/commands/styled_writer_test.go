@@ -233,6 +233,93 @@ func TestFlushStripsBufferedTrailingCR(t *testing.T) {
 	})
 }
 
+type failFirstWriter struct {
+	failed bool
+	buf    bytes.Buffer
+}
+
+func (f *failFirstWriter) Write(p []byte) (int, error) {
+	if !f.failed {
+		f.failed = true
+		return 0, bytes.ErrTooLarge
+	}
+	return f.buf.Write(p)
+}
+
+func TestWriteConsecutiveCRBeforeLFAndFlush(t *testing.T) {
+	t.Run("NonTTY_CRCRLF", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("Write(\"hello\\r\\r\\n\") = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("NonTTY_SplitCR_CRLF", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r")); err != nil {
+			t.Fatalf("Write 1: %v", err)
+		}
+		if _, err := sw.Write([]byte("\r\n")); err != nil {
+			t.Fatalf("Write 2: %v", err)
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("split Write(\"hello\\r\", \"\\r\\n\") = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("NonTTY_CRCR_ThenFlush", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.Flush()
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("Write(\"hello\\r\\r\") + Flush() = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("TTY_CRCRLF_PreservesLineAndLog", func(t *testing.T) {
+		var dest, logBuf bytes.Buffer
+		sw := newStyledWriter(&dest, "[P]", "", "", true)
+		sw.SetLogWriter(&logBuf)
+		if _, err := sw.Write([]byte("hello\r\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := logBuf.String(); got != "[P] hello\n" {
+			t.Errorf("logBuf = %q, want %q", got, "[P] hello\n")
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("dest = %q, want %q", got, "[P] hello\n")
+		}
+	})
+}
+
+func TestFlushAfterDestWriteErrorStillParsesBufferedLines(t *testing.T) {
+	dest := &failFirstWriter{}
+	var logBuf bytes.Buffer
+	sw := newStyledWriter(dest, "[P]", "", "", false)
+	sw.SetLogWriter(&logBuf)
+
+	if _, err := sw.Write([]byte("line1\nprogress 50%\rprogress 100%\nline3\n")); err == nil {
+		t.Fatal("expected Write to return dest error")
+	}
+	sw.Flush()
+
+	want := "[P] line1\n[P] progress 100%\n[P] line3\n"
+	if got := logBuf.String(); got != want {
+		t.Errorf("logBuf after Flush = %q, want %q", got, want)
+	}
+	if strings.Contains(dest.buf.String(), "\r") || strings.Contains(dest.buf.String(), "progress 50%") {
+		t.Errorf("dest received unparsed CR/overwrite buffer: %q", dest.buf.String())
+	}
+}
+
 func TestWriteCROverwriteTTY(t *testing.T) {
 	var buf bytes.Buffer
 	sw := newStyledWriter(&buf, "", "", "", true)
