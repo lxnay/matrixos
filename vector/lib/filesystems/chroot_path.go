@@ -16,10 +16,10 @@ func ResolvePathInRoot(root, p string) (string, os.FileInfo, error) {
 
 // ResolvePathInRootWith resolves virtual path p strictly inside chroot root
 // using injected lstat/stat/readlink functions (allowing mock runners in tests).
-// When root == "/" it delegates to stat(p); otherwise it walks path components
-// in POSIX order (expanding symlinks before applying "..", enforcing
-// directory-ness on intermediate components and trailing slashes, clamping ".."
-// at virtual "/", and re-rooting absolute symlink targets inside root).
+// It walks path components in POSIX order (expanding symlinks before applying
+// "..", enforcing directory-ness on intermediate components and trailing
+// slashes, clamping ".." at virtual "/", and re-rooting absolute symlink
+// targets inside root), including when root == "/".
 func ResolvePathInRootWith(
 	root, p string,
 	lstatFn func(string) (os.FileInfo, error),
@@ -42,13 +42,6 @@ func ResolvePathInRootWith(
 		readlinkFn = os.Readlink
 	}
 	root = filepath.Clean(root)
-	if root == "/" {
-		fi, err := statFn(p)
-		if err != nil {
-			return "", nil, err
-		}
-		return filepath.Clean(p), fi, nil
-	}
 
 	requireDir := strings.HasSuffix(p, "/")
 	var pending []string
@@ -125,6 +118,9 @@ func ResolvePathInRootWith(
 		lastFi, err = statFn(root)
 		if err != nil {
 			return "", nil, err
+		}
+		if !lastFi.IsDir() {
+			return "", nil, &os.PathError{Op: "stat", Path: finalPath, Err: syscall.ENOTDIR}
 		}
 	} else {
 		finalPath = filepath.Join(append([]string{root}, resolved...)...)

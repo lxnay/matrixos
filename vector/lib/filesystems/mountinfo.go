@@ -156,10 +156,17 @@ func isPathUnderMount(path, mountpoint string) bool {
 	return path == mountpoint || strings.HasPrefix(path, mountpoint+"/")
 }
 
-// resolvePath returns the canonical path with symlinks resolved.
-// If resolution fails (e.g. the path does not exist), it falls back
-// to filepath.Clean so callers always get a normalised path.
+// resolvePath returns the canonical absolute path with symlinks resolved.
+// If resolution fails (e.g. the path does not exist), it falls back to
+// filepath.Clean on the absolutized path so callers always get a normalised
+// path suitable for comparing against /proc/self/mountinfo entries.
 func resolvePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
 	resolved, err := filepath.EvalSymlinks(p)
 	if err != nil {
 		return filepath.Clean(p)

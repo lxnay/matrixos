@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/sys/unix"
 	"matrixos/vector/lib/runner"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCopyFile_ConcurrentSameDest(t *testing.T) {
@@ -989,13 +989,13 @@ func TestMoveCrossDevice_FIFODoesNotHangAndRejectsSocket(t *testing.T) {
 	t.Run("RejectsUnixSocket", func(t *testing.T) {
 		tmp := t.TempDir()
 		sock := filepath.Join(tmp, "s.sock")
-		ln, err := net.Listen("unix", sock)
-		if err != nil {
-			t.Fatalf("net.Listen unix: %v", err)
+		// Use Mknod(S_IFSOCK) instead of net.Listen("unix", ...) so this test
+		// never hits Linux's 108-byte sockaddr_un.sun_path limit under long TMPDIRs.
+		if err := unix.Mknod(sock, unix.S_IFSOCK|0600, 0); err != nil {
+			t.Fatalf("Mknod S_IFSOCK: %v", err)
 		}
-		defer ln.Close()
 
-		err = moveCrossDevice(sock, filepath.Join(tmp, "dst.sock"))
+		err := moveCrossDevice(sock, filepath.Join(tmp, "dst.sock"))
 		if err == nil || !strings.Contains(err.Error(), "unsupported special file") {
 			t.Fatalf("expected unsupported special file error for Unix socket, got: %v", err)
 		}

@@ -654,3 +654,75 @@ func TestImagerCleanup_RetriesFailedLoopOnReDrain(t *testing.T) {
 		t.Fatalf("expected failed loop to be retried on re-drain pass (warnings=%d, want >= 2):\n%s", detachWarnings, stderrBuf.String())
 	}
 }
+
+func TestImagerAttachImageLoop_RejectsEmptyDeviceAndHandlesConcurrentCleanup(t *testing.T) {
+	t.Run("RejectsEmptyDevicePath", func(t *testing.T) {
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		im.SetStdout(io.Discard)
+		im.SetStderr(io.Discard)
+
+		_, err := im.attachImageLoop("/tmp/fake.img", filesystems.NewLoop, func(*filesystems.Loop) error {
+			// Simulate an attached call leaving DevicePath() empty.
+			return nil
+		})
+		if err == nil {
+			t.Fatal("expected error when loop device path is empty (must not build relative p1/p2/p3 paths)")
+		}
+	})
+
+	t.Run("AbortsWhenCleanupInterruptsAttach", func(t *testing.T) {
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		im.SetStdout(io.Discard)
+		im.SetStderr(io.Discard)
+
+		inAttach := make(chan struct{})
+		releaseAttach := make(chan struct{})
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := im.attachImageLoop("/tmp/fake.img", func(string) (*filesystems.Loop, error) {
+				return filesystems.NewLoopFromDevice("/dev/nonexistent-loop-test"), nil
+			}, func(*filesystems.Loop) error {
+				close(inAttach)
+				<-releaseAttach
+				return nil
+			})
+			errCh <- err
+		}()
+
+		<-inAttach
+		cleanupDone := make(chan struct{})
+		go func() {
+			im.Cleanup()
+			close(cleanupDone)
+		}()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && !im.cleanupActiveOrRan() {
+			time.Sleep(time.Millisecond)
+		}
+		close(releaseAttach)
+		<-cleanupDone
+
+		if err := <-errCh; err == nil {
+			t.Fatal("expected attachImageLoop to abort when Cleanup interrupted attach")
+		}
+	})
+
+	t.Run("ReturnsDevicePathBeforeCleanupCanClearIt", func(t *testing.T) {
+		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
+		im.SetStdout(io.Discard)
+		im.SetStderr(io.Discard)
+
+		dev, err := im.attachImageLoop("/tmp/fake.img", func(string) (*filesystems.Loop, error) {
+			return filesystems.NewLoopFromDevice("/dev/loop42"), nil
+		}, func(*filesystems.Loop) error {
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("attachImageLoop: %v", err)
+		}
+		if dev != "/dev/loop42" {
+			t.Errorf("device = %q, want /dev/loop42", dev)
+		}
+	})
+}

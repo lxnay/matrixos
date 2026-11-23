@@ -193,28 +193,12 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 		return fmt.Errorf("failed to partition image: %w", err)
 	}
 
-	loop, err := filesystems.NewLoop(imagePath)
+	blockDevice, err := im.attachImageLoop(imagePath, filesystems.NewLoop, func(l *filesystems.Loop) error {
+		return l.Attach()
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create loop device: %w", err)
+		return err
 	}
-	if !im.trackLoopDeviceIfOpen(loop) {
-		return fmt.Errorf("cleanup already ran; refusing to attach loop device for %s", imagePath)
-	}
-	finishLoopOp := sync.OnceFunc(im.finishTrackedOp)
-	defer finishLoopOp()
-
-	if err := loop.Attach(); err != nil {
-		return fmt.Errorf("failed to attach image %s as loop device: %w",
-			imagePath, err)
-	}
-	if im.cleanupActiveOrRan() {
-		im.trackLoopDevice(loop)
-		finishLoopOp()
-		im.Cleanup()
-		return fmt.Errorf("cleanup interrupted loop attach for %s", imagePath)
-	}
-	finishLoopOp()
-	blockDevice := loop.DevicePath()
 	im.SetDevicePath(blockDevice)
 	filesystems.DevicesSettle()
 
@@ -234,6 +218,43 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 	im.SetBootDevice(loopPartBoot)
 	im.SetRootDevice(loopPartRoot)
 	return nil
+}
+
+// attachImageLoop creates, tracks, and attaches a loop device for imagePath
+// while holding an in-flight cleanup reservation. The loop device path is
+// captured before releasing the reservation so a concurrent Cleanup() cannot
+// clear it to "" before the caller builds partition device paths.
+func (im *Imager) attachImageLoop(
+	imagePath string,
+	newLoop func(string) (*filesystems.Loop, error),
+	attach func(*filesystems.Loop) error,
+) (string, error) {
+	loop, err := newLoop(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create loop device: %w", err)
+	}
+	if !im.trackLoopDeviceIfOpen(loop) {
+		return "", fmt.Errorf("cleanup already ran; refusing to attach loop device for %s", imagePath)
+	}
+	finishLoopOp := sync.OnceFunc(im.finishTrackedOp)
+	defer finishLoopOp()
+
+	if err := attach(loop); err != nil {
+		return "", fmt.Errorf("failed to attach image %s as loop device: %w",
+			imagePath, err)
+	}
+	if im.cleanupActiveOrRan() {
+		im.trackLoopDevice(loop)
+		finishLoopOp()
+		im.Cleanup()
+		return "", fmt.Errorf("cleanup interrupted loop attach for %s", imagePath)
+	}
+	blockDevice := loop.DevicePath()
+	finishLoopOp()
+	if blockDevice == "" {
+		return "", fmt.Errorf("loop device path is empty for %s", imagePath)
+	}
+	return blockDevice, nil
 }
 
 // setupExistingPartitions configures the build to deploy onto
