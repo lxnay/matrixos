@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // Move moves src to dst. It first attempts os.Rename which is atomic but only
@@ -63,7 +65,42 @@ func moveCrossDevice(src, dst string) error {
 	if srcInfo.IsDir() {
 		return moveDirCrossDevice(src, dst)
 	}
+	if srcInfo.Mode()&os.ModeNamedPipe != 0 {
+		return moveFifoCrossDevice(src, dst, srcInfo.Mode())
+	}
+	if !srcInfo.Mode().IsRegular() {
+		return fmt.Errorf("cannot move unsupported special file %s (mode %s)", src, srcInfo.Mode())
+	}
 	return moveFileCrossDevice(src, dst)
+}
+
+// moveFifoCrossDevice recreates a named pipe (FIFO) at dst atomically without
+// opening it (which would block waiting for a peer), then removes src.
+func moveFifoCrossDevice(src, dst string, mode os.FileMode) error {
+	dstDir := filepath.Dir(dst)
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory %s: %w", dstDir, err)
+	}
+	tmpDir, err := os.MkdirTemp(dstDir, ".move-fifo-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir for FIFO in %s: %w", dstDir, err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpPath := filepath.Join(tmpDir, "fifo")
+	if err := unix.Mkfifo(tmpPath, uint32(mode.Perm())); err != nil {
+		return fmt.Errorf("failed to create FIFO %s: %w", dst, err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return fmt.Errorf("failed to chmod FIFO %s: %w", dst, err)
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		return fmt.Errorf("failed to place FIFO %s: %w", dst, err)
+	}
+	if err := os.Remove(src); err != nil {
+		return fmt.Errorf("failed to remove source FIFO %s after move: %w", src, err)
+	}
+	return nil
 }
 
 // moveSymlinkCrossDevice recreates a symlink at dst atomically without

@@ -172,7 +172,10 @@ func CopyFilePreserveXattrs(src, dst string) (retErr error) {
 		return err
 	}
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode().Perm())
+	// Create destination with owner rw so non-root copies can still set user.*
+	// extended attributes on read-only (e.g. 0444/0400) source files, then
+	// apply exact source permissions and special bits after copying xattrs.
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode().Perm()|0600)
 	if err != nil {
 		return err
 	}
@@ -188,25 +191,25 @@ func CopyFilePreserveXattrs(src, dst string) (retErr error) {
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return err
 	}
-	// Preserve exact permissions and special bits regardless of umask or pre-existing dst.
-	if err := dstFile.Chmod(srcInfo.Mode()); err != nil {
-		return err
-	}
 	closed = true
 	if err := dstFile.Close(); err != nil {
 		return err
 	}
 
-	// Copy extended attributes (includes security.capability).
+	// Copy extended attributes (includes security.capability and user.*).
 	xattrs, err := readXattrs(src, false)
-	if err != nil || len(xattrs) == 0 {
-		return nil
-	}
-	for _, xa := range xattrs {
-		name := strings.TrimSuffix(string(xa.Name), "\x00")
-		if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
-			return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
+	if err == nil && len(xattrs) > 0 {
+		for _, xa := range xattrs {
+			name := strings.TrimSuffix(string(xa.Name), "\x00")
+			if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
+				return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
+			}
 		}
+	}
+
+	// Preserve exact permissions and special bits regardless of umask or pre-existing dst.
+	if err := os.Chmod(dst, srcInfo.Mode()); err != nil {
+		return err
 	}
 	return nil
 }

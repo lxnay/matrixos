@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,8 +351,11 @@ func TestFsenc_CleanupWaitsForInFlightCryptsetupOpen(t *testing.T) {
 		close(cleanupDone)
 	}()
 
-	// Give Cleanup a moment to contend with in-flight cryptsetup open.
-	time.Sleep(40 * time.Millisecond)
+	// Wait deterministically until Cleanup() has marked f.closed and entered openMu contention.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !f.closed.Load() {
+		time.Sleep(time.Millisecond)
+	}
 	close(releaseOpen)
 
 	if err := <-encryptDone; err == nil {
@@ -802,7 +806,10 @@ func TestFsenc_LuksEncryptFailsWhenCleanupClosesMapperAfterOpen(t *testing.T) {
 		close(cleanupDone)
 	}()
 
-	time.Sleep(40 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !f.closed.Load() {
+		time.Sleep(time.Millisecond)
+	}
 	close(releaseOpen)
 
 	<-cleanupDone
@@ -935,5 +942,109 @@ func TestDefaultBlkidLookup_CapturesStderrInError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "blkid-custom-stderr-marker") {
 		t.Fatalf("defaultBlkidLookup error did not capture stderr: %v", err)
+	}
+}
+
+func TestMoveCrossDevice_FIFODoesNotHangAndRejectsSocket(t *testing.T) {
+	t.Run("FIFO", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src.fifo")
+		dst := filepath.Join(tmp, "sub", "dst.fifo")
+		if err := unix.Mkfifo(src, 0640); err != nil {
+			t.Fatalf("Mkfifo: %v", err)
+		}
+		if err := os.Chmod(src, 0640); err != nil {
+			t.Fatal(err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			done <- moveCrossDevice(src, dst)
+		}()
+
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("moveCrossDevice on FIFO failed: %v", err)
+			}
+		case <-time.After(1 * time.Second):
+			t.Fatal("moveCrossDevice hung forever trying to open FIFO")
+		}
+
+		info, err := os.Lstat(dst)
+		if err != nil {
+			t.Fatalf("Lstat(dst): %v", err)
+		}
+		if info.Mode()&os.ModeNamedPipe == 0 {
+			t.Fatalf("dst mode = %v, want named pipe", info.Mode())
+		}
+		if info.Mode().Perm() != 0640 {
+			t.Errorf("dst perms = %04o, want 0640", info.Mode().Perm())
+		}
+		if _, err := os.Lstat(src); !os.IsNotExist(err) {
+			t.Error("expected source FIFO to be removed after move")
+		}
+	})
+
+	t.Run("RejectsUnixSocket", func(t *testing.T) {
+		tmp := t.TempDir()
+		sock := filepath.Join(tmp, "s.sock")
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatalf("net.Listen unix: %v", err)
+		}
+		defer ln.Close()
+
+		err = moveCrossDevice(sock, filepath.Join(tmp, "dst.sock"))
+		if err == nil || !strings.Contains(err.Error(), "unsupported special file") {
+			t.Fatalf("expected unsupported special file error for Unix socket, got: %v", err)
+		}
+	})
+}
+
+func TestCopyFilePreserveXattrs_ReadOnlyFileWithUserXattr(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses DAC write checks on user.* xattrs")
+	}
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "ro-xattr.txt")
+	dst := filepath.Join(tmp, "dst-ro-xattr.txt")
+	if err := os.WriteFile(src, []byte("readonly-xattr-data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	attrName := "user.ro_test"
+	attrVal := []byte("secret-attr")
+	if err := unix.Lsetxattr(src, attrName, attrVal, 0); err != nil {
+		t.Skipf("filesystem does not support user xattrs: %v", err)
+	}
+	if err := os.Chmod(src, 0444); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(src, 0644)
+		_ = os.Chmod(dst, 0644)
+	})
+
+	if err := CopyFilePreserveXattrs(src, dst); err != nil {
+		t.Fatalf("CopyFilePreserveXattrs failed on 0444 file with user.* xattr: %v", err)
+	}
+
+	sz, err := unix.Lgetxattr(dst, attrName, nil)
+	if err != nil {
+		t.Fatalf("xattr missing on dst: %v", err)
+	}
+	buf := make([]byte, sz)
+	if _, err := unix.Lgetxattr(dst, attrName, buf); err != nil {
+		t.Fatalf("Lgetxattr: %v", err)
+	}
+	if string(buf) != string(attrVal) {
+		t.Errorf("xattr = %q, want %q", buf, attrVal)
+	}
+	info, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat(dst): %v", err)
+	}
+	if info.Mode().Perm() != 0444 {
+		t.Errorf("dst perms = %04o, want 0444", info.Mode().Perm())
 	}
 }

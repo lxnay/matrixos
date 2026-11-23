@@ -109,6 +109,13 @@ type Imager struct {
 	trackedLoopDevices []*filesystems.Loop
 	cleaning           bool
 	cleanupGen         uint64
+
+	// inFlightOps tracks mountPartition / setupImageFile operations that were
+	// admitted while !cleaning && cleanupGen == 0. Add(1) happens strictly
+	// under trackMu before Cleanup() sets cleaning=true/cleanupGen++ and calls
+	// Wait(), preventing Cleanup() from racing past an active mount(2) or
+	// loop.Attach() to delete tmpDirs or exit early.
+	inFlightOps sync.WaitGroup
 }
 
 // trackMount appends a single mount point to the tracked list.
@@ -118,8 +125,10 @@ func (im *Imager) trackMount(mnt string) {
 	im.trackedMounts = append(im.trackedMounts, mnt)
 }
 
-// trackMountIfOpen appends a mount point and reports true only if Cleanup()
-// has not started or already completed on this Imager instance.
+// trackMountIfOpen appends a mount point, increments inFlightOps, and reports
+// true only if Cleanup() has not started or already completed on this Imager.
+// When it returns true, the caller MUST invoke finishTrackedOp() before
+// returning or calling Cleanup().
 func (im *Imager) trackMountIfOpen(mnt string) bool {
 	im.trackMu.Lock()
 	defer im.trackMu.Unlock()
@@ -127,7 +136,14 @@ func (im *Imager) trackMountIfOpen(mnt string) bool {
 		return false
 	}
 	im.trackedMounts = append(im.trackedMounts, mnt)
+	im.inFlightOps.Add(1)
 	return true
+}
+
+// finishTrackedOp marks a mountPartition or setupImageFile operation admitted
+// by trackMountIfOpen / trackLoopDeviceIfOpen as complete.
+func (im *Imager) finishTrackedOp() {
+	im.inFlightOps.Done()
 }
 
 // trackTmpDir appends a single temporary directory to the tracked list.
@@ -157,8 +173,10 @@ func (im *Imager) trackLoopDevice(loop *filesystems.Loop) {
 	im.trackedLoopDevices = append(im.trackedLoopDevices, loop)
 }
 
-// trackLoopDeviceIfOpen appends a loop device and reports true only if
-// Cleanup() has not started or already completed on this Imager instance.
+// trackLoopDeviceIfOpen appends a loop device, increments inFlightOps, and
+// reports true only if Cleanup() has not started or already completed.
+// When it returns true, the caller MUST invoke finishTrackedOp() before
+// returning or calling Cleanup().
 func (im *Imager) trackLoopDeviceIfOpen(loop *filesystems.Loop) bool {
 	im.trackMu.Lock()
 	defer im.trackMu.Unlock()
@@ -166,6 +184,7 @@ func (im *Imager) trackLoopDeviceIfOpen(loop *filesystems.Loop) bool {
 		return false
 	}
 	im.trackedLoopDevices = append(im.trackedLoopDevices, loop)
+	im.inFlightOps.Add(1)
 	return true
 }
 
@@ -193,6 +212,10 @@ func (im *Imager) Cleanup() {
 		im.trackMu.Unlock()
 	}()
 
+	// Wait for any already-admitted mount(2) or loop.Attach() to complete
+	// before unmounting, closing LUKS, detaching loops, or removing tmpDirs.
+	im.inFlightOps.Wait()
+
 	var failedLoops []*filesystems.Loop
 	for {
 		im.trackMu.Lock()
@@ -215,10 +238,13 @@ func (im *Imager) Cleanup() {
 			im.fsenc.Cleanup()
 		}
 
+		// Retry any loops that failed on an earlier pass alongside newly
+		// tracked loops now that newly drained mounts/LUKS mappers are closed.
 		im.trackMu.Lock()
-		loops := slices.Clone(im.trackedLoopDevices)
+		loops := append(failedLoops, im.trackedLoopDevices...)
 		im.trackedLoopDevices = nil
 		im.trackMu.Unlock()
+		failedLoops = nil
 
 		for _, loop := range loops {
 			dev := loop.DevicePath()
@@ -238,8 +264,10 @@ func (im *Imager) Cleanup() {
 			}
 		}
 
-		// Re-drain if an in-flight mount or loop attach completed while we
-		// were cleaning up and re-tracked itself before waiting on cleanupMu.
+		// Sync buffers for image files after umount/detach.
+		syscall.Sync()
+
+		// Re-drain only if new mounts or loop devices were tracked during this pass.
 		im.trackMu.Lock()
 		moreWork := len(im.trackedMounts) > 0 || len(im.trackedLoopDevices) > 0
 		im.trackMu.Unlock()
@@ -251,23 +279,6 @@ func (im *Imager) Cleanup() {
 		im.trackMu.Lock()
 		im.trackedLoopDevices = append(failedLoops, im.trackedLoopDevices...)
 		im.trackMu.Unlock()
-	}
-
-	// Sync buffers for image files after umount.
-	syscall.Sync()
-
-	// Catch any mount that completed during syscall.Sync() before removing temp dirs.
-	im.trackMu.Lock()
-	lateMounts := slices.Clone(im.trackedMounts)
-	im.trackedMounts = nil
-	im.trackMu.Unlock()
-	if len(lateMounts) > 0 {
-		filesystems.CleanupMounts(filesystems.CleanupMountsOptions{
-			Stdout: im.Stdout(),
-			Stderr: im.Stderr(),
-			Mounts: lateMounts,
-		})
-		syscall.Sync()
 	}
 
 	im.trackMu.Lock()

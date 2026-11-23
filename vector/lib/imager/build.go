@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
@@ -199,6 +200,8 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 	if !im.trackLoopDeviceIfOpen(loop) {
 		return fmt.Errorf("cleanup already ran; refusing to attach loop device for %s", imagePath)
 	}
+	finishLoopOp := sync.OnceFunc(im.finishTrackedOp)
+	defer finishLoopOp()
 
 	if err := loop.Attach(); err != nil {
 		return fmt.Errorf("failed to attach image %s as loop device: %w",
@@ -206,9 +209,11 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 	}
 	if im.cleanupActiveOrRan() {
 		im.trackLoopDevice(loop)
+		finishLoopOp()
 		im.Cleanup()
 		return fmt.Errorf("cleanup interrupted loop attach for %s", imagePath)
 	}
+	finishLoopOp()
 	blockDevice := loop.DevicePath()
 	im.SetDevicePath(blockDevice)
 	filesystems.DevicesSettle()

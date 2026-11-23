@@ -293,9 +293,20 @@ func TestImagerMount_CleanupDuringInFlightMountAborts(t *testing.T) {
 	}()
 
 	<-inMount
-	// Signal-driven Cleanup runs and completes while mount is still in flight.
-	im.Cleanup()
+	// Signal-driven Cleanup starts while mount is in flight, waits for mount
+	// to finish, and unmounts it; MountRootfs must then abort with an error.
+	cleanupDone := make(chan struct{})
+	go func() {
+		im.Cleanup()
+		close(cleanupDone)
+	}()
+	// Wait until Cleanup() has set im.cleaning=true before releasing mount.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !im.cleanupActiveOrRan() {
+		time.Sleep(time.Millisecond)
+	}
 	close(releaseMount)
+	<-cleanupDone
 
 	if err := <-mountErrCh; err == nil {
 		t.Fatal("MountRootfs succeeded even though Cleanup() ran while mount was in flight (TOCTOU mount leak)")
@@ -454,12 +465,16 @@ func TestImagerCleanup_UnmountsLateReTrackedMountBeforeRemovingTmpDir(t *testing
 		im.Cleanup()
 		close(cleanup1Done)
 	}()
-	<-inFsenc
 
-	// Let MountRootfs finish while Cleanup #1 is still in fsenc.Cleanup();
-	// MountRootfs will detect cleanup, re-track tmpDir, and block on Cleanup #2.
+	// Wait deterministically for Cleanup() to mark cleaning=true (blocked in inFlightOps.Wait()).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !im.cleanupActiveOrRan() {
+		time.Sleep(time.Millisecond)
+	}
+	// Release MountRootfs so it completes, re-tracks tmpDir, releases inFlightOps,
+	// and lets Cleanup #1 unmount tmpDir before entering fsenc.Cleanup() and os.RemoveAll().
 	close(releaseMount)
-	time.Sleep(40 * time.Millisecond)
+	<-inFsenc
 	close(releaseFsenc)
 
 	<-cleanup1Done
@@ -495,5 +510,147 @@ func TestImagerMount_RefusesMountAfterPriorCleanupCompleted(t *testing.T) {
 	}
 	if mountCalled.Load() {
 		t.Fatal("mount command was invoked even though Cleanup() had already completed")
+	}
+}
+
+func TestImagerCleanup_WaitsForInFlightMountBeforeRemovingTmpDir(t *testing.T) {
+	cfg := baseImageConfig()
+	tmpDir := t.TempDir()
+	marker := tmpDir + "/live.txt"
+	if err := os.WriteFile(marker, []byte("precious"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var mounted atomic.Bool
+	var unmounted atomic.Bool
+
+	origReadMountInfo := filesystems.ReadMountInfo
+	origUnmount := filesystems.Unmount
+	filesystems.ReadMountInfo = func() ([]*filesystems.MountInfoEntry, error) {
+		if mounted.Load() {
+			return []*filesystems.MountInfoEntry{
+				{Mountpoint: tmpDir, Source: "/dev/sda3", FSType: "btrfs"},
+			}, nil
+		}
+		return nil, nil
+	}
+	filesystems.Unmount = func(target string, flags int) error {
+		if target == tmpDir {
+			unmounted.Store(true)
+			mounted.Store(false)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		filesystems.ReadMountInfo = origReadMountInfo
+		filesystems.Unmount = origUnmount
+	})
+
+	im := newTestImager(cfg, &ostree.MockOstree{})
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.SetRootDevice("/dev/sda3")
+	im.trackTmpDir(tmpDir)
+
+	inMount := make(chan struct{})
+	releaseMount := make(chan struct{})
+	im.runner = func(cmd *runner.Cmd) error {
+		close(inMount)
+		<-releaseMount
+		mounted.Store(true)
+		return nil
+	}
+
+	mountErrCh := make(chan error, 1)
+	go func() {
+		mountErrCh <- im.MountRootfs(tmpDir)
+	}()
+	<-inMount
+
+	cleanupDone := make(chan struct{})
+	go func() {
+		im.Cleanup()
+		close(cleanupDone)
+	}()
+
+	// Cleanup MUST wait for the in-flight mount rather than racing past
+	// CheckActiveMounts and deleting tmpDir while mount(2) is still running.
+	select {
+	case <-cleanupDone:
+		close(releaseMount)
+		<-mountErrCh
+		t.Fatal("Imager.Cleanup() completed while MountRootfs was still in flight (TOCTOU rm/mount leak)")
+	case <-time.After(400 * time.Millisecond):
+		if _, err := os.Stat(marker); err != nil {
+			close(releaseMount)
+			<-cleanupDone
+			<-mountErrCh
+			t.Fatalf("Imager.Cleanup() deleted tmpDir while MountRootfs was still in flight: %v", err)
+		}
+		close(releaseMount)
+	}
+
+	<-cleanupDone
+	if err := <-mountErrCh; err == nil {
+		t.Fatal("expected MountRootfs to return error after overlapping Cleanup()")
+	}
+	if !unmounted.Load() {
+		t.Fatal("Imager.Cleanup() never unmounted the completed in-flight mount")
+	}
+	if _, err := os.Stat(tmpDir); !os.IsNotExist(err) {
+		t.Fatalf("expected tmpDir to be removed once unmounted, stat err = %v", err)
+	}
+}
+
+func TestImagerMount_DoesNotCreateMountDirAfterCleanup(t *testing.T) {
+	cfg := baseImageConfig()
+	im := newTestImager(cfg, &ostree.MockOstree{})
+	im.SetStdout(io.Discard)
+	im.SetStderr(io.Discard)
+	im.SetRootDevice("/dev/loop0p3")
+
+	im.Cleanup()
+
+	leakedDir := t.TempDir() + "/should-not-be-created/mnt"
+	if err := im.MountRootfs(leakedDir); err == nil {
+		t.Fatal("expected MountRootfs to fail after Cleanup()")
+	}
+	if _, err := os.Stat(leakedDir); !os.IsNotExist(err) {
+		t.Fatalf("MountRootfs created directory %s even though Cleanup() had already run", leakedDir)
+	}
+}
+
+func TestImagerCleanup_RetriesFailedLoopOnReDrain(t *testing.T) {
+	cfg := baseImageConfig()
+	var stderrBuf bytes.Buffer
+	var im *Imager
+	var fsencCalls atomic.Int32
+
+	fsenc := &orderTrackingFsenc{
+		MockFsenc: filesystems.DefaultMockFsenc(),
+		onCleanup: func() {
+			// On pass 1, simulate a late re-tracked mount arriving so Cleanup
+			// enters a second drain pass; the failed loop from pass 1 must be
+			// retried on pass 2 instead of being skipped.
+			if fsencCalls.Add(1) == 1 {
+				im.trackMount("/mnt/late-nonexistent-mount")
+			}
+		},
+	}
+
+	var err error
+	im, err = NewImager(cfg, &ostree.MockOstree{}, fsenc, nil)
+	if err != nil {
+		t.Fatalf("NewImager: %v", err)
+	}
+	im.SetStdout(io.Discard)
+	im.SetStderr(&stderrBuf)
+
+	im.trackLoopDevice(filesystems.NewLoopFromDevice("/dev/nonexistent-loop-redrain-test"))
+	im.Cleanup()
+
+	detachWarnings := bytes.Count(stderrBuf.Bytes(), []byte("failed to detach loop device /dev/nonexistent-loop-redrain-test"))
+	if detachWarnings < 2 {
+		t.Fatalf("expected failed loop to be retried on re-drain pass (warnings=%d, want >= 2):\n%s", detachWarnings, stderrBuf.String())
 	}
 }

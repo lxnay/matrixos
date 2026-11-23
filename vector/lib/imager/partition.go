@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -72,6 +73,12 @@ func (im *Imager) mountPartition(device, missingDeviceMsg, mountPoint, missingMo
 	if mountPoint == "" {
 		return errors.New(missingMountMsg)
 	}
+	if !im.trackMountIfOpen(mountPoint) {
+		return fmt.Errorf("cleanup already ran; refusing to mount %s", mountPoint)
+	}
+	finishOp := sync.OnceFunc(im.finishTrackedOp)
+	defer finishOp()
+
 	if !filesystems.DirectoryExists(mountPoint) {
 		im.Print("Creating %s ...\n", mountPoint)
 		if err := os.MkdirAll(mountPoint, 0755); err != nil {
@@ -80,14 +87,12 @@ func (im *Imager) mountPartition(device, missingDeviceMsg, mountPoint, missingMo
 	}
 
 	im.Print("Mounting %s to %s\n", device, mountPoint)
-	if !im.trackMountIfOpen(mountPoint) {
-		return fmt.Errorf("cleanup already ran; refusing to mount %s", mountPoint)
-	}
 	if err := im.runCmd("mount", mountArgs...); err != nil {
 		return err
 	}
 	if im.cleanupActiveOrRan() {
 		im.trackMount(mountPoint)
+		finishOp()
 		im.Cleanup()
 		return fmt.Errorf("cleanup interrupted mount of %s", mountPoint)
 	}
