@@ -62,8 +62,8 @@ func TestStyledWriter_ConcurrentGlobalLogDest(t *testing.T) {
 	defer ClearGlobalLogWriter()
 
 	var out1, out2 bytes.Buffer
-	w1 := newStyledWriter(&out1, "[w1]", "", "", false)
-	w2 := newStyledWriter(&out2, "[w2]", "", "", false)
+	w1 := newStyledWriter(&out1, nil, "[w1]", "", "", false)
+	w2 := newStyledWriter(&out2, nil, "[w2]", "", "", false)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -623,7 +623,7 @@ func TestSignalGuard_RespawnsListenerImmediatelyDuringSignalExit(t *testing.T) {
 func TestUI_SetupPlainPrintersFlushesPreviousWriter(t *testing.T) {
 	var buf bytes.Buffer
 	var ui UI
-	ui.printer = newStyledWriter(&buf, "[old]", "", "", false)
+	ui.printer = newStyledWriter(&buf, nil, "[old]", "", "", false)
 	_, _ = io.WriteString(ui.printer, "buffered-partial-line")
 
 	ui.SetupPlainPrinters()

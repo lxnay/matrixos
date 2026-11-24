@@ -21,6 +21,18 @@ var (
 	globalLogDest io.Writer
 )
 
+// termState coordinates destination writes and TTY \r-overwrite state across
+// styledWriter instances that share the same underlying terminal.
+type termState struct {
+	mu           sync.Mutex
+	hasOverwrite bool
+}
+
+// stdTermState is shared by all styledWriter instances writing to os.Stdout or
+// os.Stderr so parallel workers and stdout/stderr streams never interleave
+// writes or glue complete lines onto an active \r progress line.
+var stdTermState = &termState{}
+
 // SetGlobalLogWriter sets a process-wide log writer that every
 // subsequently created styledWriter will tee ANSI-stripped output to.
 // Call ClearGlobalLogWriter when done.
@@ -45,27 +57,34 @@ func ClearGlobalLogWriter() {
 //   - When writing to a non-terminal (e.g. a log file), \r segments and ANSI
 //     escape sequences are silently stripped so the output stays clean.
 type styledWriter struct {
-	mu           sync.Mutex
-	dest         io.Writer
-	logDest      io.Writer // optional secondary writer for log capture
-	prefix       string    // already styled prefix string (e.g. icon + label)
-	style        string    // ANSI escape applied to the line body
-	reset        string    // ANSI reset sequence
-	buf          []byte    // partial-line accumulator
-	isTTY        bool      // whether dest is a terminal
-	hasOverwrite bool      // TTY-only: an overwrite line is currently displayed
+	mu      sync.Mutex
+	dest    io.Writer
+	term    *termState // shared lock + TTY overwrite state for dest
+	logDest io.Writer  // optional secondary writer for log capture
+	prefix  string     // already styled prefix string (e.g. icon + label)
+	style   string     // ANSI escape applied to the line body
+	reset   string     // ANSI reset sequence
+	buf     []byte     // partial-line accumulator
+	isTTY   bool       // whether dest is a terminal
 }
 
 // newStyledWriter creates a writer that prefixes every complete line with
-// style+prefix and appends a reset sequence.  When isTTY is false, incoming
-// ANSI escape sequences and \r-based overwrites are stripped before output.
-func newStyledWriter(dest io.Writer, prefix, style, reset string, isTTY bool) *styledWriter {
+// style+prefix and appends a reset sequence. Writes and TTY \r-overwrite state
+// are coordinated through term; if term is nil, an isolated termState is used.
+// When isTTY is false, incoming ANSI escape sequences and \r-based overwrites
+// are stripped before output.
+func newStyledWriter(dest io.Writer, term *termState, prefix, style, reset string, isTTY bool) *styledWriter {
 	globalLogMu.Lock()
 	lw := globalLogDest
 	globalLogMu.Unlock()
 
+	if term == nil {
+		term = &termState{}
+	}
+
 	return &styledWriter{
 		dest:    dest,
+		term:    term,
 		logDest: lw,
 		prefix:  prefix,
 		style:   style,
@@ -179,36 +198,53 @@ func (w *styledWriter) cleanLine(line string) string {
 	return ansiStripRe.ReplaceAllString(line, "")
 }
 
+// writeDestComplete writes a complete (or flushed) line to w.dest under the
+// shared terminal lock, atomically clearing any active TTY \r overwrite first.
+func (w *styledWriter) writeDestComplete(s string) error {
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
+	if w.isTTY && w.term.hasOverwrite {
+		s = "\r\033[2K" + s
+		w.term.hasOverwrite = false
+	}
+	_, err := io.WriteString(w.dest, s)
+	return err
+}
+
+// clearOverwrite clears any active TTY \r overwrite line on the shared terminal.
+func (w *styledWriter) clearOverwrite() {
+	if !w.isTTY {
+		return
+	}
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
+	if w.term.hasOverwrite {
+		_, _ = io.WriteString(w.dest, "\r\033[2K")
+		w.term.hasOverwrite = false
+	}
+}
+
 // writeCompleteLine formats and writes a single finished line (after \n) to
 // the underlying destination, clearing any in-progress overwrite first.
 func (w *styledWriter) writeCompleteLine(line string) error {
-	// If we previously wrote an overwrite line, clear it first.
-	if w.isTTY && w.hasOverwrite {
-		_, _ = io.WriteString(w.dest, "\r\033[2K")
-		w.hasOverwrite = false
-	}
-
 	line = w.cleanLine(line)
 
 	// Preserve blank lines without the prefix to keep output tidy.
 	if strings.TrimSpace(line) == "" {
 		w.writeToLog("\n")
-		_, err := fmt.Fprintln(w.dest)
-		return err
+		return w.writeDestComplete("\n")
 	}
 
 	// Plain mode: no prefix/style decoration.
 	if w.prefix == "" {
 		plain := fmt.Sprintf("%s\n", line)
 		w.writeToLog(plain)
-		_, err := fmt.Fprintf(w.dest, "%s\n", line)
-		return err
+		return w.writeDestComplete(plain)
 	}
 
 	formatted := fmt.Sprintf("%s%s %s%s\n", w.style, w.prefix, line, w.reset)
 	w.writeToLog(formatted)
-	_, err := io.WriteString(w.dest, formatted)
-	return err
+	return w.writeDestComplete(formatted)
 }
 
 // writeOverwriteLine writes a temporary (no trailing newline) line to the
@@ -221,8 +257,10 @@ func (w *styledWriter) writeOverwriteLine(line string) error {
 	} else {
 		formatted = fmt.Sprintf("\r\033[2K%s%s %s%s", w.style, w.prefix, line, w.reset)
 	}
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
 	_, err := io.WriteString(w.dest, formatted)
-	w.hasOverwrite = true
+	w.term.hasOverwrite = true
 	return err
 }
 
@@ -250,12 +288,8 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 	// earlier dest write error so logDest and dest never receive raw unparsed chunks.
 	_ = w.drainBufLocked(false)
 
-	if w.isTTY && w.hasOverwrite {
-		_, _ = io.WriteString(w.dest, "\r\033[2K")
-		w.hasOverwrite = false
-	}
-
 	if len(w.buf) == 0 {
+		w.clearOverwrite()
 		return
 	}
 
@@ -264,6 +298,7 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 	line := w.cleanLine(string(bytes.TrimRight(w.buf, "\r")))
 	w.buf = nil
 	if strings.TrimSpace(line) == "" {
+		w.clearOverwrite()
 		return
 	}
 
@@ -275,11 +310,11 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 	if w.prefix == "" {
 		plain := fmt.Sprintf("%s%s", line, nl)
 		w.writeToLog(plain)
-		_, _ = fmt.Fprintf(w.dest, "%s%s", line, nl)
+		_ = w.writeDestComplete(plain)
 		return
 	}
 
 	formatted := fmt.Sprintf("%s%s %s%s%s", w.style, w.prefix, line, w.reset, nl)
 	w.writeToLog(formatted)
-	_, _ = io.WriteString(w.dest, formatted)
+	_ = w.writeDestComplete(formatted)
 }

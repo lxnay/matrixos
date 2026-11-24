@@ -578,8 +578,8 @@ func TestResolveDevicesInteractiveCancelled(t *testing.T) {
 				t.Fatalf("newTestFlashCommand failed: %v", err)
 			}
 			cmd.SetupPrinters("flash")
-			cmd.printer = newStyledWriter(io.Discard, "", "", "", false)
-			cmd.errPrinter = newStyledWriter(io.Discard, "", "", "", false)
+			cmd.printer = newStyledWriter(io.Discard, nil, "", "", "", false)
+			cmd.errPrinter = newStyledWriter(io.Discard, nil, "", "", "", false)
 			cmd.prompter = NewPrompter(strings.NewReader(tc.input), io.Discard, io.Discard, &cmd.UI)
 
 			errCh := make(chan error, 1)

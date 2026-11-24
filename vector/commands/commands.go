@@ -324,14 +324,14 @@ func (ui *UI) IsTTY() bool {
 // libraries that need a prefixed, TTY-aware io.Writer.
 func (ui *UI) NewStdoutWriter(name string) *styledWriter {
 	prefix := fmt.Sprintf("%s%s%s[%s]%s", ui.cBold, ui.cGreen, ui.iconGear, name, ui.cReset)
-	return newStyledWriter(os.Stdout, prefix, ui.cGreen, ui.cReset, ui.isTTY)
+	return newStyledWriter(os.Stdout, stdTermState, prefix, ui.cGreen, ui.cReset, ui.isTTY)
 }
 
 // NewStderrWriter creates a styled writer for os.Stderr using the UI
 // theme.  See NewStdoutWriter for details.
 func (ui *UI) NewStderrWriter(name string) *styledWriter {
 	prefix := fmt.Sprintf("%s%s%s[%s]%s", ui.cBold, ui.cRed, ui.iconWarn, name, ui.cReset)
-	return newStyledWriter(os.Stderr, prefix, ui.cYellow, ui.cReset, ui.isTTY)
+	return newStyledWriter(os.Stderr, stdTermState, prefix, ui.cYellow, ui.cReset, ui.isTTY)
 }
 
 // SetupPrinters creates the default stdout/stderr styled writers for
@@ -350,9 +350,9 @@ func (ui *UI) SetupPrinters(name string) {
 func (ui *UI) SetupPlainPrinters() {
 	ui.FlushPrinters()
 	prefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cGreen, ui.iconGear, ui.cReset)
-	ui.printer = newStyledWriter(os.Stdout, prefix, "", "", ui.isTTY)
+	ui.printer = newStyledWriter(os.Stdout, stdTermState, prefix, "", "", ui.isTTY)
 	errPrefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cRed, ui.iconWarn, ui.cReset)
-	ui.errPrinter = newStyledWriter(os.Stderr, errPrefix, "", "", ui.isTTY)
+	ui.errPrinter = newStyledWriter(os.Stderr, stdTermState, errPrefix, "", "", ui.isTTY)
 }
 
 // StdoutWriter returns the current stdout styled writer, or nil if
