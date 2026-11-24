@@ -1,8 +1,10 @@
 package ostree
 
 import (
-	"matrixos/vector/lib/config"
+	"errors"
 	"testing"
+
+	"matrixos/vector/lib/config"
 )
 
 func TestBranchHelpers(t *testing.T) {
@@ -109,16 +111,6 @@ func TestFullBranchHelpers(t *testing.T) {
 	if clean, _ := o.RemoveFullFromBranch(); clean != "branch" {
 		t.Errorf("RemoveFullFromBranch(branch) = %q, want branch", clean)
 	}
-
-	// BranchShortnameToFull
-	fullRef, err := o.BranchShortnameToFull("gnome", "dev", "matrixos", "amd64")
-	if err != nil {
-		t.Errorf("BranchShortnameToFull failed: %v", err)
-	}
-	wantFullRef := "matrixos/amd64/dev/gnome-full"
-	if fullRef != wantFullRef {
-		t.Errorf("BranchShortnameToFull = %q, want %q", fullRef, wantFullRef)
-	}
 }
 
 func TestBranchHelpersErrors(t *testing.T) {
@@ -150,13 +142,29 @@ func TestOstreeBranchMethodsErrors(t *testing.T) {
 	if _, err := o.IsBranchFullSuffixed(); err == nil {
 		t.Error("IsBranchFullSuffixed should fail empty ref")
 	}
-	if _, err := o.BranchShortnameToFull("", "stage", "os", "arch"); err == nil {
-		t.Error("BranchShortnameToFull should fail empty shortname")
-	}
 	if _, err := o.BranchToFull(); err == nil {
 		t.Error("BranchToFull should fail empty ref")
 	}
 	if _, err := o.RemoveFullFromBranch(); err == nil {
 		t.Error("RemoveFullFromBranch should fail empty ref")
+	}
+}
+
+func TestCleanAndStripRef(t *testing.T) {
+	if _, err := CleanAndStripRef(nil); err == nil {
+		t.Error("expected error for nil IOstree")
+	}
+	got, err := CleanAndStripRef(&MockOstree{Ref_: "origin:matrixos/amd64/gnome-full"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "matrixos/amd64/gnome" {
+		t.Errorf("got %q, want %q", got, "matrixos/amd64/gnome")
+	}
+	if _, err := CleanAndStripRef(&MockOstree{RemoveFullErr: errors.New("boom")}); err == nil {
+		t.Error("expected propagated RemoveFullFromBranch error")
+	}
+	if _, err := CleanAndStripRef(&MockOstree{RemoveFullResult: "origin:", RemoveFullResultSet: true}); err == nil {
+		t.Error("expected error when cleaned ref is empty")
 	}
 }

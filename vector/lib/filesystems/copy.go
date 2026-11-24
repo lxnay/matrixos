@@ -9,37 +9,73 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // CopyFile copies a file from src to dst atomically. It writes to a temporary
 // file first, syncs it, then renames to the final destination. This ensures the
 // destination is never left in a partial state.
 func CopyFile(src, dst string) error {
+	return copyFileAtomic(src, dst, ".copy-*.tmp")
+}
+
+// copyFileAtomic copies src to a temporary file in dst's directory, preserves
+// source permissions (including special mode bits), fsyncs, and atomically
+// renames to dst.
+func copyFileAtomic(src, dst, tmpPattern string) error {
+	srcStat, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcStat.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcStat.Mode())
+	}
+
 	sourceFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer sourceFile.Close()
 
-	destFile, err := os.Create(dst + ".tmp")
+	srcInfo, err := sourceFile.Stat()
 	if err != nil {
 		return err
 	}
-	defer destFile.Close()
+	if !srcInfo.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcInfo.Mode())
+	}
 
-	_, err = io.Copy(destFile, sourceFile)
+	destFile, err := os.CreateTemp(filepath.Dir(dst), tmpPattern)
 	if err != nil {
 		return err
 	}
+	tmpPath := destFile.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = destFile.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	err = destFile.Sync()
-	if err != nil {
+	if _, err = io.Copy(destFile, sourceFile); err != nil {
 		return err
 	}
-	sourceFile.Close()
-	destFile.Close()
-
-	return os.Rename(dst+".tmp", dst)
+	if err = destFile.Chmod(srcInfo.Mode()); err != nil {
+		return err
+	}
+	if err = destFile.Sync(); err != nil {
+		return err
+	}
+	if err = destFile.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, dst); err != nil {
+		return err
+	}
+	success = true
+	return nil
 }
 
 // CopyDirPreserve recursively copies a directory tree from src to dst,
@@ -53,12 +89,26 @@ func CopyDirPreserve(src, dst string) error {
 	if !srcInfo.IsDir() {
 		return fmt.Errorf("source %s is not a directory", src)
 	}
-
-	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()); err != nil {
-		return fmt.Errorf("failed to create destination %s: %w", dst, err)
+	if isSameOrSubpath(src, dst) {
+		return fmt.Errorf("cannot copy directory %s into itself (%s): %w", src, dst, syscall.EINVAL)
 	}
 
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+	type dirMeta struct {
+		src  string
+		dst  string
+		mode fs.FileMode
+	}
+
+	// Create directories with owner rwx during the walk so non-root copies can
+	// populate read-only (e.g. 0555/0500) source directories and apply directory
+	// xattrs, then restore exact permissions and special bits bottom-up once all
+	// children are written.
+	if err := os.MkdirAll(dst, srcInfo.Mode().Perm()|0700); err != nil {
+		return fmt.Errorf("failed to create destination %s: %w", dst, err)
+	}
+	dirs := []dirMeta{{src: src, dst: dst, mode: srcInfo.Mode()}}
+
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -88,25 +138,72 @@ func CopyDirPreserve(src, dst string) error {
 			if relPath == "." {
 				return nil // already created above
 			}
-			if err := os.MkdirAll(dstPath, info.Mode().Perm()); err != nil {
+			if err := os.MkdirAll(dstPath, info.Mode().Perm()|0700); err != nil {
 				return err
 			}
-			// Preserve sticky, setuid, setgid bits that MkdirAll ignores.
-			specialBits := info.Mode() & (os.ModeSticky | os.ModeSetuid | os.ModeSetgid)
-			if specialBits != 0 {
-				return os.Chmod(dstPath, info.Mode().Perm()|specialBits)
-			}
+			dirs = append(dirs, dirMeta{src: path, dst: dstPath, mode: info.Mode()})
 			return nil
+		}
+
+		// Handle named pipes (FIFOs) without blocking on os.Open.
+		if info.Mode()&os.ModeNamedPipe != 0 {
+			if err := unix.Mkfifo(dstPath, uint32(info.Mode().Perm())); err != nil {
+				return fmt.Errorf("failed to create FIFO %s: %w", dstPath, err)
+			}
+			return os.Chmod(dstPath, info.Mode())
+		}
+
+		// Guard against other special files (sockets, device nodes) that cannot
+		// be copied with os.Open/io.Copy.
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("cannot copy unsupported special file %s (mode %s)", path, info.Mode())
 		}
 
 		// Handle regular files.
 		return CopyFilePreserveXattrs(path, dstPath)
 	})
+	if err != nil {
+		return err
+	}
+
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := copyXattrs(dirs[i].src, dirs[i].dst); err != nil {
+			return err
+		}
+		if err := os.Chmod(dirs[i].dst, dirs[i].mode); err != nil {
+			return fmt.Errorf("failed to chmod destination %s: %w", dirs[i].dst, err)
+		}
+	}
+	return nil
+}
+
+// copyXattrs copies extended attributes (including security.capability and
+// user.*) from src to dst without following symlinks.
+func copyXattrs(src, dst string) error {
+	xattrs, err := readXattrs(src, false)
+	if err != nil || len(xattrs) == 0 {
+		return nil
+	}
+	for _, xa := range xattrs {
+		name := strings.TrimSuffix(string(xa.Name), "\x00")
+		if err := sysLsetxattr(dst, name, xa.Value, 0); err != nil {
+			return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
+		}
+	}
+	return nil
 }
 
 // CopyFilePreserveXattrs copies a file from src to dst, preserving permissions
 // and extended attributes (xattrs). This is equivalent to "cp -a" for regular files.
-func CopyFilePreserveXattrs(src, dst string) error {
+func CopyFilePreserveXattrs(src, dst string) (retErr error) {
+	srcStat, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcStat.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcStat.Mode())
+	}
+
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
@@ -117,45 +214,50 @@ func CopyFilePreserveXattrs(src, dst string) error {
 	if err != nil {
 		return err
 	}
+	if !srcInfo.Mode().IsRegular() {
+		return fmt.Errorf("cannot copy non-regular file %s (mode %s)", src, srcInfo.Mode())
+	}
+	if dstInfo, statErr := os.Stat(dst); statErr == nil {
+		if os.SameFile(srcInfo, dstInfo) {
+			return nil
+		}
+		if !dstInfo.Mode().IsRegular() {
+			return fmt.Errorf("cannot overwrite non-regular destination %s (mode %s)", dst, dstInfo.Mode())
+		}
+	}
 
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	// Create destination with owner rw so non-root copies can still set user.*
+	// extended attributes on read-only (e.g. 0444/0400) source files, then
+	// apply exact source permissions and special bits after copying xattrs.
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode().Perm()|0600)
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			if cerr := dstFile.Close(); cerr != nil && retErr == nil {
+				retErr = cerr
+			}
+		}
+	}()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return err
 	}
-
-	// Copy extended attributes (includes security.capability)
-	attrs, err := sysLlistxattr(src, nil)
-	if err != nil || attrs == 0 {
-		return nil // no xattrs or not supported
-	}
-	buf := make([]byte, attrs)
-	attrs, err = sysLlistxattr(src, buf)
-	if err != nil {
-		return nil
+	closed = true
+	if err := dstFile.Close(); err != nil {
+		return err
 	}
 
-	// xattr names are null-terminated strings packed together
-	for _, name := range strings.Split(strings.TrimRight(string(buf[:attrs]), "\x00"), "\x00") {
-		if name == "" {
-			continue
-		}
-		sz, err := sysLgetxattr(src, name, nil)
-		if err != nil {
-			continue
-		}
-		val := make([]byte, sz)
-		_, err = sysLgetxattr(src, name, val)
-		if err != nil {
-			continue
-		}
-		if err := sysLsetxattr(dst, name, val, 0); err != nil {
-			return fmt.Errorf("failed to set xattr %q on %s: %w", name, dst, err)
-		}
+	// Copy extended attributes (includes security.capability and user.*).
+	if err := copyXattrs(src, dst); err != nil {
+		return err
+	}
+
+	// Preserve exact permissions and special bits regardless of umask or pre-existing dst.
+	if err := os.Chmod(dst, srcInfo.Mode()); err != nil {
+		return err
 	}
 	return nil
 }
@@ -171,9 +273,12 @@ func CopyFileReflink(src, dst string) error {
 		return fmt.Errorf("missing dst parameter")
 	}
 	cmd := exec.Command("cp", "-a", "--reflink=auto", "--preserve=links", src, dst)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("cp --reflink=auto failed: %w: %s", err, msg)
+		}
 		return fmt.Errorf("cp --reflink=auto failed: %w", err)
 	}
 	return nil
@@ -290,93 +395,5 @@ func CheckHardlinkPreservation(src, dst string, opts CheckHardlinkPreservationOp
 	}
 
 	fmt.Fprintf(stdout, "SUCCESS: hardlinks preserved (Inode: %d).\n", stat1.Ino)
-	return nil
-}
-
-// CpReflinkCopyAllowed checks if a reflink copy is allowed.
-func CpReflinkCopyAllowed(src, dst string, useCpFlag bool) (bool, error) {
-	if src == "" || dst == "" {
-		return false, fmt.Errorf("missing parameters (src: %s, dst: %s)", src, dst)
-	}
-	if !useCpFlag || src == "/" {
-		return false, nil
-	}
-	sameFs, err := CheckDirsSameFilesystem(src, dst)
-	if err != nil {
-		return false, err
-	}
-	if !sameFs {
-		return false, nil
-	}
-	srcCap, err := CheckFsCapabilitySupport(src)
-	if err != nil {
-		return false, err
-	}
-	dstCap, err := CheckFsCapabilitySupport(dst)
-	if err != nil {
-		return false, err
-	}
-	return srcCap && dstCap, nil
-}
-
-// RsyncCopyOptions controls the behaviour of RsyncCopy.
-type RsyncCopyOptions struct {
-	Src      string    // source directory
-	Dst      string    // destination directory
-	Excludes []string  // paths to exclude
-	Verbose  bool      // enable verbose/progress output
-	Stdout   io.Writer // informational output (nil defaults to os.Stdout)
-	Stderr   io.Writer // error/warning output (nil defaults to os.Stderr)
-}
-
-// RsyncCopy copies src to dst using rsync with the provided options.
-func RsyncCopy(opts RsyncCopyOptions) error {
-	if opts.Src == "" || opts.Dst == "" {
-		return fmt.Errorf("missing parameters (src: %s, dst: %s)", opts.Src, opts.Dst)
-	}
-	if len(opts.Excludes) == 0 {
-		return fmt.Errorf("unable to get sync excluded paths")
-	}
-
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-
-	// Normalise trailing slashes for rsync semantics.
-	src := strings.TrimRight(opts.Src, "/") + "/"
-	dst := strings.TrimRight(opts.Dst, "/") + "/"
-
-	args := []string{
-		"--archive",
-		"--hard-links",
-		"--acls",
-		"--xattrs",
-		"--no-D",
-		"--numeric-ids",
-		"--delete-during",
-		"--one-file-system",
-	}
-
-	if opts.Verbose {
-		args = append(args, "--verbose", "--partial", "--progress")
-	}
-
-	for _, exc := range opts.Excludes {
-		args = append(args, "--exclude="+exc)
-	}
-	args = append(args, src, dst)
-
-	fmt.Fprintf(stdout, "Running: rsync %s\n", strings.Join(args, " "))
-	cmd := exec.Command("rsync", args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("rsync failed: %w", err)
-	}
 	return nil
 }

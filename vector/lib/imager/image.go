@@ -11,10 +11,10 @@ import (
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
+	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/validation"
-
-	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/worker"
 )
 
 type ImageMode int
@@ -65,27 +65,28 @@ type IImager interface {
 	ExecuteWithImageLock(fn func() error) error
 }
 
+// Compile-time interface check.
+var _ IImager = (*Imager)(nil)
+
 // Imager provides image creation and manipulation operations.
 type Imager struct {
 	*ImagerConfig
-	ostree              ostree.IOstree
-	fsenc               filesystems.IFsenc
-	runner              runner.Func
-	chrootRunner        runner.ChrootRunFunc
-	bootloader          Bootloader
-	stdout              io.Writer
-	stderr              io.Writer
-	efiDevice           string
-	bootDevice          string
-	rootDevice          string
-	realRootDevice      string // if encrypted, devicePath is replaced.
-	devicePath          string
-	imagePath           string
-	compressedImagePath string
-	mode                ImageMode
-	rootfs              string
-	ref                 string
-	encrypted           bool
+	worker.IO
+	ostree         ostree.IOstree
+	fsenc          filesystems.IFsenc
+	runner         runner.Func
+	chrootRunner   runner.ChrootRunFunc
+	bootloader     Bootloader
+	efiDevice      string
+	bootDevice     string
+	rootDevice     string
+	realRootDevice string // if encrypted, devicePath is replaced.
+	devicePath     string
+	imagePath      string
+	mode           ImageMode
+	rootfs         string
+	ref            string
+	encrypted      bool
 
 	// Mount points, set by Mount* methods on success.
 	efifsMount  string
@@ -95,107 +96,226 @@ type Imager struct {
 	// QA validation instance.
 	qa *validation.QA
 
-	// trackedMounts records every mount point created by this Imager
-	// so that Cleanup can attempt to unmount them all on failure or signal.
-	trackedMountsMu      sync.Mutex
-	trackedMounts        []string
-	trackedTmpDirsMu     sync.Mutex
-	trackedTmpDirs       []string
-	trackedLoopDevicesMu sync.Mutex
-	trackedLoopDevices   []*filesystems.Loop
-}
+	// cleanupMu serializes Cleanup() calls so concurrent callers (e.g.
+	// SignalGuard and finalizeBuild/defer) never remove temp dirs or close
+	// LUKS/loop devices while an earlier Cleanup() is still unmounting.
+	cleanupMu sync.Mutex
 
-func (im *Imager) SetStdout(w io.Writer) { im.stdout = w }
+	// trackMu guards trackedMounts, trackedTmpDirs, trackedLoopDevices,
+	// cleaning, and cleanupGen. Lock order: cleanupMu -> trackMu.
+	trackMu            sync.Mutex
+	trackedMounts      []string
+	trackedTmpDirs     []string
+	trackedLoopDevices []*filesystems.Loop
+	cleaning           bool
+	cleanupGen         uint64
 
-func (im *Imager) SetStderr(w io.Writer) { im.stderr = w }
-
-func (im *Imager) Stdout() io.Writer { return im.stdout }
-
-func (im *Imager) Stderr() io.Writer { return im.stderr }
-
-func (im *Imager) Print(format string, args ...any) {
-	fmt.Fprintf(im.stdout, format, args...)
-}
-
-func (im *Imager) PrintWarning(format string, args ...any) {
-	fmt.Fprintf(im.stderr, format, args...)
-}
-
-func (im *Imager) PrintError(format string, args ...any) {
-	fmt.Fprintf(im.stderr, format, args...)
+	// inFlightOps tracks mountPartition / setupImageFile operations that were
+	// admitted while !cleaning && cleanupGen == 0. Add(1) happens strictly
+	// under trackMu before Cleanup() sets cleaning=true/cleanupGen++ and calls
+	// Wait(), preventing Cleanup() from racing past an active mount(2) or
+	// loop.Attach() to delete tmpDirs or exit early.
+	inFlightOps sync.WaitGroup
 }
 
 // trackMount appends a single mount point to the tracked list.
 func (im *Imager) trackMount(mnt string) {
-	im.trackedMountsMu.Lock()
-	defer im.trackedMountsMu.Unlock()
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedMounts = append(im.trackedMounts, mnt)
 }
 
-// trackMounts appends multiple mount points to the tracked list.
-func (im *Imager) trackMounts(mnts []string) {
-	im.trackedMountsMu.Lock()
-	defer im.trackedMountsMu.Unlock()
-	im.trackedMounts = append(im.trackedMounts, mnts...)
+// trackMountIfOpen appends a mount point, increments inFlightOps, and reports
+// true only if Cleanup() has not started or already completed on this Imager.
+// When it returns true, the caller MUST invoke finishTrackedOp() before
+// returning or calling Cleanup().
+func (im *Imager) trackMountIfOpen(mnt string) bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	if im.cleaning || im.cleanupGen > 0 {
+		return false
+	}
+	im.trackedMounts = append(im.trackedMounts, mnt)
+	im.inFlightOps.Add(1)
+	return true
+}
+
+// finishTrackedOp marks a mountPartition or setupImageFile operation admitted
+// by trackMountIfOpen / trackLoopDeviceIfOpen as complete.
+func (im *Imager) finishTrackedOp() {
+	im.inFlightOps.Done()
 }
 
 // trackTmpDir appends a single temporary directory to the tracked list.
 func (im *Imager) trackTmpDir(tmpDir string) {
-	im.trackedTmpDirsMu.Lock()
-	defer im.trackedTmpDirsMu.Unlock()
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedTmpDirs = append(im.trackedTmpDirs, tmpDir)
+}
+
+// untrackTmpDir removes a temporary directory from the tracked list once its
+// owner has already cleaned it up.
+func (im *Imager) untrackTmpDir(tmpDir string) {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	for i, d := range im.trackedTmpDirs {
+		if d == tmpDir {
+			im.trackedTmpDirs = append(im.trackedTmpDirs[:i], im.trackedTmpDirs[i+1:]...)
+			return
+		}
+	}
 }
 
 // trackLoopDevice appends a loop device to the tracked list.
 func (im *Imager) trackLoopDevice(loop *filesystems.Loop) {
-	im.trackedLoopDevicesMu.Lock()
-	defer im.trackedLoopDevicesMu.Unlock()
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
 	im.trackedLoopDevices = append(im.trackedLoopDevices, loop)
 }
 
-func (im *Imager) Cleanup() {
-	im.trackedMountsMu.Lock()
-	mounts := slices.Clone(im.trackedMounts)
-	im.trackedMounts = nil
-	im.trackedMountsMu.Unlock()
-
-	copts := filesystems.CleanupMountsOptions{
-		Stdout: im.stdout,
-		Stderr: im.stderr,
-		Mounts: mounts,
+// trackLoopDeviceIfOpen appends a loop device, increments inFlightOps, and
+// reports true only if Cleanup() has not started or already completed.
+// When it returns true, the caller MUST invoke finishTrackedOp() before
+// returning or calling Cleanup().
+func (im *Imager) trackLoopDeviceIfOpen(loop *filesystems.Loop) bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	if im.cleaning || im.cleanupGen > 0 {
+		return false
 	}
-	filesystems.CleanupMounts(copts)
+	im.trackedLoopDevices = append(im.trackedLoopDevices, loop)
+	im.inFlightOps.Add(1)
+	return true
+}
 
-	im.trackedLoopDevicesMu.Lock()
-	loops := slices.Clone(im.trackedLoopDevices)
-	im.trackedLoopDevices = nil
-	im.trackedLoopDevicesMu.Unlock()
+// beginTrackedOp increments inFlightOps and reports true only if Cleanup() has
+// not started or already completed. When it returns true, the caller MUST
+// invoke finishTrackedOp() before returning or calling Cleanup().
+func (im *Imager) beginTrackedOp() bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	if im.cleaning || im.cleanupGen > 0 {
+		return false
+	}
+	im.inFlightOps.Add(1)
+	return true
+}
 
-	for _, loop := range loops {
-		if err := loop.Detach(); err != nil {
-			fmt.Fprintf(
-				im.stderr,
-				"warning: failed to detach loop device %s (path: %s): %v\n",
-				loop.Device,
-				loop.Path,
-				err,
-			)
+// cleanupActiveOrRan reports whether Cleanup() is currently running or has
+// already run at least once on this Imager instance.
+func (im *Imager) cleanupActiveOrRan() bool {
+	im.trackMu.Lock()
+	defer im.trackMu.Unlock()
+	return im.cleaning || im.cleanupGen > 0
+}
+
+func (im *Imager) Cleanup() {
+	im.cleanupMu.Lock()
+	defer im.cleanupMu.Unlock()
+
+	im.trackMu.Lock()
+	im.cleaning = true
+	im.cleanupGen++
+	im.trackMu.Unlock()
+
+	defer func() {
+		im.trackMu.Lock()
+		im.cleaning = false
+		im.cleanupGen++
+		im.trackMu.Unlock()
+	}()
+
+	// Wait for any already-admitted mount(2) or loop.Attach() to complete
+	// before unmounting, closing LUKS, detaching loops, or removing tmpDirs.
+	im.inFlightOps.Wait()
+
+	var failedLoops []*filesystems.Loop
+	for {
+		im.trackMu.Lock()
+		mounts := slices.Clone(im.trackedMounts)
+		im.trackedMounts = nil
+		im.trackMu.Unlock()
+
+		if len(mounts) > 0 {
+			copts := filesystems.CleanupMountsOptions{
+				Stdout: im.Stdout(),
+				Stderr: im.Stderr(),
+				Mounts: mounts,
+			}
+			filesystems.CleanupMounts(copts)
+		}
+
+		// Close LUKS mappers after unmounting filesystems and before detaching
+		// the underlying loop devices so dm-crypt releases the backing image file.
+		if im.fsenc != nil {
+			im.fsenc.Cleanup()
+		}
+
+		// Retry any loops that failed on an earlier pass alongside newly
+		// tracked loops now that newly drained mounts/LUKS mappers are closed.
+		im.trackMu.Lock()
+		loops := append(failedLoops, im.trackedLoopDevices...)
+		im.trackedLoopDevices = nil
+		im.trackMu.Unlock()
+		failedLoops = nil
+
+		for _, loop := range loops {
+			dev := loop.DevicePath()
+			if dev == "" {
+				continue
+			}
+			if err := loop.Detach(); err != nil {
+				im.PrintWarning(
+					"warning: failed to detach loop device %s (path: %s): %v\n",
+					dev,
+					loop.Path,
+					err,
+				)
+				if loop.DevicePath() != "" {
+					failedLoops = append(failedLoops, loop)
+				}
+			}
+		}
+
+		// Sync buffers for image files after umount/detach.
+		syscall.Sync()
+
+		// Re-drain only if new mounts or loop devices were tracked during this pass.
+		im.trackMu.Lock()
+		moreWork := len(im.trackedMounts) > 0 || len(im.trackedLoopDevices) > 0
+		im.trackMu.Unlock()
+		if !moreWork {
+			break
 		}
 	}
+	if len(failedLoops) > 0 {
+		im.trackMu.Lock()
+		im.trackedLoopDevices = append(failedLoops, im.trackedLoopDevices...)
+		im.trackMu.Unlock()
+	}
 
-	// Sync buffers for image files after umount.
-	syscall.Sync()
-
-	im.trackedTmpDirsMu.Lock()
+	im.trackMu.Lock()
 	tmpDirs := slices.Clone(im.trackedTmpDirs)
 	im.trackedTmpDirs = nil
-	im.trackedTmpDirsMu.Unlock()
+	im.trackMu.Unlock()
 
+	var failedTmpDirs []string
 	for _, tmpDir := range tmpDirs {
-		fmt.Fprintf(im.stdout, "Removing temp dir %s\n", tmpDir)
-		if err := os.RemoveAll(tmpDir); err != nil {
-			fmt.Fprintf(im.stderr, "Warning: failed to remove temp dir %s: %v\n", tmpDir, err)
+		if err := filesystems.CheckActiveMounts(tmpDir); err != nil {
+			im.PrintWarning("Warning: skipping removal of temp dir %s: %v\n", tmpDir, err)
+			failedTmpDirs = append(failedTmpDirs, tmpDir)
+			continue
 		}
+		im.Print("Removing temp dir %s\n", tmpDir)
+		if err := os.RemoveAll(tmpDir); err != nil {
+			im.PrintWarning("Warning: failed to remove temp dir %s: %v\n", tmpDir, err)
+			failedTmpDirs = append(failedTmpDirs, tmpDir)
+		}
+	}
+	if len(failedTmpDirs) > 0 {
+		im.trackMu.Lock()
+		im.trackedTmpDirs = append(failedTmpDirs, im.trackedTmpDirs...)
+		im.trackMu.Unlock()
 	}
 }
 
@@ -227,8 +347,7 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		qa:           qa,
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdout:       os.Stdout,
-		stderr:       os.Stderr,
+		encrypted:    encrypted,
 	}
 	bootloaderName, err := im.Bootloader()
 	if err != nil {
@@ -247,7 +366,6 @@ func NewImager(cfg config.IConfig, ot ostree.IOstree, fsenc filesystems.IFsenc, 
 		im.bootDevice = opts.BootDevice
 		im.rootDevice = opts.RootDevice
 		im.devicePath = opts.DevicePath
-		im.encrypted = encrypted
 		im.mode = opts.Mode
 	}
 	return im, nil

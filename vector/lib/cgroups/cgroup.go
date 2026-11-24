@@ -3,14 +3,30 @@
 package cgroups
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-const defaultCgroupV2Root = "/sys/fs/cgroup"
+const (
+	defaultCgroupV2Root = "/sys/fs/cgroup"
+	cpuPeriod           = 100000
+)
+
+var (
+	poolSeq                atomic.Uint64
+	cgroupRemoveFunc       = os.Remove
+	cgroupRemoveMaxRetries = 10
+	cgroupRemoveRetryDelay = 25 * time.Millisecond
+)
 
 // workerCgroup holds the state for a single per-worker cgroup.
 type workerCgroup struct {
@@ -21,8 +37,10 @@ type workerCgroup struct {
 // WorkerPool manages a set of per-worker cgroups with memory limits.
 // A nil *WorkerPool is safe to call methods on (no-op).
 type WorkerPool struct {
+	mu        sync.RWMutex
 	parentDir string
 	workers   []*workerCgroup
+	staleDirs []string
 	opts      *WorkerPoolOptions
 	useCpuset bool
 }
@@ -57,6 +75,9 @@ func (o *WorkerPoolOptions) cgroupRoot() string {
 // NewWorkerPool creates a cgroup v2 hierarchy for parallel workers,
 // each limited to the specified memory and CPU slice.
 func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
+	if opts == nil {
+		return nil, fmt.Errorf("cgroups: options must not be nil")
+	}
 	if opts.Parallelism < 1 {
 		return nil, fmt.Errorf("cgroups: parallelism must be >= 1, got %d", opts.Parallelism)
 	}
@@ -65,6 +86,9 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 	}
 	if opts.TotalMemBytes == 0 {
 		return nil, fmt.Errorf("cgroups: TotalMemBytes must be set")
+	}
+	if opts.MemPerWorkerBytes == 0 {
+		return nil, fmt.Errorf("cgroups: MemPerWorkerBytes must be > 0")
 	}
 
 	root := opts.cgroupRoot()
@@ -81,7 +105,7 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 	// permission, both of which are fine.
 	enableRootControllers(subCtl)
 
-	parentDir := filepath.Join(root, fmt.Sprintf("vector-seeds-%d", os.Getpid()))
+	parentDir := filepath.Join(root, fmt.Sprintf("vector-seeds-%d-%d", os.Getpid(), poolSeq.Add(1)))
 	if err := os.Mkdir(parentDir, 0755); err != nil {
 		return nil, fmt.Errorf("cgroups: failed to create parent dir %s: %w", parentDir, err)
 	}
@@ -92,9 +116,10 @@ func NewWorkerPool(opts *WorkerPoolOptions) (*WorkerPool, error) {
 		return nil, err
 	}
 
+	optsCopy := *opts
 	pool := &WorkerPool{
 		parentDir: parentDir,
-		opts: opts,
+		opts:      &optsCopy,
 		useCpuset: useCpuset,
 	}
 	for i := range opts.Parallelism {
@@ -159,6 +184,12 @@ func createWorkerCgroup(parentDir string, index int, opts *WorkerPoolOptions, us
 	if err := os.Mkdir(dir, 0755); err != nil {
 		return nil, fmt.Errorf("cgroups: failed to create worker-%d dir: %w", index, err)
 	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(dir)
+		}
+	}()
 
 	if err := writeMemoryLimit(dir, index, opts.MemPerWorkerBytes); err != nil {
 		return nil, err
@@ -176,10 +207,11 @@ func createWorkerCgroup(parentDir string, index int, opts *WorkerPoolOptions, us
 		}
 	}
 
-	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY, 0)
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("cgroups: failed to open worker-%d cgroup fd: %w", index, err)
 	}
+	ok = true
 	return &workerCgroup{dir: dir, fd: fd}, nil
 }
 
@@ -191,18 +223,26 @@ func writeMemoryLimit(dir string, index int, memBytes uint64) error {
 	return nil
 }
 
+func writeCPUQuotaValue(dir string, index, cpuQuota int, suffix string) error {
+	path := filepath.Join(dir, "cpu.max")
+	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
+		return fmt.Errorf("cgroups: failed to write cpu.max%s for worker-%d: %w", suffix, index, err)
+	}
+	return nil
+}
+
 func writeCPUQuota(dir string, index int, opts *WorkerPoolOptions) error {
 	// CPU bandwidth limit via cpu.max: "$MAX $PERIOD" in µs.
 	// e.g. 4 CPUs → "400000 100000" (400ms of CPU time per 100ms).
 	// Supports fractional CPUs (e.g. 12 CPUs / 5 workers = 240000).
-	const cpuPeriod = 100000
-	cpuQuota := opts.NumCPUs * cpuPeriod / opts.Parallelism
-	if cpuQuota < cpuPeriod {
-		cpuQuota = cpuPeriod // At least 1 CPU worth of bandwidth.
-	}
-	path := filepath.Join(dir, "cpu.max")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpu.max for worker-%d: %w", index, err)
+	cpuQuota := max(opts.NumCPUs*cpuPeriod/opts.Parallelism, cpuPeriod)
+	return writeCPUQuotaValue(dir, index, cpuQuota, "")
+}
+
+func writeCpusetRange(dir string, index, cpuStart, cpuEnd int, suffix string) error {
+	path := filepath.Join(dir, "cpuset.cpus")
+	if err := os.WriteFile(path, fmt.Appendf(nil, "%d-%d", cpuStart, cpuEnd), 0644); err != nil {
+		return fmt.Errorf("cgroups: failed to write cpuset.cpus%s for worker-%d: %w", suffix, index, err)
 	}
 	return nil
 }
@@ -229,14 +269,7 @@ func writeCpusetPinning(dir string, index int, opts *WorkerPoolOptions) error {
 
 	// Compute the start position from strict partitioning, then centre
 	// the (potentially wider) range around it.
-	strictStart := 0
-	for i := range index {
-		n := baseCPUs
-		if i < extraCPUs {
-			n++
-		}
-		strictStart += n
-	}
+	strictStart := index*baseCPUs + min(index, extraCPUs)
 	strictMid := strictStart + baseForWorker/2
 
 	cpuStart := strictMid - effective/2
@@ -249,77 +282,64 @@ func writeCpusetPinning(dir string, index int, opts *WorkerPoolOptions) error {
 	}
 	if cpuEnd >= opts.NumCPUs {
 		cpuEnd = opts.NumCPUs - 1
-		cpuStart = cpuEnd - effective + 1
-		if cpuStart < 0 {
-			cpuStart = 0
-		}
+		cpuStart = max(cpuEnd-effective+1, 0)
 	}
 
-	path := filepath.Join(dir, "cpuset.cpus")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d-%d", cpuStart, cpuEnd), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpuset.cpus for worker-%d: %w", index, err)
+	return writeCpusetRange(dir, index, cpuStart, cpuEnd, "")
+}
+
+func (p *WorkerPool) setWorkerResources(workerIndex int, boosted bool) error {
+	if p == nil {
+		return nil
 	}
-	return nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) {
+		return nil
+	}
+	w := p.workers[workerIndex]
+	memBytes := p.opts.MemPerWorkerBytes
+	if boosted {
+		memBytes = p.opts.TotalMemBytes
+	}
+	if err := writeMemoryLimit(w.dir, workerIndex, memBytes); err != nil {
+		return err
+	}
+	if p.useCpuset {
+		if boosted {
+			return writeCpusetRange(w.dir, workerIndex, 0, p.opts.NumCPUs-1, " (boost)")
+		}
+		return writeCpusetPinning(w.dir, workerIndex, p.opts)
+	}
+	if boosted {
+		return writeCPUQuotaValue(w.dir, workerIndex, p.opts.NumCPUs*cpuPeriod, " (boost)")
+	}
+	return writeCPUQuota(w.dir, workerIndex, p.opts)
 }
 
 // BoostWorker reconfigures a worker's cgroup to use all available
 // resources (memory + CPU).  This is intended for situations where only
 // one seed is runnable at a time and should get the full machine.
 func (p *WorkerPool) BoostWorker(workerIndex int) error {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
-		return nil
-	}
-	w := p.workers[workerIndex]
-	if err := writeMemoryLimit(w.dir, workerIndex, p.opts.TotalMemBytes); err != nil {
-		return err
-	}
-	if p.useCpuset {
-		return writeCpusetFull(w.dir, workerIndex, p.opts)
-	}
-	return writeCPUQuotaFull(w.dir, workerIndex, p.opts)
+	return p.setWorkerResources(workerIndex, true)
 }
 
 // UnboostWorker restores a worker's cgroup to its partitioned share
 // of resources.
 func (p *WorkerPool) UnboostWorker(workerIndex int) error {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
-		return nil
-	}
-	w := p.workers[workerIndex]
-	if err := writeMemoryLimit(w.dir, workerIndex, p.opts.MemPerWorkerBytes); err != nil {
-		return err
-	}
-	if p.useCpuset {
-		return writeCpusetPinning(w.dir, workerIndex, p.opts)
-	}
-	return writeCPUQuota(w.dir, workerIndex, p.opts)
-}
-
-// writeCpusetFull sets a worker's cpuset to all available CPUs.
-func writeCpusetFull(dir string, index int, opts *WorkerPoolOptions) error {
-	path := filepath.Join(dir, "cpuset.cpus")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "0-%d", opts.NumCPUs-1), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpuset.cpus (boost) for worker-%d: %w", index, err)
-	}
-	return nil
-}
-
-// writeCPUQuotaFull sets a worker's CPU quota to the full CPU count.
-func writeCPUQuotaFull(dir string, index int, opts *WorkerPoolOptions) error {
-	const cpuPeriod = 100000
-	cpuQuota := opts.NumCPUs * cpuPeriod
-	path := filepath.Join(dir, "cpu.max")
-	if err := os.WriteFile(path, fmt.Appendf(nil, "%d %d", cpuQuota, cpuPeriod), 0644); err != nil {
-		return fmt.Errorf("cgroups: failed to write cpu.max (boost) for worker-%d: %w", index, err)
-	}
-	return nil
+	return p.setWorkerResources(workerIndex, false)
 }
 
 // SysProcAttr returns a SysProcAttr configured to spawn a child process
 // directly into the given worker's cgroup via clone3(CLONE_INTO_CGROUP),
 // or nil if the pool is inactive.
 func (p *WorkerPool) SysProcAttr(workerIndex int) *syscall.SysProcAttr {
-	if p == nil || workerIndex < 0 || workerIndex >= len(p.workers) {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) || p.workers[workerIndex].fd < 0 {
 		return nil
 	}
 	return &syscall.SysProcAttr{
@@ -328,18 +348,96 @@ func (p *WorkerPool) SysProcAttr(workerIndex int) *syscall.SysProcAttr {
 	}
 }
 
+// AcquireSysProcAttr duplicates the worker's cgroup directory file descriptor
+// with FD_CLOEXEC and returns a SysProcAttr together with a release callback
+// that closes the duplicate. Holding an owned duplicate prevents a concurrent
+// WorkerPool.Close() from closing or allowing FD reuse of CgroupFD while a
+// child process is being forked with clone3(CLONE_INTO_CGROUP).
+// Returns (nil, noop) if the pool is nil, closed, or workerIndex is out of range.
+func (p *WorkerPool) AcquireSysProcAttr(workerIndex int) (*syscall.SysProcAttr, func()) {
+	noop := func() {}
+	if p == nil {
+		return nil, noop
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if workerIndex < 0 || workerIndex >= len(p.workers) || p.workers[workerIndex].fd < 0 {
+		return nil, noop
+	}
+	dupFd, err := unix.FcntlInt(uintptr(p.workers[workerIndex].fd), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, noop
+	}
+	release := sync.OnceFunc(func() {
+		_ = syscall.Close(dupFd)
+	})
+	return &syscall.SysProcAttr{
+		UseCgroupFD: true,
+		CgroupFD:    dupFd,
+	}, release
+}
+
+// killCgroupTasks best-effort kills any lingering processes in dir using
+// cgroup v2's edge-triggered cgroup.kill interface (Linux 5.14+), if present.
+func killCgroupTasks(dir string) {
+	killPath := filepath.Join(dir, "cgroup.kill")
+	if _, err := os.Stat(killPath); err == nil {
+		_ = os.WriteFile(killPath, []byte("1"), 0644)
+	}
+}
+
+// removeCgroupDir removes a cgroup directory, retrying briefly only on
+// transient EBUSY while the kernel finishes reaping killed cgroup tasks.
+// When killTasks is true, cgroup.kill is written before each attempt so any
+// task spawned into the cgroup via a duplicated CgroupFD right after an
+// earlier kill is also terminated before the next retry.
+func removeCgroupDir(dir string, killTasks bool) error {
+	var err error
+	for attempt := range cgroupRemoveMaxRetries {
+		if killTasks {
+			killCgroupTasks(dir)
+		}
+		err = cgroupRemoveFunc(dir)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		if !errors.Is(err, syscall.EBUSY) || attempt == cgroupRemoveMaxRetries-1 {
+			return err
+		}
+		time.Sleep(cgroupRemoveRetryDelay)
+	}
+	return err
+}
+
 // Close releases all file descriptors and removes the cgroup hierarchy.
+// Calling Close multiple times is safe and retries removal of any cgroup
+// directories that were still busy (EBUSY) on an earlier call.
 func (p *WorkerPool) Close() {
 	if p == nil {
 		return
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, w := range p.workers {
 		if w.fd >= 0 {
 			syscall.Close(w.fd)
 			w.fd = -1
 		}
-		os.Remove(w.dir)
+		p.staleDirs = append(p.staleDirs, w.dir)
 	}
 	p.workers = nil
-	os.Remove(p.parentDir)
+
+	var remaining []string
+	for _, dir := range p.staleDirs {
+		if err := removeCgroupDir(dir, true); err != nil {
+			remaining = append(remaining, dir)
+		}
+	}
+	p.staleDirs = remaining
+
+	if p.parentDir != "" {
+		if err := removeCgroupDir(p.parentDir, false); err == nil {
+			p.parentDir = ""
+		}
+	}
 }

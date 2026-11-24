@@ -11,6 +11,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/seeder"
+	"matrixos/vector/lib/worker"
 )
 
 // mkdirAll is a package-level variable for os.MkdirAll, overridable
@@ -26,8 +27,6 @@ type ParallelReleaseOptions struct {
 	Parallelism int
 	// ReleaseStage is the release stage (dev or prod).
 	ReleaseStage string
-	// Verbose enables verbose mode.
-	Verbose bool
 
 	// Config is the application configuration.
 	Config config.IConfig
@@ -47,7 +46,8 @@ type ParallelReleaseOptions struct {
 	// ShortRef returns a short display name for a branch ref.
 	ShortRef func(ref string) string
 	// OnReleaseDone is called when a release completes successfully.
-	// It receives the branch name.  Must be safe for concurrent use.
+	// It receives the branch name.  Serialized internally — the callback
+	// does not need its own locking.
 	OnReleaseDone func(branch string) error
 }
 
@@ -55,68 +55,21 @@ type ParallelReleaseOptions struct {
 // semaphore-based worker pool.  Unlike seed parallelism, releases
 // have no inter-dependencies so all seeders are immediately eligible.
 func ParallelRelease(ctx context.Context, opts *ParallelReleaseOptions) error {
-	return runReleaseWorkerPool(ctx, opts)
-}
-
-// runReleaseWorkerPool spawns a fixed pool of worker goroutines that
-// pull seeders from a work channel.
-func runReleaseWorkerPool(ctx context.Context, opts *ParallelReleaseOptions) error {
-	var firstErr error
-	var errMu sync.Mutex
-
-	setError := func(err error) {
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-		}
-		errMu.Unlock()
-	}
-
-	work := make(chan seeder.SeederInfo, len(opts.Seeders))
-	for _, info := range opts.Seeders {
-		work <- info
-	}
-	close(work)
-
-	var wg sync.WaitGroup
-	for i := 0; i < opts.Parallelism; i++ {
-		wg.Go(func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case info, ok := <-work:
-					if !ok {
-						return
-					}
-
-					// Check for earlier failure.
-					errMu.Lock()
-					failed := firstErr != nil
-					errMu.Unlock()
-					if failed {
-						return
-					}
-
-					err := releaseWorker(ctx, opts, info)
-					if err != nil {
-						setError(fmt.Errorf(
-							"seeder %s release failed: %w",
-							info.Name, err,
-						))
-						return
-					}
-				}
+	var onReleaseDoneMu sync.Mutex
+	return worker.RunPool(ctx, worker.PoolOptions[seeder.SeederInfo]{
+		Items:       opts.Seeders,
+		Parallelism: opts.Parallelism,
+		Run: func(poolCtx context.Context, info seeder.SeederInfo) error {
+			if err := releaseWorker(poolCtx, opts, info, &onReleaseDoneMu); err != nil {
+				return fmt.Errorf("seeder %s release failed: %w", info.Name, err)
 			}
-		})
-	}
-
-	wg.Wait()
-	return firstErr
+			return nil
+		},
+	})
 }
 
 // releaseWorker processes a single seeder release.
-func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seeder.SeederInfo) error {
+func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seeder.SeederInfo, onReleaseDoneMu *sync.Mutex) error {
 	seederName := info.Name
 	branchShortname := seeder.SeederNameWithoutOrderPrefix(
 		seederName,
@@ -126,6 +79,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 	workerStdout := opts.NewStdoutWriter(
 		fmt.Sprintf("releases:%s", seederName),
 	)
+	defer worker.FlushWriters(workerStdout)
 	workerPrint := func(format string, args ...any) {
 		fmt.Fprintf(workerStdout, format, args...)
 	}
@@ -187,12 +141,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 		fmt.Sprintf("release:%s", shortRef),
 	)
 	flushWriters := func() {
-		if f, ok := relStdout.(interface{ Flush() }); ok {
-			f.Flush()
-		}
-		if f, ok := relStderr.(interface{ Flush() }); ok {
-			f.Flush()
-		}
+		worker.FlushWriters(relStdout, relStderr, workerStdout)
 	}
 	defer flushWriters()
 
@@ -210,8 +159,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 
 	// Create the releaser instance.
 	relOpts := &NewReleaserOptions{
-		Ref:     branch,
-		Verbose: opts.Verbose,
+		Ref: branch,
 	}
 	rel, err := NewReleaser(opts.Config, workerOt, relOpts)
 	if err != nil {
@@ -246,7 +194,7 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 
 		// Compute image directory.
 		imageDir := ChrootDirForImageDir(chrootDir)
-		if err := createDirIfMissing(imageDir); err != nil {
+		if err := mkdirAll(imageDir, 0755); err != nil {
 			return fmt.Errorf(
 				"failed to create image dir %s: %w",
 				imageDir, err,
@@ -273,9 +221,12 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 		)
 
 		if opts.OnReleaseDone != nil {
-			if err := opts.OnReleaseDone(branch); err != nil {
+			onReleaseDoneMu.Lock()
+			onDoneErr := opts.OnReleaseDone(branch)
+			onReleaseDoneMu.Unlock()
+			if onDoneErr != nil {
 				return fmt.Errorf(
-					"failed to record built release: %w", err,
+					"failed to record built release: %w", onDoneErr,
 				)
 			}
 		}
@@ -289,10 +240,4 @@ func releaseWorker(ctx context.Context, opts *ParallelReleaseOptions, info seede
 // directory, mirroring the bash chroot_dir_for_image_dir function.
 func ChrootDirForImageDir(chrootDir string) string {
 	return chrootDir + ".ostree_rootfs"
-}
-
-// createDirIfMissing creates a directory and all parents if it does
-// not already exist.
-func createDirIfMissing(dir string) error {
-	return mkdirAll(dir, 0755)
 }

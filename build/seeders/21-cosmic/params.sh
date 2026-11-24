@@ -50,12 +50,12 @@ fi
 
 # SEEDER_CHROOTS_DIR=/path/to/parent/seeder/chroots/dir
 # Path to the preferred chroot directory for this seeder.
-SEEDER_CHROOTS_DIR="${MATRIXOS_DEV_DIR}/out/seeder/chroots"
+SEEDER_CHROOTS_DIR="${MATRIXOS_DEV_DIR%/}/out/seeder/chroots"
 
 # PREFERRED_SEEDER_CHROOT_DIR
 # Path to the currently preferred chroot directory path for this seeder.
 # This way you can implement a dated seeder chroot path via SEEDER_CHROOT_NAME.
-PREFERRED_SEEDER_CHROOT_DIR="${SEEDER_CHROOTS_DIR}/${SEEDER_CHROOT_NAME}"
+PREFERRED_SEEDER_CHROOT_DIR="${SEEDER_CHROOTS_DIR%/}/${SEEDER_CHROOT_NAME}"
 
 # This function can be used by other seeders to get the chroot path of the latest
 # COSMIC build.

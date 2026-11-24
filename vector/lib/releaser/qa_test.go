@@ -22,18 +22,19 @@ func newTestReleaserWithQA(t *testing.T, cfg *config.MockConfig) *Releaser {
 	if err != nil {
 		t.Fatalf("validation.New: %v", err)
 	}
-	return &Releaser{
-		ReleaserConfig: &ReleaserConfig{cfg:    cfg},
-		ostree: &ostree.MockOstree{},
-		chrootRunner: runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
-		qa:     qa,
-		stdout: &bytes.Buffer{},
-		stderr: &bytes.Buffer{},
+	r := &Releaser{
+		ReleaserConfig: &ReleaserConfig{cfg: cfg},
+		ostree:         &ostree.MockOstree{},
+		chrootRunner:   runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
+		qa:             qa,
 	}
+	r.SetStdout(&bytes.Buffer{})
+	r.SetStderr(&bytes.Buffer{})
+	return r
 }
 
 // stdoutString returns whatever was written to the test Releaser's stdout.
-func stdoutString(r *Releaser) string { return r.stdout.(*bytes.Buffer).String() }
+func stdoutString(r *Releaser) string { return r.Stdout().(*bytes.Buffer).String() }
 
 // ---------------------------------------------------------------------------
 // CheckMatrixOS
@@ -43,13 +44,13 @@ func TestCheckMatrixOS_ConfigError(t *testing.T) {
 	wantErr := errors.New("cfg broken")
 	qa, _ := validation.New(&config.ErrConfig{Err: wantErr})
 	r := &Releaser{
-		ReleaserConfig: &ReleaserConfig{cfg:    &config.ErrConfig{Err: wantErr}},
-		ostree: &ostree.MockOstree{},
-		chrootRunner: runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
-		qa:     qa,
-		stdout: &bytes.Buffer{},
-		stderr: &bytes.Buffer{},
+		ReleaserConfig: &ReleaserConfig{cfg: &config.ErrConfig{Err: wantErr}},
+		ostree:         &ostree.MockOstree{},
+		chrootRunner:   runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
+		qa:             qa,
 	}
+	r.SetStdout(&bytes.Buffer{})
+	r.SetStderr(&bytes.Buffer{})
 
 	err := r.CheckMatrixOS()
 	if err == nil {
@@ -150,14 +151,14 @@ func TestPreCleanQAChecks_SecureBootCertPathConfigError(t *testing.T) {
 	cfg := &config.ErrConfig{Err: wantErr}
 	qa, _ := validation.New(cfg)
 	r := &Releaser{
-		ReleaserConfig: &ReleaserConfig{cfg:      cfg},
-		ostree:   &ostree.MockOstree{},
-		chrootRunner: runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
-		qa:       qa,
-		stdout:   &bytes.Buffer{},
-		stderr:   &bytes.Buffer{},
-		imageDir: t.TempDir(),
+		ReleaserConfig: &ReleaserConfig{cfg: cfg},
+		ostree:         &ostree.MockOstree{},
+		chrootRunner:   runner.ChrootRunFunc(func(c *runner.ChrootCmd) error { return nil }),
+		qa:             qa,
+		imageDir:       t.TempDir(),
 	}
+	r.SetStdout(&bytes.Buffer{})
+	r.SetStderr(&bytes.Buffer{})
 
 	err := r.PreCleanQAChecks()
 	if !errors.Is(err, wantErr) {

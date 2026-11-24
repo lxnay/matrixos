@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -147,8 +148,8 @@ func (c *AllCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	if c.buildID == "" {
@@ -211,30 +212,45 @@ func (c *AllCommand) sendMail(buildErr error) {
 func (c *AllCommand) run() error {
 	c.SetupPrinters("build:all")
 	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
 
 	// Acquire build lock.
-	unlock, err := c.acquireBuildLock()
+	rawUnlock, err := c.acquireBuildLock()
 	if err != nil {
 		return err
 	}
+	unlock := sync.OnceFunc(rawUnlock)
 	defer unlock()
+	c.PushCleanup(unlock)
 
 	// Set up log file.
 	logF, err := c.setupLogFile()
 	if err != nil {
 		return err
 	}
-	defer logF.Close()
 
-	// Tee all styled output (this command + sub-commands) to the log.
+	// Tee all styled output (this command + sub-commands) to the log before
+	// registering closeLog so a signal cannot close logF and then leave a
+	// closed file attached as the global log writer.
 	SetGlobalLogWriter(logF)
-	defer ClearGlobalLogWriter()
 	c.SetLogWriter(logF)
+
+	// Flush buffered output, detach printers/global log, and close logF once
+	// before sendMail attaches c.logFile (and on signal/panic/early return).
+	closeLog := sync.OnceFunc(func() {
+		c.FlushPrinters()
+		c.SetLogWriter(nil)
+		ClearGlobalLogWriter()
+		_ = logF.Close()
+	})
+	defer closeLog()
+	c.PushCleanup(closeLog)
 
 	c.Printf("Logfile at: %s\n", c.logFile)
 
-	// Run the pipeline; send mail on exit.
+	// Run the pipeline, flush & close the log, then send mail.
 	runErr := c.runPipeline()
+	closeLog()
 
 	c.sendMail(runErr)
 	return runErr
@@ -440,19 +456,6 @@ func (c *AllCommand) seederFilterArgs() []string {
 		args = append(args, "--only-seeders="+c.onlySeedersRaw)
 	}
 	return args
-}
-
-// configItem returns the config value for key, returning an
-// error if the lookup fails or the value is empty.
-func (c *AllCommand) configItem(key string) (string, error) {
-	v, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("failed to get %s: %w", key, err)
-	}
-	if v == "" {
-		return "", fmt.Errorf("%s is not set", key)
-	}
-	return v, nil
 }
 
 // acquireBuildLock creates the locks directory and acquires an

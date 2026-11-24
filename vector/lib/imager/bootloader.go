@@ -30,7 +30,7 @@ type Bootloader interface {
 
 	// ConfigureMemtest sets up the memtest86+ EFI binary in the image
 	// if available on the host.
-	ConfigureMemtest(memtestBin string) error
+	ConfigureMemtest() error
 
 	// ConfigureVmtest sets up VM test boot configuration.
 	ConfigureVmtest() error
@@ -56,9 +56,148 @@ func (im *Imager) SetupVmtestConfig() error {
 	return im.bootloader.ConfigureVmtest()
 }
 
-// GetBootloader returns the configured Bootloader implementation.
-func (im *Imager) GetBootloader() Bootloader {
-	return im.bootloader
+type bootloaderConfigInfo struct {
+	efibootDir     string
+	efiDeviceUUID  string
+	bootDeviceUUID string
+}
+
+// prepareBootloaderConfig validates the preconditions shared by bootloader
+// Configure() implementations, resolves partition UUIDs and the ostree boot
+// commit, and ensures the EFI boot directory exists.
+func (im *Imager) prepareBootloaderConfig() (*bootloaderConfigInfo, error) {
+	if im.rootfs == "" {
+		return nil, errors.New("rootfs not set, call SetRootfs first")
+	}
+	if im.efiDevice == "" {
+		return nil, errors.New("missing efiDevice, not set in NewImagerOptions")
+	}
+	if im.bootDevice == "" {
+		return nil, errors.New("missing bootDevice, not set in NewImagerOptions")
+	}
+	if im.efifsMount == "" {
+		return nil, errors.New("missing efifsMount, call MountEfifs first")
+	}
+	if im.bootfsMount == "" {
+		return nil, errors.New("missing bootfsMount, call MountBootfs first")
+	}
+	if im.rootfsMount == "" {
+		return nil, errors.New("missing rootfsMount, call MountRootfs first")
+	}
+
+	efibootDir, err := im.EfiBootDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI boot directory: %w", err)
+	}
+
+	efiDeviceUUID, err := filesystems.DeviceUUID(im.efiDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get UUID for %s: %w", im.efiDevice, err)
+	}
+	bootDeviceUUID, err := filesystems.DeviceUUID(im.bootDevice)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get UUID for %s: %w", im.bootDevice, err)
+	}
+
+	// Verify kernel exists.
+	if _, err := im.GetKernelPath(); err != nil {
+		return nil, fmt.Errorf("failed to determine kernel version: %w", err)
+	}
+
+	// Get the boot commit.
+	bootCommit, err := im.ostree.BootCommit(im.rootfsMount)
+	if err != nil || bootCommit == "" {
+		return nil, fmt.Errorf("cannot determine ostree boot commit: %w", err)
+	}
+	im.Print("Found boot commit: %s\n", bootCommit)
+
+	if err := os.MkdirAll(efibootDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create efibootDir %s: %w", efibootDir, err)
+	}
+
+	return &bootloaderConfigInfo{
+		efibootDir:     efibootDir,
+		efiDeviceUUID:  efiDeviceUUID,
+		bootDeviceUUID: bootDeviceUUID,
+	}, nil
+}
+
+// writeBootloaderEnvFile creates an environment.d drop-in file inside rootfs.
+func (im *Imager) writeBootloaderEnvFile(filename, content string) error {
+	envDir := filepath.Join(im.rootfs, "etc", "environment.d")
+	if err := os.MkdirAll(envDir, 0755); err != nil {
+		return fmt.Errorf("failed to create environment.d dir: %w", err)
+	}
+	envPath := filepath.Join(envDir, filename)
+	if err := os.WriteFile(envPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", filename, err)
+	}
+	return nil
+}
+
+type bootloaderInstallInfo struct {
+	efibootDir string
+	efiRoot    string
+	bootRoot   string
+	efiExe     string
+	chrootEnv  []string
+}
+
+// prepareBootloaderInstall validates the preconditions shared by bootloader
+// Install() implementations and builds the chroot mount environment.
+func (im *Imager) prepareBootloaderInstall() (*bootloaderInstallInfo, error) {
+	if im.rootfs == "" {
+		return nil, errors.New("rootfs not set, call SetRootfs first")
+	}
+	if im.efifsMount == "" {
+		return nil, errors.New("missing efifsMount, call MountEfifs first")
+	}
+	if im.bootfsMount == "" {
+		return nil, errors.New("missing bootfsMount, call MountBootfs first")
+	}
+	if im.devicePath == "" {
+		return nil, errors.New("missing devicePath, not set in NewImagerOptions")
+	}
+
+	efibootDir, err := im.EfiBootDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI boot directory: %w", err)
+	}
+	efiRoot, err := im.EfiRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI root: %w", err)
+	}
+	bootRoot, err := im.BootRoot()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine boot root: %w", err)
+	}
+	efiExe, err := im.EfiExecutable()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine EFI executable: %w", err)
+	}
+
+	return &bootloaderInstallInfo{
+		efibootDir: efibootDir,
+		efiRoot:    efiRoot,
+		bootRoot:   bootRoot,
+		efiExe:     efiExe,
+		chrootEnv: []string{
+			"IMAGER_EFI_MOUNT=" + im.efifsMount,
+			"IMAGER_BOOT_MOUNT=" + im.bootfsMount,
+			"IMAGER_EFI_ROOT=" + efiRoot,
+			"IMAGER_BOOT_ROOT=" + bootRoot,
+		},
+	}, nil
+}
+
+// verifyEfiExecutable confirms that the bootloader installer created the
+// expected EFI fallback executable inside efibootDir.
+func verifyEfiExecutable(efibootDir, efiExe, toolName string) (string, error) {
+	bootx64efi := filepath.Join(efibootDir, efiExe)
+	if !filesystems.PathExists(bootx64efi) {
+		return "", fmt.Errorf("%s does not exist after %s", bootx64efi, toolName)
+	}
+	return bootx64efi, nil
 }
 
 func (im *Imager) InstallSecurebootCerts() error {
@@ -86,57 +225,56 @@ func (im *Imager) InstallSecurebootCerts() error {
 		return err
 	}
 
-	// SecureBoot certificate (db).
-	sbCert := filepath.Join(im.rootfs, "etc", "portage", "secureboot.pem")
-	if filesystems.FileExists(sbCert) {
-		im.Print("Copying SecureBoot cert to EFI partition ...\n")
-		if err := filesystems.CopyFile(sbCert, filepath.Join(im.efifsMount, certFileName)); err != nil {
-			return fmt.Errorf("failed to copy SecureBoot cert: %w", err)
-		}
-
-		im.Print("Generating SecureBoot MOK ...\n")
-		cmd := &runner.Cmd{
-			Name: "openssl",
-			Args: []string{
-				"x509",
-				"-in", sbCert,
-				"-outform", "DER",
-				"-out", filepath.Join(im.efifsMount, certDerFileName),
-			},
-			Stdout: im.stdout,
-			Stderr: im.stderr,
-		}
-		if err := im.runner(cmd); err != nil {
-			return fmt.Errorf("openssl DER conversion failed: %w", err)
-		}
-	} else {
-		im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", sbCert)
+	certs := []struct {
+		srcName  string
+		dstName  string
+		derName  string
+		copyMsg  string
+		derMsg   string
+		errLabel string
+	}{
+		{
+			srcName:  "secureboot.pem",
+			dstName:  certFileName,
+			derName:  certDerFileName,
+			copyMsg:  "Copying SecureBoot cert to EFI partition ...\n",
+			derMsg:   "Generating SecureBoot MOK ...\n",
+			errLabel: "SecureBoot cert",
+		},
+		{
+			srcName:  "secureboot-kek.pem",
+			dstName:  kekFileName,
+			derName:  kekDerFileName,
+			copyMsg:  "Copying SecureBoot KEK cert to EFI partition ...\n",
+			derMsg:   "Generating SecureBoot KEK DER for convenience ...\n",
+			errLabel: "SecureBoot KEK cert",
+		},
 	}
 
-	// SecureBoot KEK certificate.
-	sbKek := filepath.Join(im.rootfs, "etc", "portage", "secureboot-kek.pem")
-	if filesystems.FileExists(sbKek) {
-		im.Print("Copying SecureBoot KEK cert to EFI partition ...\n")
-		if err := filesystems.CopyFile(sbKek, filepath.Join(im.efifsMount, kekFileName)); err != nil {
-			return fmt.Errorf("failed to copy SecureBoot KEK cert: %w", err)
+	for _, c := range certs {
+		src := filepath.Join(im.rootfs, "etc", "portage", c.srcName)
+		if !filesystems.FileExists(src) {
+			im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", src)
+			continue
 		}
-
-		im.Print("Generating SecureBoot KEK DER for convenience ...\n")
+		im.Print("%s", c.copyMsg)
+		if err := filesystems.CopyFile(src, filepath.Join(im.efifsMount, c.dstName)); err != nil {
+			return fmt.Errorf("failed to copy %s: %w", c.errLabel, err)
+		}
+		im.Print("%s", c.derMsg)
 		if err := im.runner(&runner.Cmd{
 			Name: "openssl",
 			Args: []string{
 				"x509",
-				"-in", sbKek,
+				"-in", src,
 				"-outform", "DER",
-				"-out", filepath.Join(im.efifsMount, kekDerFileName),
+				"-out", filepath.Join(im.efifsMount, c.derName),
 			},
-			Stdout: im.stdout,
-			Stderr: im.stderr,
+			Stdout: im.Stdout(),
+			Stderr: im.Stderr(),
 		}); err != nil {
-			return fmt.Errorf("openssl KEK DER conversion failed: %w", err)
+			return fmt.Errorf("openssl DER conversion failed for %s: %w", c.errLabel, err)
 		}
-	} else {
-		im.PrintWarning("NO SECUREBOOT CERT AT: %s -- ignoring.\n", sbKek)
 	}
 
 	return nil
@@ -160,7 +298,7 @@ func (im *Imager) InstallMemtest() error {
 		return fmt.Errorf("failed to copy memtest86+ EFI binary: %w", err)
 	}
 
-	return im.bootloader.ConfigureMemtest(memtestBin)
+	return im.bootloader.ConfigureMemtest()
 }
 
 func (im *Imager) GenerateKernelBootArgs() ([]string, error) {
@@ -223,6 +361,9 @@ func (im *Imager) GenerateKernelBootArgs() ([]string, error) {
 				continue
 			}
 			bootArgs = append(bootArgs, line)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("failed to scan cmdline file: %w", err)
 		}
 	} else {
 		im.PrintWarning("WARNING: no additional kernel cmdline params available, %s does not exist.\n", cmdlineFile)

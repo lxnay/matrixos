@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/filesystems"
+	"matrixos/vector/lib/ostree"
 	"matrixos/vector/lib/runner"
 )
 

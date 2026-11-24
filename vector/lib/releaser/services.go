@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/runner"
 )
 
 // validServiceName matches systemd unit names and targets.
@@ -39,16 +39,7 @@ func (r *Releaser) cleanAndStripRef() (string, error) {
 	if r.ref == "" {
 		return "", errors.New("missing ref, set Ref in Releaser")
 	}
-	stripped, err := r.ostree.RemoveFullFromBranch()
-	if err != nil {
-		return "", err
-	}
-
-	stripped = ostree.CleanRemoteFromRef(stripped)
-	if stripped == "" {
-		return "", errors.New("invalid ref parameter after cleaning")
-	}
-	return stripped, nil
+	return ostree.CleanAndStripRef(r.ostree)
 }
 
 // serviceAction represents a parsed line from a services configuration file.
@@ -104,18 +95,13 @@ func (r *Releaser) SetupServices() error {
 
 	servicesFile := filepath.Join(hooksDir, ref+".conf")
 	if !filesystems.FileExists(servicesFile) {
-		// Try looking up by joining with the release/services structure.
-		servicesDir, err := r.cfg.GetItem("Releaser.HooksDir")
-		if err != nil {
-			return err
-		}
 		r.PrintWarning(
 			"Services setup file %s does not exist. Trying to look harder ...\n",
 			servicesFile,
 		)
 
 		// Fallback: check in the services dir relative to the same parent.
-		parent := filepath.Dir(servicesDir)
+		parent := filepath.Dir(hooksDir)
 		altPath := filepath.Join(parent, "services", ref+".conf")
 		if !filesystems.FileExists(altPath) {
 			r.PrintError(
@@ -326,13 +312,12 @@ func (r *Releaser) ReleaseHook() error {
 	}
 
 	r.Print("Running release hook %s ...\n", hookPath)
-	cmd := exec.Command(hookPath)
 
 	env := os.Environ()
 	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
 	env = config.FilterEnvKey(env, "REF")
 	env = config.FilterEnvKey(env, "DEFAULT_PRIVATE_GIT_REPO_PATH")
-	cmd.Env = append(
+	env = append(
 		env,
 		"REF="+ref,
 		"CHROOT_DIR="+r.imageDir,
@@ -341,7 +326,14 @@ func (r *Releaser) ReleaseHook() error {
 		"RELEASER_DEFAULT_USERNAME="+defaultUsername,
 		"RELEASER_OSNAME="+OSName,
 	)
-	cmd.Stdout = r.stdout
-	cmd.Stderr = r.stderr
-	return cmd.Run()
+	run := r.runner
+	if run == nil {
+		run = runner.Run
+	}
+	return run(&runner.Cmd{
+		Name:   hookPath,
+		Env:    env,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
+	})
 }

@@ -211,33 +211,6 @@ func TestBootedStatus(t *testing.T) {
 	if ref != "origin:branch" {
 		t.Errorf("BootedRef = %q, want origin:branch", ref)
 	}
-
-	hash, err := o.BootedHash()
-	if err != nil {
-		t.Fatalf("BootedHash failed: %v", err)
-	}
-	if hash != "hash123" {
-		t.Errorf("BootedHash = %q, want hash123", hash)
-	}
-}
-
-func TestDeployedRootfsWithSysroot(t *testing.T) {
-	origRunCommand := runCommand
-	defer func() { runCommand = origRunCommand }()
-	runCommand = func(cmd *runner.Cmd) error {
-		stdout := cmd.Stdout
-		fmt.Fprintln(stdout, "hash123")
-		return nil
-	}
-
-	path, err := DeployedRootfsWithSysroot("/sysroot", "/repo", "osname", "ref", false)
-	if err != nil {
-		t.Fatalf("DeployedRootfsWithSysroot failed: %v", err)
-	}
-	expected := "/sysroot/ostree/deploy/osname/deploy/hash123.0"
-	if path != expected {
-		t.Errorf("DeployedRootfsWithSysroot = %q, want %q", path, expected)
-	}
 }
 
 func TestBootCommit(t *testing.T) {

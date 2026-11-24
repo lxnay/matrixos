@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 	"time"
 
@@ -74,7 +73,7 @@ func (c *ReleasesCommand) Init(args []string) error {
 	c.qa = qa
 
 	sd, err := seeder.NewSeeder(
-		c.cfg, &seeder.NewSeederOptions{Verbose: c.verbose},
+		c.cfg, &seeder.NewSeederOptions{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to initialize seeder: %w", err)
@@ -123,9 +122,8 @@ func (c *ReleasesCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	// Must be root.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	c.skipSeeders = SplitCSV(c.skipSeedersRaw)
@@ -145,15 +143,16 @@ func (c *ReleasesCommand) updateStdWriters(name string) {
 	c.sd.SetStdout(c.StdoutWriter())
 	c.sd.SetStderr(c.StderrWriter())
 	c.det.SetStderr(c.StderrWriter())
+	if c.ot != nil {
+		c.ot.SetStdout(c.StdoutWriter())
+		c.ot.SetStderr(c.StderrWriter())
+	}
 }
 
 // runReleases implements the multi-seeder release workflow.
 func (c *ReleasesCommand) runReleases() error {
-	writerSetup := func() {
-		c.updateStdWriters("main")
-		c.PushCleanup(c.FlushPrinters)
-	}
-	writerSetup()
+	c.updateStdWriters("main")
+	c.PushCleanup(c.FlushPrinters)
 
 	c.PushCleanup(c.killGpg)
 
@@ -208,9 +207,10 @@ func (c *ReleasesCommand) runReleases() error {
 		c.sd.Print("  %s\n", s.Name)
 	}
 
-	// Context cancelled on SIGINT/SIGTERM via PushCleanup.
+	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
+	// stop dequeuing new work before resource cleanups execute.
 	ctx, cancel := context.WithCancel(context.Background())
-	c.PushCleanup(cancel)
+	c.PushPreCleanup(cancel)
 	defer cancel()
 
 	releaseStart := time.Now()
@@ -231,7 +231,6 @@ func (c *ReleasesCommand) runReleases() error {
 		Seeders:      seeders,
 		Parallelism:  parallelism,
 		ReleaseStage: c.releaseStage,
-		Verbose:      c.verbose,
 		Config:       c.cfg,
 		Ostree:       c.ot,
 		NewStdoutWriter: func(label string) io.Writer {
@@ -247,11 +246,9 @@ func (c *ReleasesCommand) runReleases() error {
 	}
 
 	if err := releaser.ParallelRelease(ctx, prOpts); err != nil {
-		writerSetup()
 		return err
 	}
 
-	writerSetup()
 	c.sd.Print("SUCCESS: All builds released.\n")
 	for _, b := range c.BuiltReleases {
 		c.sd.Print("  %s\n", b)
@@ -286,12 +283,6 @@ func (c *ReleasesCommand) findChrootDir(info seeder.SeederInfo) (string, error) 
 	return chrootDir, nil
 }
 
-// chrootDirForImageDir computes the image directory path from a chroot
-// directory.  Delegates to the releaser library.
-func chrootDirForImageDir(chrootDir string) string {
-	return releaser.ChrootDirForImageDir(chrootDir)
-}
-
 // skipFilter returns a SeederFilterFunc that skips seeders present in
 // --skip-seeders.  Returns nil when no skip list is configured.
 func (c *ReleasesCommand) skipFilter() seeder.SeederFilterFunc {
@@ -315,15 +306,7 @@ func (c *ReleasesCommand) initBuiltReleasesFile() error {
 		"Marking freshly built releases into %s ...\n",
 		c.builtReleasesFile,
 	)
-	if err := os.WriteFile(
-		c.builtReleasesFile, []byte{}, 0644,
-	); err != nil {
-		return fmt.Errorf(
-			"failed to init %s: %w",
-			c.builtReleasesFile, err,
-		)
-	}
-	return nil
+	return truncateOutputFile(c.builtReleasesFile)
 }
 
 // recordBuiltRelease appends the given branch to the built-releases
@@ -334,18 +317,5 @@ func (c *ReleasesCommand) recordBuiltRelease(branch string) error {
 	defer c.mu.Unlock()
 
 	c.BuiltReleases = append(c.BuiltReleases, branch)
-
-	if c.builtReleasesFile == "" {
-		return nil
-	}
-	f, err := os.OpenFile(
-		c.builtReleasesFile,
-		os.O_APPEND|os.O_WRONLY, 0644,
-	)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, branch)
-	return err
+	return appendLineToFile(c.builtReleasesFile, branch)
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -48,61 +49,177 @@ type ICommand interface {
 //	        ...
 //	    })
 //	}
+var (
+	// signalExit is the exit function called by SignalGuard after running
+	// cleanups on SIGINT/SIGTERM. Overridden in tests.
+	signalExit = os.Exit
+
+	sigCoordMu            sync.Mutex
+	activeGuards          []*SignalGuard
+	globalSigCh           chan os.Signal
+	globalSigDone         chan struct{}
+	globalSigListenerDone chan struct{}
+	globalSigHandling     bool
+)
+
 type SignalGuard struct {
-	mu       sync.Mutex
-	cleanups []func()
-	armed    bool
-	sigCh    chan os.Signal
-	done     chan struct{}
+	mu          sync.Mutex
+	cleanupMu   sync.Mutex
+	preCleanups []func()
+	cleanups    []func()
+	armed       bool
 }
 
-// Arm starts listening for SIGINT and SIGTERM.  On receipt the full
-// cleanup stack is executed (LIFO) and the process exits with code 1.
+// Arm registers this guard with the process-wide SIGINT/SIGTERM listener.
+// On receipt all armed guards' cleanup stacks are executed in LIFO order
+// before the process exits with code 1.
 // Arm is idempotent — calling it on an already-armed guard is a no-op.
 func (sg *SignalGuard) Arm() {
-	sg.mu.Lock()
-	defer sg.mu.Unlock()
+	sigCoordMu.Lock()
+	defer sigCoordMu.Unlock()
 
 	if sg.armed {
 		return
 	}
 	sg.armed = true
-	sg.sigCh = make(chan os.Signal, 1)
-	sg.done = make(chan struct{})
+	activeGuards = append(activeGuards, sg)
 
-	signal.Notify(sg.sigCh, syscall.SIGINT, syscall.SIGTERM)
+	if globalSigCh == nil && !globalSigHandling {
+		startGlobalSignalListenerLocked()
+	}
+}
+
+// startGlobalSignalListenerLocked starts the single process-wide signal
+// listener goroutine. Caller must hold sigCoordMu with globalSigCh == nil and
+// !globalSigHandling.
+func startGlobalSignalListenerLocked() {
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	listenerDone := make(chan struct{})
+	globalSigCh = sigCh
+	globalSigDone = done
+	globalSigListenerDone = listenerDone
+
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
+		defer func() {
+			signal.Stop(sigCh)
+			sigCoordMu.Lock()
+			if globalSigDone == done {
+				globalSigCh = nil
+				globalSigDone = nil
+				globalSigListenerDone = nil
+				globalSigHandling = false
+			}
+			sigCoordMu.Unlock()
+			close(listenerDone)
+		}()
+
 		select {
-		case sig := <-sg.sigCh:
-			fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
-			sg.runCleanups()
-			os.Exit(1)
-		case <-sg.done:
+		case <-done:
 			return
+		case sig := <-sigCh:
+			sigCoordMu.Lock()
+			if globalSigDone != done {
+				sigCoordMu.Unlock()
+				return
+			}
+			// Keep sigCh registered and globalSigHandling=true while cleanups
+			// run so a second SIGINT/SIGTERM is absorbed instead of reverting
+			// to SIG_DFL and concurrent Arm() cannot spawn a competing listener.
+			globalSigHandling = true
+			guards := slices.Clone(activeGuards)
+			sigCoordMu.Unlock()
+
+			func() {
+				defer func() {
+					signal.Stop(sigCh)
+					sigCoordMu.Lock()
+					globalSigHandling = false
+					if globalSigDone == done {
+						globalSigCh = nil
+						globalSigDone = nil
+						globalSigListenerDone = nil
+					}
+					sigCoordMu.Unlock()
+				}()
+				fmt.Fprintf(os.Stderr, "\nReceived signal %s, running cleanup ...\n", sig)
+				for i := len(guards) - 1; i >= 0; i-- {
+					guards[i].runCleanups()
+				}
+			}()
+
+			signalExit(1)
+
+			// Only reached when signalExit is mocked in tests and returns:
+			// if any guards remain armed, ensure a live listener is active.
+			sigCoordMu.Lock()
+			if len(activeGuards) > 0 && globalSigCh == nil && !globalSigHandling {
+				startGlobalSignalListenerLocked()
+			}
+			sigCoordMu.Unlock()
 		}
 	}()
 }
 
-// Disarm stops the signal listener and clears the cleanup stack.
-// It is safe to call multiple times.
+// Disarm unregisters this guard from the signal listener and clears its
+// cleanup stack.  It is safe to call multiple times.
 func (sg *SignalGuard) Disarm() {
-	sg.mu.Lock()
-	defer sg.mu.Unlock()
+	sigCoordMu.Lock()
+	wasArmed := sg.armed
+	var waitListener <-chan struct{}
+	if wasArmed {
+		sg.armed = false
+		for i, g := range activeGuards {
+			if g == sg {
+				activeGuards = append(activeGuards[:i], activeGuards[i+1:]...)
+				break
+			}
+		}
+		if len(activeGuards) == 0 && globalSigCh != nil && !globalSigHandling {
+			signal.Stop(globalSigCh)
+			close(globalSigDone)
+			waitListener = globalSigListenerDone
+			globalSigCh = nil
+			globalSigDone = nil
+			globalSigListenerDone = nil
+		}
+	}
+	sigCoordMu.Unlock()
 
-	if !sg.armed {
+	if waitListener != nil {
+		<-waitListener
+	}
+
+	if wasArmed {
+		sg.mu.Lock()
+		sg.preCleanups = nil
+		sg.cleanups = nil
+		sg.mu.Unlock()
+	}
+}
+
+// PushPreCleanup adds a high-priority cleanup function (such as a context
+// cancellation func) that always runs in LIFO order BEFORE regular cleanups
+// registered via PushCleanup. This ensures parallel workers stop dequeuing
+// new work before resource teardowns run.
+func (sg *SignalGuard) PushPreCleanup(fn func()) {
+	if fn == nil {
 		return
 	}
-	sg.armed = false
-	signal.Stop(sg.sigCh)
-	close(sg.done)
-	sg.cleanups = nil
+	sg.mu.Lock()
+	defer sg.mu.Unlock()
+	sg.preCleanups = append(sg.preCleanups, fn)
 }
 
 // PushCleanup adds a cleanup function to the top of the LIFO stack.
 // Cleanups are executed in reverse order of registration (last-in, first-out)
 // exactly like nested bash trap handlers.
 func (sg *SignalGuard) PushCleanup(fn func()) {
+	if fn == nil {
+		return
+	}
 	sg.mu.Lock()
 	defer sg.mu.Unlock()
 	sg.cleanups = append(sg.cleanups, fn)
@@ -117,24 +234,45 @@ func (sg *SignalGuard) RunCleanups() {
 	sg.runCleanups()
 }
 
-// runCleanups is the internal, lock-free implementation.
+// runCleanups drains and executes all registered cleanups in LIFO order,
+// executing preCleanups before regular cleanups on each pass.
+// cleanupMu serializes concurrent callers (e.g. a signal handler arriving
+// while deferred cleanup is already running) so callers wait for in-flight
+// cleanups to finish rather than exiting early.
 func (sg *SignalGuard) runCleanups() {
-	sg.mu.Lock()
-	fns := make([]func(), len(sg.cleanups))
-	copy(fns, sg.cleanups)
-	sg.cleanups = nil
-	sg.mu.Unlock()
+	sg.cleanupMu.Lock()
+	defer sg.cleanupMu.Unlock()
 
-	// Execute in LIFO order.
-	for i := len(fns) - 1; i >= 0; i-- {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					fmt.Fprintf(os.Stderr, "panic during cleanup: %v\n", r)
-				}
+	runBatch := func(fns []func()) {
+		for i := len(fns) - 1; i >= 0; i-- {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "panic during cleanup: %v\n", r)
+					}
+				}()
+				fns[i]()
 			}()
-			fns[i]()
-		}()
+		}
+	}
+
+	for {
+		sg.mu.Lock()
+		if len(sg.preCleanups) > 0 {
+			pre := sg.preCleanups
+			sg.preCleanups = nil
+			sg.mu.Unlock()
+			runBatch(pre)
+			continue
+		}
+		if len(sg.cleanups) == 0 {
+			sg.mu.Unlock()
+			return
+		}
+		fns := sg.cleanups
+		sg.cleanups = nil
+		sg.mu.Unlock()
+		runBatch(fns)
 	}
 }
 
@@ -186,20 +324,21 @@ func (ui *UI) IsTTY() bool {
 // libraries that need a prefixed, TTY-aware io.Writer.
 func (ui *UI) NewStdoutWriter(name string) *styledWriter {
 	prefix := fmt.Sprintf("%s%s%s[%s]%s", ui.cBold, ui.cGreen, ui.iconGear, name, ui.cReset)
-	return newStyledWriter(os.Stdout, prefix, ui.cGreen, ui.cReset, ui.isTTY)
+	return newStyledWriter(os.Stdout, stdTermState, prefix, ui.cGreen, ui.cReset, ui.isTTY)
 }
 
 // NewStderrWriter creates a styled writer for os.Stderr using the UI
 // theme.  See NewStdoutWriter for details.
 func (ui *UI) NewStderrWriter(name string) *styledWriter {
 	prefix := fmt.Sprintf("%s%s%s[%s]%s", ui.cBold, ui.cRed, ui.iconWarn, name, ui.cReset)
-	return newStyledWriter(os.Stderr, prefix, ui.cYellow, ui.cReset, ui.isTTY)
+	return newStyledWriter(os.Stderr, stdTermState, prefix, ui.cYellow, ui.cReset, ui.isTTY)
 }
 
 // SetupPrinters creates the default stdout/stderr styled writers for
 // the given command name.  After calling this, Println / Printf /
 // PrintErr / PrintErrf write through these writers.
 func (ui *UI) SetupPrinters(name string) {
+	ui.FlushPrinters()
 	ui.printer = ui.NewStdoutWriter(name)
 	ui.errPrinter = ui.NewStderrWriter(name)
 }
@@ -209,10 +348,11 @@ func (ui *UI) SetupPrinters(name string) {
 // informational commands where a repeated [name] prefix would be
 // noisy.
 func (ui *UI) SetupPlainPrinters() {
+	ui.FlushPrinters()
 	prefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cGreen, ui.iconGear, ui.cReset)
-	ui.printer = newStyledWriter(os.Stdout, prefix, "", "", ui.isTTY)
+	ui.printer = newStyledWriter(os.Stdout, stdTermState, prefix, "", "", ui.isTTY)
 	errPrefix := fmt.Sprintf("%s%s%s%s", ui.cBold, ui.cRed, ui.iconWarn, ui.cReset)
-	ui.errPrinter = newStyledWriter(os.Stderr, errPrefix, "", "", ui.isTTY)
+	ui.errPrinter = newStyledWriter(os.Stderr, stdTermState, errPrefix, "", "", ui.isTTY)
 }
 
 // StdoutWriter returns the current stdout styled writer, or nil if
@@ -353,3 +493,16 @@ func (ui *UI) StartUI() {
 
 var execCommand = exec.Command
 var getEuid = os.Geteuid
+
+// requireRoot returns an error if the current effective user ID is not root.
+func requireRoot() error {
+	return requireRootFn(getEuid)
+}
+
+// requireRootFn checks root privileges using the provided euid getter.
+func requireRootFn(euid func() int) error {
+	if euid() != 0 {
+		return fmt.Errorf("this command must be run as root")
+	}
+	return nil
+}

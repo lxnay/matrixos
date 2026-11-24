@@ -10,6 +10,9 @@ import (
 )
 
 func (o *Ostree) SetupEtc(rootfs string) error {
+	if err := filesystems.CheckDirIsRoot(rootfs); err != nil {
+		return err
+	}
 	o.Print("Setting up /etc...\n")
 	etcDir := filepath.Join(rootfs, "etc")
 	usrEtcDir := filepath.Join(rootfs, "usr", "etc")
@@ -21,55 +24,40 @@ func (o *Ostree) SetupEtc(rootfs string) error {
 func (o *Ostree) prepareVarHome(imageDir, homeName, varHomeName string) error {
 	homeDir := filepath.Join(imageDir, homeName)
 	varHomeDir := filepath.Join(imageDir, "var", varHomeName)
+	symlinkTarget := "var/" + varHomeName
 
-	homeInfo, err := os.Lstat(homeDir)
-	homeExists := err == nil
-
-	if homeExists && (homeInfo.Mode()&os.ModeSymlink != 0) {
+	if homeInfo, err := os.Lstat(homeDir); err == nil && homeInfo.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink(homeDir)
+		if err != nil {
+			return fmt.Errorf("failed to read symlink %s: %w", homeDir, err)
+		}
+		if !strings.HasSuffix(link, symlinkTarget) {
+			o.PrintError("%s symlink points to an unexpected path: %s\n", homeDir, link)
+			return fmt.Errorf("home symlink invalid")
+		}
 		if info, err := os.Stat(varHomeDir); err == nil && info.IsDir() {
-			link, _ := os.Readlink(homeDir)
-			if strings.HasSuffix(link, "var/"+varHomeName) {
-				o.Print("%s is a symlink and %s is a directory. All good.\n", homeDir, varHomeDir)
-			} else {
-				o.PrintError("%s symlink points to an unexpected path: %s\n", homeDir, link)
-				return fmt.Errorf("home symlink invalid")
-			}
+			o.Print("%s is a symlink and %s is a directory. All good.\n", homeDir, varHomeDir)
+			return nil
 		}
-	} else if homeExists && homeInfo.IsDir() {
-		if pathExists(varHomeDir) { // path exists is correct.
-			o.PrintError("WARNING: removing %s\n", varHomeDir)
-			os.RemoveAll(varHomeDir)
-		}
-		if err := filesystems.Move(homeDir, varHomeDir); err != nil {
-			return fmt.Errorf("failed to move home: %w", err)
-		}
-	} else if homeExists {
-		if err := os.Remove(homeDir); err != nil {
-			return fmt.Errorf("failed to remove home: %w", err)
-		}
-	}
-	if _, err := os.Stat(varHomeDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(varHomeDir, 0755); err != nil {
 			return fmt.Errorf("failed to create %v: %w", varHomeDir, err)
 		}
+		return nil
 	}
-	// && !os.IsExist(err) done because of the complexity of the conditions above.
-	if err := os.Symlink("var/"+varHomeName, homeDir); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("failed to symlink %v: %w", homeDir, err)
-	}
-	return nil
+
+	return o.moveDirToTargetAndSymlink(homeDir, varHomeDir, symlinkTarget)
 }
 
 // moveDirToTargetAndSymlink moves srcDir to targetDir (if srcDir exists as a real
 // directory or removes it if it's a non-directory), ensures targetDir exists, and
 // creates a symlink at srcDir pointing to symlinkTarget.
-func moveDirToTargetAndSymlink(srcDir, targetDir, symlinkTarget string) error {
+func (o *Ostree) moveDirToTargetAndSymlink(srcDir, targetDir, symlinkTarget string) error {
 	if info, err := os.Lstat(srcDir); err == nil {
 		if info.IsDir() {
 			if pathExists(targetDir) {
 				os.RemoveAll(targetDir)
 			}
-			fmt.Fprintf(os.Stderr, "WARNING: moving %s to %s.\n", srcDir, targetDir)
+			o.PrintError("WARNING: moving %s to %s.\n", srcDir, targetDir)
 			if err := filesystems.Move(srcDir, targetDir); err != nil {
 				return fmt.Errorf("failed to move %s: %w", srcDir, err)
 			}
@@ -162,7 +150,7 @@ func (o *Ostree) prepareVarDbPkg(imageDir, roVdbPath string) error {
 // prepareOpt moves /opt to /usr/opt and symlinks it.
 func (o *Ostree) prepareOpt(imageDir string) error {
 	o.Print("Setting up /opt...\n")
-	return moveDirToTargetAndSymlink(
+	return o.moveDirToTargetAndSymlink(
 		filepath.Join(imageDir, "opt"),
 		filepath.Join(imageDir, "usr", "opt"),
 		"usr/opt",
@@ -172,7 +160,7 @@ func (o *Ostree) prepareOpt(imageDir string) error {
 // prepareSrv moves /srv to /var/srv and symlinks it.
 func (o *Ostree) prepareSrv(imageDir string) error {
 	o.Print("Setting up /srv...\n")
-	return moveDirToTargetAndSymlink(
+	return o.moveDirToTargetAndSymlink(
 		filepath.Join(imageDir, "srv"),
 		filepath.Join(imageDir, "var", "srv"),
 		"var/srv",
@@ -201,24 +189,22 @@ func (o *Ostree) prepareStaticDirs(imageDir string) error {
 // prepareUsrLocal moves /usr/local to /var/usrlocal and symlinks it.
 func (o *Ostree) prepareUsrLocal(imageDir string) error {
 	o.Print("Setting up /usr/local...\n")
-	usrLocalDir := filepath.Join(imageDir, "usr", "local")
 	relUsrLocal := "var/usrlocal"
-	imageUsrLocal := filepath.Join(imageDir, relUsrLocal)
-
-	if pathExists(usrLocalDir) {
-		if err := filesystems.Move(usrLocalDir, imageUsrLocal); err != nil {
-			return fmt.Errorf("failed to move usr/local: %w", err)
-		}
-	} else {
-		os.MkdirAll(imageUsrLocal, 0755)
-	}
-	if err := os.Symlink(filepath.Join("..", relUsrLocal), usrLocalDir); err != nil {
-		return fmt.Errorf("failed to symlink usr/local: %w", err)
-	}
-	return nil
+	return o.moveDirToTargetAndSymlink(
+		filepath.Join(imageDir, "usr", "local"),
+		filepath.Join(imageDir, relUsrLocal),
+		filepath.Join("..", relUsrLocal),
+	)
 }
 
 func (o *Ostree) PrepareFilesystemHierarchy(rootfs string) error {
+	if rootfs == "" {
+		return fmt.Errorf("missing rootfs parameter")
+	}
+	if err := filesystems.CheckDirIsRoot(rootfs); err != nil {
+		return err
+	}
+
 	marker := filepath.Join(rootfs, "var", ".matrixos-prepared")
 	if fileExists(marker) {
 		return fmt.Errorf("filesystem hierarchy already prepared: %s exists", marker)
@@ -280,7 +266,9 @@ func (o *Ostree) PrepareFilesystemHierarchy(rootfs string) error {
 		return fmt.Errorf("config item Imager.EfiRoot is not set")
 	}
 	o.Print("Setting up %s...\n", efiRoot)
-	os.MkdirAll(filepath.Join(rootfs, efiRoot), 0755)
+	if err := os.MkdirAll(filepath.Join(rootfs, efiRoot), 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", efiRoot, err)
+	}
 
 	if err := o.prepareUsrLocal(rootfs); err != nil {
 		return err
@@ -310,18 +298,22 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 	for _, relPath := range expected {
 		fullPath := filepath.Join(rootfs, relPath)
 
-		// Check if it's a symlink and if it points to a directory.
-		// We use Lstat to check the link itself and Stat to check the target.
-		lfi, lerr := os.Lstat(fullPath)
-		if lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
-			if fi, err := os.Stat(fullPath); err == nil && fi.IsDir() {
-				continue
+		// Verify the entry itself (under its confined parent inside rootfs) is a
+		// symlink and that its resolved target strictly inside rootfs is a directory.
+		parentHost, parentFi, perr := filesystems.ResolvePathInRoot(rootfs, filepath.Dir(relPath))
+		if perr == nil && parentFi.IsDir() {
+			linkHost := filepath.Join(parentHost, filepath.Base(relPath))
+			lfi, lerr := os.Lstat(linkHost)
+			if lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
+				if _, fi, err := filesystems.ResolvePathInRoot(rootfs, relPath); err == nil && fi.IsDir() {
+					continue
+				}
 			}
 		}
 
-		fmt.Fprintf(os.Stderr, "Expected %s to be a symlink to a directory.\n",
+		o.PrintError("Expected %s to be a symlink to a directory.\n",
 			fullPath)
-		fmt.Fprintln(os.Stderr, "Please check the filesystem hierarchy.")
+		o.PrintError("Please check the filesystem hierarchy.\n")
 		issues++
 	}
 
@@ -335,8 +327,8 @@ func (o *Ostree) ValidateFilesystemHierarchy(rootfs string) error {
 	fi, err := os.Lstat(tmpPath)
 	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 ||
 		fi.Mode().Perm() != 0o777 || fi.Mode()&os.ModeSticky == 0 {
-		fmt.Fprintf(os.Stderr, "Expected %s to be a sticky directory with mode 1777.\n", tmpPath)
-		fmt.Fprintln(os.Stderr, "Please check the filesystem hierarchy.")
+		o.PrintError("Expected %s to be a sticky directory with mode 1777.\n", tmpPath)
+		o.PrintError("Please check the filesystem hierarchy.\n")
 		return fmt.Errorf("filesystem hierarchy validation failed: /tmp is not a sticky 1777 directory")
 	}
 

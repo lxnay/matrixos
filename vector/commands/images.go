@@ -92,9 +92,8 @@ func (c *ImagesCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	// Must be root.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	// Parse the comma-separated filter lists.
@@ -144,15 +143,14 @@ func (c *ImagesCommand) onlyFilter() releaser.RefFilterFunc {
 
 // runImages implements the main images building logic.
 func (c *ImagesCommand) runImages() error {
-	writerSetup := func() {
-		c.SetupPrinters("images:all")
-	}
-	writerSetup()
+	c.SetupPrinters("images:all")
 	defer c.FlushPrinters()
+	c.PushCleanup(c.FlushPrinters)
 
 	c.ot.SetStdout(c.StdoutWriter())
 	c.ot.SetStderr(c.StderrWriter())
 	c.ot.SetVerbose(false)
+	c.PushCleanup(c.killGpg)
 
 	// Verify imager environment.
 	if err := c.qa.VerifyImagerEnvironmentSetup("/"); err != nil {
@@ -262,9 +260,10 @@ func (c *ImagesCommand) runImages() error {
 		c.Printf("  %s\n", ref)
 	}
 
-	// Context cancelled on SIGINT/SIGTERM via PushCleanup.
+	// Context cancelled first on SIGINT/SIGTERM via PushPreCleanup so workers
+	// stop dequeuing new work before resource cleanups execute.
 	ctx, cancel := context.WithCancel(context.Background())
-	c.PushCleanup(cancel)
+	c.PushPreCleanup(cancel)
 	defer cancel()
 
 	var released []string
@@ -292,75 +291,23 @@ func (c *ImagesCommand) runImages() error {
 			if err := ot.MaybeInitializeGpg(); err != nil {
 				return fmt.Errorf("failed to initialize GPG: %w", err)
 			}
-			pushCleanup(func() { ot.KillGpgDaemons() })
 
 			if c.localOstree {
-				return c.showLocalRefs(ot, im)
+				return showLocalRefs(ot, im.Print)
 			}
-			return c.initializeRemoteOstree(ot, im)
+			return pullRemoteOstree(&c.UI, ot, im)
 		},
 	}
 
 	if err := imager.ParallelImage(ctx, piOpts); err != nil {
-		writerSetup()
 		return err
 	}
 
-	writerSetup()
 	c.Printf("Successfully built images for %d releases:\n",
 		len(released))
 	for _, r := range released {
 		c.Printf("  %s\n", r)
 	}
 
-	return nil
-}
-
-// initializeRemoteOstree sets up the ostree remote and pulls
-// the specified ref.  The ot parameter is the per-worker ostree
-// instance (cloned for parallel safety).
-func (c *ImagesCommand) initializeRemoteOstree(ot ostree.IOstree, im imager.IImager) error {
-	remote, err := ot.Remote()
-	if err != nil {
-		return err
-	}
-
-	if err := c.showRemoteRefs(ot, im); err != nil {
-		return err
-	}
-
-	im.Print("\n%s%sPulling ostree ref %s:%s ...%s\n",
-		c.cBold, c.iconDownload, remote, ot.Ref(), c.cReset)
-	if err := ot.Pull(); err != nil {
-		return fmt.Errorf("ostree pull failed: %w", err)
-	}
-	return nil
-}
-
-// showLocalRefs prints the local ostree refs to the provided printf function.
-// The ot parameter is the per-worker ostree instance.
-func (c *ImagesCommand) showLocalRefs(ot ostree.IOstree, im imager.IImager) error {
-	refs, err := ot.LocalRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list local refs: %w", err)
-	}
-	im.Print("Local refs:\n")
-	for _, r := range refs {
-		im.Print("  %s\n", r)
-	}
-	return nil
-}
-
-// showRemoteRefs prints the remote ostree refs to the provided printf function.
-// The ot parameter is the per-worker ostree instance.
-func (c *ImagesCommand) showRemoteRefs(ot ostree.IOstree, im imager.IImager) error {
-	refs, err := ot.RemoteRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list remote refs: %w", err)
-	}
-	im.Print("Remote refs:\n")
-	for _, r := range refs {
-		im.Print("  %s\n", r)
-	}
 	return nil
 }

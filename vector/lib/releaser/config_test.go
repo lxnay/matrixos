@@ -78,12 +78,6 @@ func stringAccessors() []configAccessorTestCase {
 			call:    func(r *Releaser) (string, error) { return r.BuildMetadataFile() },
 			wantVal: "/meta",
 		},
-		{
-			name:    "ServicesDir",
-			key:     "Releaser.HooksDir",
-			call:    func(r *Releaser) (string, error) { return r.ServicesDir() },
-			wantVal: "/hooks",
-		},
 	}
 }
 

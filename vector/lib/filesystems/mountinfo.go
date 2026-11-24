@@ -2,13 +2,16 @@ package filesystems
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+var errMountNotFound = errors.New("mount not found")
 
 var (
 	// mountInfoPath is the path to the mountinfo file.
@@ -111,7 +114,7 @@ func parseMountInfoLine(line string) (*MountInfoEntry, error) {
 		Mountpoint: unescapeOctal(left[4]),
 		Options:    left[5],
 		FSType:     right[0],
-		Source:     right[1],
+		Source:     unescapeOctal(right[1]),
 	}
 	if len(right) >= 3 {
 		entry.SuperOpts = right[2]
@@ -152,15 +155,49 @@ func isPathUnderMount(path, mountpoint string) bool {
 	return path == mountpoint || strings.HasPrefix(path, mountpoint+"/")
 }
 
-// resolvePath returns the canonical path with symlinks resolved.
-// If resolution fails (e.g. the path does not exist), it falls back
-// to filepath.Clean so callers always get a normalised path.
+// resolvePath returns the canonical absolute path with symlinks resolved.
 func resolvePath(p string) string {
-	resolved, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return filepath.Clean(p)
+	return CanonicalPath(p)
+}
+
+// exactMountForPath returns the topmost entry whose mountpoint equals resolved,
+// preferring a non-autofs backing mount over an autofs stub at the same path.
+func exactMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntry {
+	var best *MountInfoEntry
+	for i := range entries {
+		if entries[i].Mountpoint != resolved {
+			continue
+		}
+		if best == nil || best.FSType == "autofs" || entries[i].FSType != "autofs" {
+			best = entries[i]
+		}
 	}
-	return resolved
+	return best
+}
+
+// findMountByTargetResolveAutofs returns the mount entry for an exact
+// mountpoint match, triggering systemd autofs stubs when necessary so callers
+// such as MountpointToDevice observe the real backing block device instead of
+// "systemd-1".
+func findMountByTargetResolveAutofs(mnt string) (*MountInfoEntry, error) {
+	entries, err := ReadMountInfo()
+	if err != nil {
+		return nil, err
+	}
+	resolved := resolvePath(mnt)
+	best := exactMountForPath(entries, resolved)
+	if best != nil && best.FSType == "autofs" {
+		triggerAutomount(resolved)
+		if refreshed, rErr := ReadMountInfo(); rErr == nil {
+			if b := exactMountForPath(refreshed, resolved); b != nil {
+				best = b
+			}
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("%w for target %s", errMountNotFound, mnt)
+	}
+	return best, nil
 }
 
 // findMountByTarget returns the mount entry for an exact mountpoint match.
@@ -178,7 +215,7 @@ func findMountByTarget(mnt string) (*MountInfoEntry, error) {
 			return entries[i], nil
 		}
 	}
-	return nil, fmt.Errorf("no mount found for target %s", mnt)
+	return nil, fmt.Errorf("%w for target %s", errMountNotFound, mnt)
 }
 
 // findMountContainingPath returns the entry whose mountpoint is the longest
@@ -211,8 +248,8 @@ func findMountContainingPath(path string) (*MountInfoEntry, error) {
 }
 
 // bestMountForPath returns the entry whose mountpoint is the longest prefix
-// of resolved. On ties (same mountpoint), a non-autofs entry is preferred
-// over an autofs stub so the real backing filesystem wins.
+// of resolved. On ties (same mountpoint), the last (topmost) mount wins,
+// while still preferring a non-autofs backing mount over an autofs stub.
 func bestMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntry {
 	var best *MountInfoEntry
 	bestLen := -1
@@ -225,7 +262,7 @@ func bestMountForPath(entries []*MountInfoEntry, resolved string) *MountInfoEntr
 		case len(mp) > bestLen:
 			bestLen = len(mp)
 			best = entries[i]
-		case len(mp) == bestLen && best != nil && best.FSType == "autofs" && entries[i].FSType != "autofs":
+		case len(mp) == bestLen && best != nil && (best.FSType == "autofs" || entries[i].FSType != "autofs"):
 			best = entries[i]
 		}
 	}
@@ -241,8 +278,8 @@ func defaultTriggerAutomount(path string) {
 	}
 }
 
-// listMountsByPrefix returns entries whose mountpoint starts with prefix.
-// The prefix is resolved through symlinks before comparison.
+// listMountsByPrefix returns entries whose mountpoint equals prefix or is a
+// descendant of prefix. The prefix is resolved through symlinks before comparison.
 func listMountsByPrefix(prefix string) ([]*MountInfoEntry, error) {
 	entries, err := ReadMountInfo()
 	if err != nil {
@@ -251,7 +288,7 @@ func listMountsByPrefix(prefix string) ([]*MountInfoEntry, error) {
 	resolved := resolvePath(prefix)
 	var result []*MountInfoEntry
 	for _, e := range entries {
-		if strings.HasPrefix(e.Mountpoint, resolved) {
+		if isPathUnderMount(e.Mountpoint, resolved) {
 			result = append(result, e)
 		}
 	}
@@ -277,7 +314,10 @@ func findMountsBySource(source string) ([]*MountInfoEntry, error) {
 func IsMounted(mnt string) (bool, error) {
 	_, err := findMountByTarget(mnt)
 	if err != nil {
-		return false, nil
+		if errors.Is(err, errMountNotFound) {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }
@@ -298,10 +338,15 @@ func formatMountEntries(entries []*MountInfoEntry) string {
 // tag is the blkid attribute name: UUID, PARTUUID, LABEL, PARTTYPE, etc.
 func defaultBlkidLookup(devPath, tag string) (string, error) {
 	cmd := exec.Command("blkid", "-o", "value", "-s", tag, devPath)
-	cmd.Stderr = os.Stderr
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 
 	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return "", fmt.Errorf("blkid lookup failed for %s tag %s: %w: %s", devPath, tag, err, msg)
+		}
 		return "", fmt.Errorf("blkid lookup failed for %s tag %s: %w", devPath, tag, err)
 	}
 	val := strings.TrimSpace(string(out))

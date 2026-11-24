@@ -45,7 +45,7 @@ func TestLogsCleaner_isDryRun(t *testing.T) {
 			if tt.dryRun != "" {
 				mockCfg.Items["LogsCleaner.DryRun"] = []string{tt.dryRun}
 			}
-			cleaner := &LogsCleaner{cfg: mockCfg}
+			cleaner := &LogsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.isDryRun()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("isDryRun() error = %v, wantErr %v", err, tt.wantErr)
@@ -75,7 +75,7 @@ func TestLogsCleaner_getLogsDir(t *testing.T) {
 			if tt.logsDir != "" {
 				mockCfg.Items["matrixOS.LogsDir"] = []string{tt.logsDir}
 			}
-			cleaner := &LogsCleaner{cfg: mockCfg}
+			cleaner := &LogsCleaner{baseCleaner: baseCleaner{cfg: mockCfg}}
 			got, err := cleaner.getLogsDir()
 			if (err != nil) != tt.wantErr {
 				t.Errorf("getLogsDir() error = %v, wantErr %v", err, tt.wantErr)

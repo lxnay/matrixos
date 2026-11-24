@@ -142,39 +142,6 @@ func TestEncryptedRootFsName(t *testing.T) {
 	})
 }
 
-func TestFsencOsName(t *testing.T) {
-	t.Run("Success", func(t *testing.T) {
-		cfg := baseFsencConfig()
-		f, _ := NewFsenc(cfg, noop, noop)
-		name, err := f.OsName()
-		if err != nil {
-			t.Fatalf("OsName() error: %v", err)
-		}
-		if name != "matrixos" {
-			t.Errorf("Expected 'matrixos', got %q", name)
-		}
-	})
-
-	t.Run("Empty", func(t *testing.T) {
-		cfg := baseFsencConfig()
-		cfg.Items["matrixOS.OsName"] = []string{""}
-		f, _ := NewFsenc(cfg, noop, noop)
-		_, err := f.OsName()
-		if err == nil {
-			t.Error("Expected error for empty OsName")
-		}
-	})
-
-	t.Run("ConfigError", func(t *testing.T) {
-		ec := &config.ErrConfig{Err: errors.New("cfg error")}
-		f, _ := NewFsenc(ec, noop, noop)
-		_, err := f.OsName()
-		if err == nil {
-			t.Error("Expected error from broken config")
-		}
-	})
-}
-
 // --- LuksEncrypt Tests ---
 
 func TestLuksEncrypt(t *testing.T) {

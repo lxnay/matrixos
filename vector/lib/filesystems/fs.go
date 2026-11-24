@@ -1,6 +1,7 @@
 package filesystems
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,24 +20,17 @@ import (
 )
 
 var (
-	execRun            runner.Func               = runner.Run
-	execOutput         runner.OutputFunc         = runner.Output
-	execCombinedOutput runner.CombinedOutputFunc = runner.CombinedOutput
-	ExecChrootRun      runner.ChrootRunFunc      = runner.ChrootRun
-	ExecChrootOutput   runner.ChrootOutputFunc   = runner.ChrootOutput
-	devMapperPrefix                              = "/dev/mapper"
-	sysIoctl                                     = unix.Syscall
-	sysLsetxattr                                 = unix.Lsetxattr
-	sysLgetxattr                                 = unix.Lgetxattr
-	sysLlistxattr                                = unix.Llistxattr
+	execRun          runner.Func             = runner.Run
+	ExecChrootOutput runner.ChrootOutputFunc = runner.ChrootOutput
+	devMapperPrefix                          = "/dev/mapper"
+	sysIoctl                                 = unix.Syscall
+	sysLsetxattr                             = unix.Lsetxattr
+	sysLgetxattr                             = unix.Lgetxattr
+	sysLlistxattr                            = unix.Llistxattr
 
 	// Mockable paths for block-device sysfs queries.
 	sysClassBlockPath = "/sys/class/block"
 )
-
-// BLKFLSBUF is the ioctl command to flush block device buffers.
-// It is commonly 0x1261 on Linux.
-const BLKFLSBUF = 0x1261
 
 // PathMode represents the mode of a path.
 type PathMode struct {
@@ -72,7 +67,7 @@ func (a *PathInfo) Equals(b *PathInfo) bool {
 	if a.Uid != b.Uid || a.Gid != b.Gid {
 		return false
 	}
-	if a.Size != b.Size {
+	if a.Mode.Type == "-" && a.Size != b.Size {
 		return false
 	}
 	if a.Link != b.Link {
@@ -215,7 +210,7 @@ func FlushBlockDeviceBuffers(devPath string) error {
 	}
 	defer f.Close()
 
-	if _, _, errno := sysIoctl(unix.SYS_IOCTL, f.Fd(), uintptr(BLKFLSBUF), 0); errno != 0 {
+	if _, _, errno := sysIoctl(unix.SYS_IOCTL, f.Fd(), uintptr(unix.BLKFLSBUF), 0); errno != 0 {
 		return fmt.Errorf("ioctl BLKFLSBUF failed: %w", errno)
 	}
 	return nil
@@ -269,60 +264,6 @@ func DirectoryExists(path string) bool {
 	return info.IsDir()
 }
 
-// CheckFsCapabilitySupport checks if the filesystem has capability support.
-var CheckFsCapabilitySupport = checkFsCapabilitySupport
-
-func checkFsCapabilitySupport(testDir string) (bool, error) {
-	if testDir == "" {
-		return false, fmt.Errorf("missing parameter testDir")
-	}
-
-	tmpBin, err := os.CreateTemp(testDir, ".cap_test.*.bin")
-	if err != nil {
-		return false, err
-	}
-	tmpBin.Close()
-	defer os.Remove(tmpBin.Name())
-
-	// Use the setcap command (from libcap) rather than raw Lsetxattr.
-	// The setcap binary handles VFS capability revision negotiation
-	// (v2 vs v3 with rootid for user namespaces) automatically, whereas
-	// a raw Lsetxattr with a hardcoded v2 struct will fail when the
-	// kernel requires v3.
-	if err := execRun(&runner.Cmd{
-		Name: "setcap",
-		Args: []string{"cap_net_raw+ep", tmpBin.Name()},
-	}); err != nil {
-		log.Println("WARNING: System/FS does not allow setting capabilities.")
-		return false, nil
-	}
-
-	tmpCopy := tmpBin.Name() + ".copy"
-	defer os.Remove(tmpCopy)
-
-	// Copy with cp -a (archive mode) to preserve xattrs, matching the
-	// bash version. This delegates capability preservation to coreutils
-	// which handles all xattr edge cases correctly.
-	if err := execRun(&runner.Cmd{
-		Name: "cp",
-		Args: []string{"-a", tmpBin.Name(), tmpCopy},
-	}); err != nil {
-		return false, err
-	}
-
-	// Verify the capability survived the copy using getcap, matching
-	// the bash: getcap "$tmp_copy" | grep -q "cap_net_raw[=+]ep"
-	out, err := execCombinedOutput(&runner.Cmd{
-		Name: "getcap",
-		Args: []string{tmpCopy},
-	})
-	if err != nil {
-		return false, nil
-	}
-
-	return strings.Contains(string(out), "cap_net_raw"), nil
-}
-
 // CheckDirIsRoot checks if a directory is the root of the filesystem and exits if it is.
 func CheckDirIsRoot(chrootDir string) error {
 	if chrootDir == "" {
@@ -340,22 +281,6 @@ func CheckDirIsRoot(chrootDir string) error {
 		return fmt.Errorf("CRITICAL ERROR: %s IS MAPPED TO HOST ROOT. ABORTING", chrootDir)
 	}
 	return nil
-}
-
-// CheckDirsSameFilesystem checks if two directories are on the same filesystem.
-func CheckDirsSameFilesystem(src, dst string) (bool, error) {
-	if src == "" || dst == "" {
-		return false, fmt.Errorf("missing parameters src or dst")
-	}
-	srcStat, err := os.Stat(src)
-	if err != nil {
-		return false, err
-	}
-	dstStat, err := os.Stat(dst)
-	if err != nil {
-		return false, err
-	}
-	return srcStat.Sys().(*syscall.Stat_t).Dev == dstStat.Sys().(*syscall.Stat_t).Dev, nil
 }
 
 // CreateTempDir creates a temporary directory.
@@ -402,10 +327,6 @@ func RemoveFileWithGlob(target string, opts RemoveFileWithGlobOptions) error {
 	if stdout == nil {
 		stdout = os.Stdout
 	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
 
 	matches, err := filepath.Glob(target)
 	if err != nil {
@@ -432,19 +353,27 @@ type RemoveDirOptions struct {
 	Stderr io.Writer
 }
 
-// RemoveDir removes a directory.
+// RemoveDir removes a directory (or symlink at target).
 func RemoveDir(target string, opts RemoveDirOptions) error {
+	if target == "" {
+		return fmt.Errorf("missing target parameter")
+	}
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	if _, err := os.Stat(target); os.IsNotExist(err) {
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
 		fmt.Fprintf(stdout, "Removing: %s does not exist\n", target)
 		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		if err := CheckDirIsRoot(target); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(stdout, "Removing %s\n", target)
 	return os.RemoveAll(target)
@@ -458,17 +387,19 @@ type EmptyDirOptions struct {
 
 // EmptyDir empties a directory.
 func EmptyDir(target string, opts EmptyDirOptions) error {
+	if target == "" {
+		return fmt.Errorf("missing target parameter")
+	}
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = os.Stdout
 	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
 	if _, err := os.Stat(target); os.IsNotExist(err) {
 		fmt.Fprintf(stdout, "Emptying: %s does not exist\n", target)
 		return nil
+	}
+	if err := CheckDirIsRoot(target); err != nil {
+		return err
 	}
 	fmt.Fprintf(stdout, "Emptying directory %s\n", target)
 
@@ -501,22 +432,6 @@ func DirEmpty(dir string) (bool, error) {
 		return false, err
 	}
 	return false, nil
-}
-
-// ChrootRun runs a command in a chroot environment using unshare,
-// wiring stdin/stdout/stderr.
-func ChrootRun(chrootDir, chrootExec string, args ...string) error {
-	cmd := runner.ChrootCmd{
-		Cmd: runner.Cmd{
-			Name:   chrootExec,
-			Args:   args,
-			Stdin:  os.Stdin,
-			Stdout: os.Stdout,
-			Stderr: os.Stderr,
-		},
-		ChrootDir: chrootDir,
-	}
-	return ExecChrootRun(&cmd)
 }
 
 // ChrootOutput runs a command in a chroot environment using unshare
@@ -781,24 +696,65 @@ func AcquireFileLock(path string, timeout time.Duration) (func(), error) {
 		return nil, fmt.Errorf("failed to open lock file %s: %w", path, err)
 	}
 
-	locked := make(chan error, 1)
-	go func() {
-		locked <- syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
-	}()
-
-	select {
-	case err := <-locked:
-		if err != nil {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			f.Close()
 			return nil, fmt.Errorf("failed to acquire lock on %s: %w", path, err)
 		}
-	case <-time.After(timeout):
-		f.Close()
-		return nil, fmt.Errorf("timed out waiting for lock on %s", path)
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("timed out waiting for lock on %s", path)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, nil
+	return sync.OnceFunc(func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}), nil
+}
+
+// EnsureLockDir ensures the lock directory exists.
+func EnsureLockDir(lockDir string) (string, error) {
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create lock directory %s: %w", lockDir, err)
+	}
+	return lockDir, nil
+}
+
+// EnsureLockPath computes <lockDir>/<name>.lock and ensures its parent directory exists.
+func EnsureLockPath(lockDir, name string) (string, error) {
+	lockFile := filepath.Join(lockDir, name+".lock")
+	lockFileDir := filepath.Dir(lockFile)
+	if err := os.MkdirAll(lockFileDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create lock file directory %s: %w", lockFileDir, err)
+	}
+	return lockFile, nil
+}
+
+// ExecuteWithLock acquires an exclusive file lock at lockPath with a timeout
+// parsed from timeoutStr (in seconds), logs acquisition via printFn if non-nil,
+// runs fn, and releases the lock.
+func ExecuteWithLock(lockPath, timeoutStr string, fn func() error, onAcquired func()) error {
+	timeoutSecs, err := strconv.Atoi(timeoutStr)
+	if err != nil {
+		return fmt.Errorf("invalid lock wait seconds %q: %w", timeoutStr, err)
+	}
+	unlock, err := AcquireFileLock(lockPath, time.Duration(timeoutSecs)*time.Second)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if onAcquired != nil {
+		onAcquired()
+	}
+	return fn()
 }

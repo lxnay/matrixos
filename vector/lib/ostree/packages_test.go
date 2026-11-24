@@ -14,28 +14,23 @@ import (
 func TestCommitAndListPackages(t *testing.T) {
 	repoDir := setupTestRepo(t)
 
-	// Create root first — we need its resolved path to lay out the commit content
-	// so that the in-commit paths match what ListPackages looks up via
-	// filepath.Join(root, RwVdbPath).
 	root := t.TempDir()
-	// Resolve symlinks (e.g. /tmp -> sysroot/tmp) so ostree can traverse the path.
+	// Resolve symlinks (e.g. /tmp -> sysroot/tmp) so ostree can traverse the repo path.
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Create content to commit.
-	// listPackagesFromPath runs: ostree ls -R commit -- <root>/var/db/pkg
-	// so the commit tree must contain the package data at that absolute path.
+	// Create content to commit at the commit root (e.g. /var/db/pkg/...) —
+	// listPackagesFromPath must query the in-commit path even when Ostree.Root
+	// is a non-"/" directory.
 	contentDir := t.TempDir()
 	contentDir, err = filepath.EvalSymlinks(contentDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Strip the leading separator so filepath.Join works correctly.
-	relRoot := strings.TrimPrefix(root, string(filepath.Separator))
-	pkgDir := filepath.Join(contentDir, relRoot, RwVdbPath, "sys-apps", "systemd")
+	pkgDir := filepath.Join(contentDir, RwVdbPath, "sys-apps", "systemd")
 	if err := os.MkdirAll(pkgDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -51,15 +46,6 @@ func TestCommitAndListPackages(t *testing.T) {
 		t.Fatalf("ostree commit failed: %v, output: %s", err, out)
 	}
 
-	// Get Commit Hash
-	commit, err := LastCommit(repoDir, branch, false)
-	if err != nil {
-		t.Fatalf("LastCommit failed: %v", err)
-	}
-	if commit == "" {
-		t.Fatal("commit hash is empty")
-	}
-
 	// Setup Ostree struct
 	cfg := &config.MockConfig{
 		Items: map[string][]string{
@@ -70,6 +56,15 @@ func TestCommitAndListPackages(t *testing.T) {
 	o, err := NewOstree(NewOstreeOptions{Config: cfg})
 	if err != nil {
 		t.Fatalf("NewOstree failed: %v", err)
+	}
+
+	// Get Commit Hash
+	commit, err := o.lastCommitFromRepo(repoDir, branch)
+	if err != nil {
+		t.Fatalf("lastCommitFromRepo failed: %v", err)
+	}
+	if commit == "" {
+		t.Fatal("commit hash is empty")
 	}
 
 	rootRepo := filepath.Join(root, "ostree", "repo")
@@ -99,7 +94,9 @@ func TestCommitAndListPackages(t *testing.T) {
 
 func TestListPackagesErrors(t *testing.T) {
 	cfg := &config.MockConfig{
-		Items: map[string][]string{}, // Missing ReadOnlyVdb
+		Items: map[string][]string{
+			"Ostree.Root": {t.TempDir()},
+		}, // Missing ReadOnlyVdb
 	}
 	o, err := NewOstree(NewOstreeOptions{Config: cfg})
 	if err != nil {
@@ -107,17 +104,22 @@ func TestListPackagesErrors(t *testing.T) {
 	}
 	if _, err := o.ListPackages("commit"); err == nil {
 		t.Error("ListPackages should fail if ReadOnlyVdb is missing")
+	} else if !strings.Contains(err.Error(), "Releaser.ReadOnlyVdb") {
+		t.Errorf("Expected Releaser.ReadOnlyVdb error, got: %v", err)
 	}
 
 	cfg = &config.MockConfig{
 		Items: map[string][]string{
+			"Ostree.Root":          {t.TempDir()},
 			"Releaser.ReadOnlyVdb": {RwVdbPath},
 		},
 	}
 	o, _ = NewOstree(NewOstreeOptions{Config: cfg})
-	// Sysroot does not exist
+	// Sysroot repo does not exist
 	if _, err := o.ListPackages("commit"); err == nil {
 		t.Error("ListPackages should fail if sysroot/var/db/pkg does not exist")
+	} else if strings.Contains(err.Error(), "Ostree.Root") {
+		t.Errorf("Expected repo/ostree failure rather than missing Ostree.Root, got: %v", err)
 	}
 }
 
@@ -158,6 +160,47 @@ d00755 0 0 0 abc abc /var/db/pkg/cat/other
 	}
 	if pkgs[0] != "cat/other" || pkgs[1] != "cat/pkg" {
 		t.Errorf("Unexpected packages: %v", pkgs)
+	}
+}
+
+func TestListPackages_NonRootOstreeRootUsesInCommitPath(t *testing.T) {
+	cfg := &config.MockConfig{
+		Items: map[string][]string{
+			"Releaser.ReadOnlyVdb": {"/usr/lib/portage/vdb"},
+			"Ostree.Root":          {"/sysroot"},
+		},
+	}
+	o, err := NewOstree(NewOstreeOptions{Config: cfg})
+	if err != nil {
+		t.Fatalf("NewOstree failed: %v", err)
+	}
+
+	var seenRepoArg, seenPathArg string
+	o.runner = func(cmd *runner.Cmd) error {
+		for _, a := range cmd.Args {
+			if strings.HasPrefix(a, "--repo=") {
+				seenRepoArg = a
+			}
+		}
+		if len(cmd.Args) > 0 {
+			seenPathArg = cmd.Args[len(cmd.Args)-1]
+		}
+		_, _ = cmd.Stdout.Write([]byte("d00755 0 0 0 aaa bbb /usr/lib/portage/vdb/sys-apps/systemd\n"))
+		return nil
+	}
+
+	pkgs, err := o.ListPackages("deadbeef")
+	if err != nil {
+		t.Fatalf("ListPackages failed: %v", err)
+	}
+	if seenRepoArg != "--repo=/sysroot/ostree/repo" {
+		t.Errorf("repo arg = %q, want --repo=/sysroot/ostree/repo", seenRepoArg)
+	}
+	if seenPathArg != "/usr/lib/portage/vdb" {
+		t.Errorf("in-commit path arg = %q, want /usr/lib/portage/vdb (host root must not be prepended to commit path)", seenPathArg)
+	}
+	if len(pkgs) != 1 || pkgs[0] != "sys-apps/systemd" {
+		t.Errorf("pkgs = %v, want [sys-apps/systemd]", pkgs)
 	}
 }
 
@@ -409,6 +452,58 @@ d00755 0 0 0 eee555 fff666 /etc/conf.d
 		_, err = o.ListContents("abc123", "/etc")
 		if err == nil {
 			t.Error("expected error for malformed output, got nil")
+		}
+	})
+
+	t.Run("PathsAndSymlinksWithSpaces", func(t *testing.T) {
+		cfg := &config.MockConfig{
+			Items: map[string][]string{
+				"Ostree.RepoDir": {"/repo"},
+			},
+		}
+		o, err := NewOstree(NewOstreeOptions{Config: cfg})
+		if err != nil {
+			t.Fatalf("NewOstree failed: %v", err)
+		}
+
+		mockOutput := "" +
+			"d00755 0 0      0 aaa111 bbb222 /usr/etc/dir with spaces\n" +
+			"-00644 0 0     42 ccc333 /usr/etc/NetworkManager/system-connections/Home  WiFi.nmconnection\n" +
+			"-00644 0 0      3 ddd444 /usr/etc/trailing space \n" +
+			"l00777 0 0      0 eee555 /usr/etc/my link -> /usr/share/target with -> arrow and spaces\n" +
+			"l00777 0 0      0 fff666 /usr/etc/link trailing -> /etc/some target \n"
+
+		o.runner = func(cmd *runner.Cmd) error {
+			_, _ = cmd.Stdout.Write([]byte(mockOutput))
+			return nil
+		}
+
+		pis, err := o.ListContents("abc123", "/usr/etc")
+		if err != nil {
+			t.Fatalf("ListContents failed: %v", err)
+		}
+		if pis == nil || len(*pis) != 5 {
+			t.Fatalf("expected 5 entries, got %v", pis)
+		}
+
+		want := []struct {
+			path string
+			link string
+		}{
+			{"/usr/etc/dir with spaces", ""},
+			{"/usr/etc/NetworkManager/system-connections/Home  WiFi.nmconnection", ""},
+			{"/usr/etc/trailing space ", ""},
+			{"/usr/etc/my link", "/usr/share/target with -> arrow and spaces"},
+			{"/usr/etc/link trailing", "/etc/some target "},
+		}
+		for i, w := range want {
+			got := (*pis)[i]
+			if got.Path != w.path {
+				t.Errorf("entry[%d].Path = %q, want %q", i, got.Path, w.path)
+			}
+			if got.Link != w.link {
+				t.Errorf("entry[%d].Link = %q, want %q", i, got.Link, w.link)
+			}
 		}
 	})
 }

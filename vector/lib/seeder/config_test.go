@@ -19,36 +19,6 @@ type configAccessorTestCase struct {
 func stringAccessors() []configAccessorTestCase {
 	return []configAccessorTestCase{
 		{
-			name:    "ChrootSeedersDir",
-			key:     "Seeder.ChrootSeedersDir",
-			call:    func(s *Seeder) (string, error) { return s.ChrootSeedersDir() },
-			wantVal: "/build/seeders",
-		},
-		{
-			name:    "SeedersDir",
-			key:     "Seeder.SeedersDir",
-			call:    func(s *Seeder) (string, error) { return s.SeedersDir() },
-			wantVal: "/build/seeders",
-		},
-		{
-			name:    "DisabledSeederFile",
-			key:     "Seeder.SeederDisabledFileName",
-			call:    func(s *Seeder) (string, error) { return s.DisabledSeederFile() },
-			wantVal: "__disabled__",
-		},
-		{
-			name:    "ChrootExecName",
-			key:     "Seeder.ChrootExecutableName",
-			call:    func(s *Seeder) (string, error) { return s.ChrootExecName() },
-			wantVal: "chroot.sh",
-		},
-		{
-			name:    "PrepperExecName",
-			key:     "Seeder.PrepperExecutableName",
-			call:    func(s *Seeder) (string, error) { return s.PrepperExecName() },
-			wantVal: "prepper.sh",
-		},
-		{
 			name:    "PhasesStateDir",
 			key:     "Seeder.ChrootSeedersPhasesStateDir",
 			call:    func(s *Seeder) (string, error) { return s.PhasesStateDir() },

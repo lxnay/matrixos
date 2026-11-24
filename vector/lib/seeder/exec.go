@@ -16,8 +16,8 @@ func (s *Seeder) RetryableCmd(tries int, name string, args ...string) error {
 		lastErr = s.runner(&runner.Cmd{
 			Name:   name,
 			Args:   args,
-			Stdout: s.stdout,
-			Stderr: s.stderr,
+			Stdout: s.Stdout(),
+			Stderr: s.Stderr(),
 		})
 		if lastErr == nil {
 			return nil
@@ -89,8 +89,8 @@ func (s *Seeder) cloneRepo(repoPath, gitURL string) error {
 	if err := s.runner(&runner.Cmd{
 		Name:   "git",
 		Args:   gitArgs,
-		Stdout: s.stdout,
-		Stderr: s.stderr,
+		Stdout: s.Stdout(),
+		Stderr: s.Stderr(),
 	}); err != nil {
 		return fmt.Errorf("git clone failed: %w", err)
 	}
@@ -110,7 +110,7 @@ func (s *Seeder) gitCloneArgs() ([]string, error) {
 
 // runMakeInDir runs ./make.sh inside the given directory.
 func (s *Seeder) runMakeInDir(dir string) error {
-	cmd := &runner.Cmd{Name: "./make.sh", Stdout: s.stdout, Stderr: s.stderr}
+	cmd := &runner.Cmd{Name: "./make.sh", Stdout: s.Stdout(), Stderr: s.Stderr()}
 	cmd.Dir = dir
 	return s.runner(cmd)
 }

@@ -1090,4 +1090,20 @@ func TestSeedsParallelUsedWhenConfigured(t *testing.T) {
 	if len(executed) != 1 || executed[0] != "00-bedrock" {
 		t.Errorf("Expected [00-bedrock], got %v", executed)
 	}
+
+	// Verify runSeeds() closed worker cgroup FDs even when invoked directly
+	// without RunWithGuard.
+	fdEntries, fdErr := os.ReadDir("/proc/self/fd")
+	if fdErr == nil {
+		cgRoot := cmd.cgroupRoot
+		if resolved, err := filepath.EvalSymlinks(cgRoot); err == nil {
+			cgRoot = resolved
+		}
+		cgPrefix := cgRoot + string(os.PathSeparator)
+		for _, e := range fdEntries {
+			if target, lerr := os.Readlink(filepath.Join("/proc/self/fd", e.Name())); lerr == nil && strings.HasPrefix(target, cgPrefix) {
+				t.Errorf("runSeeds() leaked open cgroup FD %s -> %s", e.Name(), target)
+			}
+		}
+	}
 }

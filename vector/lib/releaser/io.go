@@ -1,14 +1,15 @@
 package releaser
 
-import (
-	"fmt"
-	"io"
-)
+import "io"
 
-func (r *Releaser) SetStdout(w io.Writer) { r.stdout = w }
-func (r *Releaser) SetStderr(w io.Writer) { r.stderr = w }
-func (r *Releaser) Stdout() io.Writer     { return r.stdout }
-func (r *Releaser) Stderr() io.Writer     { return r.stderr }
+// SetStderr replaces the writer used for warnings and errors and propagates
+// it to the embedded QA validator.
+func (r *Releaser) SetStderr(w io.Writer) {
+	r.IO.SetStderr(w)
+	if r.qa != nil {
+		r.qa.SetStderr(w)
+	}
+}
 
 func (r *Releaser) SetChrootDir(dir string) { r.chrootDir = dir }
 func (r *Releaser) ChrootDir() string       { return r.chrootDir }
@@ -25,15 +26,3 @@ func (r *Releaser) ImageDir() string { return r.imageDir }
 
 func (r *Releaser) SetRef(ref string) { r.ref = ref }
 func (r *Releaser) Ref() string       { return r.ref }
-
-func (r *Releaser) Print(format string, args ...any) {
-	fmt.Fprintf(r.stdout, format, args...)
-}
-
-func (r *Releaser) PrintWarning(format string, args ...any) {
-	fmt.Fprintf(r.stderr, format, args...)
-}
-
-func (r *Releaser) PrintError(format string, args ...any) {
-	fmt.Fprintf(r.stderr, format, args...)
-}

@@ -103,6 +103,9 @@ func (r *Releaser) MaybeOstreeInit() error {
 		return err
 	}
 
+	unlock := ostree.LockRepo(repoDir)
+	defer unlock()
+
 	objectsDir := filepath.Join(repoDir, "objects")
 	if filesystems.DirectoryExists(objectsDir) {
 		r.Print("ostree repository %s already present.\n", repoDir)
@@ -221,6 +224,15 @@ func (r *Releaser) Release(opts CommitOptions) error {
 	if err := filesystems.NormalizeTimestamps(r.imageDir, timeZero); err != nil {
 		return err
 	}
+
+	// Serialize ostree repository mutations (commit, prune, delta, summary)
+	// across parallel release workers targeting the same repository.
+	repoDir, err := r.ostree.RepoDir()
+	if err != nil {
+		return err
+	}
+	unlock := ostree.LockRepo(repoDir)
+	defer unlock()
 
 	// Build and run the ostree commit.
 	gpgArgs, err := r.ostree.GpgArgs()

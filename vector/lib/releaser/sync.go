@@ -100,8 +100,8 @@ func (r *Releaser) SyncFilesystem() error {
 	}
 
 	opts := filesystems.CheckHardlinkPreservationOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	return filesystems.CheckHardlinkPreservation(r.chrootDir, r.imageDir, opts)
 }

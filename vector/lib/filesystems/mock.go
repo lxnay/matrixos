@@ -1,5 +1,10 @@
 package filesystems
 
+import "io"
+
+// Compile-time interface check.
+var _ IFsenc = (*MockFsenc)(nil)
+
 // MockFsenc implements IFsenc for testing.
 // Only the fields/methods relevant to each test need to be configured;
 // everything else returns safe zero values.
@@ -10,11 +15,13 @@ type MockFsenc struct {
 	EncryptionKeyErr       error
 	EncryptedRootFsName_   string
 	EncryptedRootFsNameErr error
-	OsName_                string
-	OsNameErr              error
 	ValidateLuksErr        error
 	LuksEncryptErr         error
 }
+
+func (m *MockFsenc) SetStdout(io.Writer) {}
+
+func (m *MockFsenc) SetStderr(io.Writer) {}
 
 func (m *MockFsenc) Cleanup() {}
 
@@ -28,10 +35,6 @@ func (m *MockFsenc) EncryptionKey() (string, error) {
 
 func (m *MockFsenc) EncryptedRootFsName() (string, error) {
 	return m.EncryptedRootFsName_, m.EncryptedRootFsNameErr
-}
-
-func (m *MockFsenc) OsName() (string, error) {
-	return m.OsName_, m.OsNameErr
 }
 
 func (m *MockFsenc) LuksEncrypt(devicePath, desiredLuksDevice string) error {

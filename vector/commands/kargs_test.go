@@ -23,8 +23,8 @@ func newTestKargsCommand(
 	cmd.cfg = cfg
 	cmd.StartUI()
 	if outBuf != nil {
-		cmd.printer = newStyledWriter(outBuf, "", "", "", false)
-		cmd.errPrinter = newStyledWriter(outBuf, "", "", "", false)
+		cmd.printer = newStyledWriter(outBuf, nil, "", "", "", false)
+		cmd.errPrinter = newStyledWriter(outBuf, nil, "", "", "", false)
 	}
 	cmd.run = runner
 	if err := cmd.parseArgs(args); err != nil {
@@ -479,8 +479,8 @@ func TestKargsPrintAllEntries(t *testing.T) {
 	cmd.StartUI()
 	cmd.run = runner
 	var buf bytes.Buffer
-	cmd.printer = newStyledWriter(&buf, "", "", "", false)
-	cmd.errPrinter = newStyledWriter(&buf, "", "", "", false)
+	cmd.printer = newStyledWriter(&buf, nil, "", "", "", false)
+	cmd.errPrinter = newStyledWriter(&buf, nil, "", "", "", false)
 
 	err := cmd.printAllEntries([]string{"/boot/loader/entries/ostree-1.conf"})
 	if err != nil {

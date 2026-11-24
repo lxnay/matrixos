@@ -207,8 +207,8 @@ func TestChroot(t *testing.T) {
 		im := newTestImager(cfg, &ostree.MockOstree{})
 		im.chrootRunner = mr.ChrootRun
 		im.rootfs = "/test-rootfs"
-		im.stdout = &stdout
-		im.stderr = &stderr
+		im.SetStdout(&stdout)
+		im.SetStderr(&stderr)
 
 		err := im.chroot(nil, "/bin/echo", nil)
 		if err != nil {

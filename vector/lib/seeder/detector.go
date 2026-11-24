@@ -56,14 +56,7 @@ func (d *SeederDetector) Stderr() io.Writer { return d.stderr }
 
 // configItem retrieves a non-empty config string or returns an error.
 func (d *SeederDetector) configItem(key string) (string, error) {
-	v, err := d.cfg.GetItem(key)
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "", fmt.Errorf("invalid %s", key)
-	}
-	return v, nil
+	return config.GetRequiredItem(d.cfg, key)
 }
 
 // Detect scans the seeders directory and returns all valid seeders
@@ -189,11 +182,6 @@ func (d *SeederDetector) Detect(skip, only SeederFilterFunc) ([]SeederInfo, erro
 	return seeders, nil
 }
 
-// SeederExecToDir returns the directory containing the given seeder executable.
-func SeederExecToDir(execPath string) string {
-	return filepath.Dir(execPath)
-}
-
 // SeederExecToName returns the seeder name (directory basename) for the given executable path.
 func SeederExecToName(execPath string) string {
 	return filepath.Base(filepath.Dir(execPath))
@@ -205,11 +193,6 @@ func SeederNameWithoutOrderPrefix(name string) string {
 		return name[idx+1:]
 	}
 	return name
-}
-
-// SeederChrootDirToName returns the seeder name from a chroot directory path.
-func SeederChrootDirToName(chrootDir string) string {
-	return filepath.Base(chrootDir)
 }
 
 // checkExecutable verifies that path exists and has at least one execute permission bit set.

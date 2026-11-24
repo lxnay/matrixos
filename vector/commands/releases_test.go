@@ -304,16 +304,6 @@ func TestReleasesOnlyFilterNil(t *testing.T) {
 	}
 }
 
-// --- chrootDirForImageDir ---
-
-func TestChrootDirForImageDir(t *testing.T) {
-	got := chrootDirForImageDir("/mnt/chroots/bedrock-20260228")
-	want := "/mnt/chroots/bedrock-20260228.ostree_rootfs"
-	if got != want {
-		t.Errorf("chrootDirForImageDir: got %q, want %q", got, want)
-	}
-}
-
 // --- No seeders found ---
 
 func TestReleasesNoSeedersFound(t *testing.T) {

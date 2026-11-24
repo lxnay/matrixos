@@ -216,7 +216,7 @@ func TestPrepareFilesystemHierarchyEdgeCases(t *testing.T) {
 
 		cfg := &config.MockConfig{
 			Items: map[string][]string{
-				"Releaser.ReadOnlyVdb": {RwVdbPath},
+				"Releaser.ReadOnlyVdb": {"/usr/var-db-pkg"},
 				"Imager.EfiRoot":       {"/efi"},
 			},
 		}
@@ -226,6 +226,8 @@ func TestPrepareFilesystemHierarchyEdgeCases(t *testing.T) {
 		}
 		if err := o.PrepareFilesystemHierarchy(imageDir); err == nil {
 			t.Error("Expected error for invalid home symlink")
+		} else if !strings.Contains(err.Error(), "home symlink invalid") {
+			t.Errorf("Expected 'home symlink invalid' error, got: %v", err)
 		}
 	})
 }
@@ -262,11 +264,12 @@ func TestValidateFilesystemHierarchy(t *testing.T) {
 				os.MkdirAll(filepath.Join(tempDir, "usr"), 0755)
 			}
 
-			// Just create some dummy targets
-			dummyTarget := filepath.Join(tempDir, "dummy_"+strings.ReplaceAll(d, "/", "_"))
+			// Create in-rootfs target directories and chroot-confined symlinks.
+			dummyRel := "dummy_" + strings.ReplaceAll(d, "/", "_")
+			dummyTarget := filepath.Join(tempDir, dummyRel)
 			os.MkdirAll(dummyTarget, 0755)
 
-			if err := os.Symlink(dummyTarget, linkPath); err != nil {
+			if err := os.Symlink("/"+dummyRel, linkPath); err != nil {
 				t.Fatalf("failed to create symlink %s: %v", linkPath, err)
 			}
 		}
@@ -306,6 +309,76 @@ func TestValidateFilesystemHierarchy(t *testing.T) {
 		err := o.ValidateFilesystemHierarchy(tempDir)
 		if err == nil {
 			t.Error("expected error when directories are not symlinks, got nil")
+		}
+	})
+
+	t.Run("RejectsSymlinkEscapingToHost", func(t *testing.T) {
+		rootfs := t.TempDir()
+		for _, d := range []string{"var/home", "usr/opt", "var/roothome", "var/srv", "var/usrlocal"} {
+			if err := os.MkdirAll(filepath.Join(rootfs, d), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Mkdir(filepath.Join(rootfs, "tmp"), os.ModeSticky|0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(rootfs, "tmp"), os.ModeSticky|0o777); err != nil {
+			t.Fatal(err)
+		}
+		// /home points to /etc which exists on host, but NOT inside rootfs.
+		if err := os.Symlink("/etc", filepath.Join(rootfs, "home")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("usr/opt", filepath.Join(rootfs, "opt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("var/roothome", filepath.Join(rootfs, "root")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("var/srv", filepath.Join(rootfs, "srv")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../var/usrlocal", filepath.Join(rootfs, "usr", "local")); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := o.ValidateFilesystemHierarchy(rootfs); err == nil {
+			t.Fatal("ValidateFilesystemHierarchy falsely accepted /home -> /etc by resolving against host /etc")
+		}
+	})
+
+	t.Run("AcceptsAbsoluteInRootfsSymlinkMissingOnHost", func(t *testing.T) {
+		rootfs := t.TempDir()
+		for _, d := range []string{"unique-ostree-home", "usr/opt", "var/roothome", "var/srv", "var/usrlocal"} {
+			if err := os.MkdirAll(filepath.Join(rootfs, d), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Mkdir(filepath.Join(rootfs, "tmp"), os.ModeSticky|0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(rootfs, "tmp"), os.ModeSticky|0o777); err != nil {
+			t.Fatal(err)
+		}
+		// Absolute in-chroot symlink pointing to a directory inside rootfs that does not exist on host.
+		if err := os.Symlink("/unique-ostree-home", filepath.Join(rootfs, "home")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("usr/opt", filepath.Join(rootfs, "opt")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("var/roothome", filepath.Join(rootfs, "root")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("var/srv", filepath.Join(rootfs, "srv")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../var/usrlocal", filepath.Join(rootfs, "usr", "local")); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := o.ValidateFilesystemHierarchy(rootfs); err != nil {
+			t.Fatalf("ValidateFilesystemHierarchy rejected valid absolute in-rootfs symlink: %v", err)
 		}
 	})
 }

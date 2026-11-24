@@ -1170,3 +1170,33 @@ func TestUpgradeNotRoot(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 }
+
+func TestUpgradeDeploymentRoot_UsesSerialNotIndex(t *testing.T) {
+	cmd := &UpgradeCommand{}
+	cmd.ot = &ostree.MockOstree{
+		Root_: "/sysroot",
+		Deployments: []ostree.Deployment{
+			{Checksum: "bbb", Stateroot: "matrixos", Index: 0, Serial: 0, Pending: true},
+			{Checksum: "aaa", Stateroot: "matrixos", Index: 1, Serial: 0, Booted: true},
+			{Checksum: "ccc", Stateroot: "matrixos", Index: 2, Serial: 5, Rollback: true},
+		},
+	}
+
+	gotA, err := cmd.deploymentRoot("aaa")
+	if err != nil {
+		t.Fatalf("deploymentRoot(aaa): %v", err)
+	}
+	wantA := "/sysroot/ostree/deploy/matrixos/deploy/aaa.0"
+	if gotA != wantA {
+		t.Errorf("deploymentRoot(aaa) = %q, want %q (must use Serial, not Index)", gotA, wantA)
+	}
+
+	gotC, err := cmd.deploymentRoot("ccc")
+	if err != nil {
+		t.Fatalf("deploymentRoot(ccc): %v", err)
+	}
+	wantC := "/sysroot/ostree/deploy/matrixos/deploy/ccc.5"
+	if gotC != wantC {
+		t.Errorf("deploymentRoot(ccc) = %q, want %q (must use Serial, not Index)", gotC, wantC)
+	}
+}

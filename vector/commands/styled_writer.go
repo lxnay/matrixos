@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"regexp"
@@ -19,6 +20,18 @@ var (
 	globalLogMu   sync.Mutex
 	globalLogDest io.Writer
 )
+
+// termState coordinates destination writes and TTY \r-overwrite state across
+// styledWriter instances that share the same underlying terminal.
+type termState struct {
+	mu           sync.Mutex
+	hasOverwrite bool
+}
+
+// stdTermState is shared by all styledWriter instances writing to os.Stdout or
+// os.Stderr so parallel workers and stdout/stderr streams never interleave
+// writes or glue complete lines onto an active \r progress line.
+var stdTermState = &termState{}
 
 // SetGlobalLogWriter sets a process-wide log writer that every
 // subsequently created styledWriter will tee ANSI-stripped output to.
@@ -44,27 +57,34 @@ func ClearGlobalLogWriter() {
 //   - When writing to a non-terminal (e.g. a log file), \r segments and ANSI
 //     escape sequences are silently stripped so the output stays clean.
 type styledWriter struct {
-	mu           sync.Mutex
-	dest         io.Writer
-	logDest      io.Writer // optional secondary writer for log capture
-	prefix       string    // already styled prefix string (e.g. icon + label)
-	style        string    // ANSI escape applied to the line body
-	reset        string    // ANSI reset sequence
-	buf          []byte    // partial-line accumulator
-	isTTY        bool      // whether dest is a terminal
-	hasOverwrite bool      // TTY-only: an overwrite line is currently displayed
+	mu      sync.Mutex
+	dest    io.Writer
+	term    *termState // shared lock + TTY overwrite state for dest
+	logDest io.Writer  // optional secondary writer for log capture
+	prefix  string     // already styled prefix string (e.g. icon + label)
+	style   string     // ANSI escape applied to the line body
+	reset   string     // ANSI reset sequence
+	buf     []byte     // partial-line accumulator
+	isTTY   bool       // whether dest is a terminal
 }
 
 // newStyledWriter creates a writer that prefixes every complete line with
-// style+prefix and appends a reset sequence.  When isTTY is false, incoming
-// ANSI escape sequences and \r-based overwrites are stripped before output.
-func newStyledWriter(dest io.Writer, prefix, style, reset string, isTTY bool) *styledWriter {
+// style+prefix and appends a reset sequence. Writes and TTY \r-overwrite state
+// are coordinated through term; if term is nil, an isolated termState is used.
+// When isTTY is false, incoming ANSI escape sequences and \r-based overwrites
+// are stripped before output.
+func newStyledWriter(dest io.Writer, term *termState, prefix, style, reset string, isTTY bool) *styledWriter {
 	globalLogMu.Lock()
 	lw := globalLogDest
 	globalLogMu.Unlock()
 
+	if term == nil {
+		term = &termState{}
+	}
+
 	return &styledWriter{
 		dest:    dest,
+		term:    term,
 		logDest: lw,
 		prefix:  prefix,
 		style:   style,
@@ -87,10 +107,10 @@ func (w *styledWriter) writeToLog(content string) {
 	if w.logDest == nil {
 		return
 	}
-	_, _ = io.WriteString(
-		w.logDest,
-		ansiStripRe.ReplaceAllString(content, ""),
-	)
+	stripped := ansiStripRe.ReplaceAllString(content, "")
+	globalLogMu.Lock()
+	_, _ = io.WriteString(w.logDest, stripped)
+	globalLogMu.Unlock()
 }
 
 // Write implements io.Writer.  It buffers partial lines and flushes each
@@ -105,53 +125,69 @@ func (w *styledWriter) Write(p []byte) (int, error) {
 	w.buf = append(w.buf, p...)
 	total := len(p)
 
+	if err := w.drainBufLocked(true); err != nil {
+		return total, err
+	}
+
+	return total, nil
+}
+
+// drainBufLocked parses all complete lines and standalone \r overwrite segments
+// currently in w.buf. When stopOnErr is true, it returns immediately on the
+// first destination write error (preserving io.Writer semantics). When
+// stopOnErr is false (used by flushLocked), it drains remaining complete lines
+// so logDest receives properly parsed output even after an earlier dest error.
+func (w *styledWriter) drainBufLocked(stopOnErr bool) error {
 	for {
-		nlIdx := indexByte(w.buf, '\n')
-		crIdx := indexByte(w.buf, '\r')
+		nlIdx := bytes.IndexByte(w.buf, '\n')
+		crIdx := bytes.IndexByte(w.buf, '\r')
 
 		if nlIdx < 0 && crIdx < 0 {
-			break
+			return nil
 		}
 
-		// Treat \r\n as a regular newline.
-		if crIdx >= 0 && crIdx+1 < len(w.buf) && w.buf[crIdx+1] == '\n' {
-			line := string(w.buf[:crIdx])
-			w.buf = w.buf[crIdx+2:]
-			if err := w.writeCompleteLine(line); err != nil {
-				return total, err
-			}
-			continue
-		}
-
-		// Standalone \r – the process is overwriting the current line
-		// (e.g. a progress bar).  However, if \r is the very last byte
-		// in the buffer we cannot tell yet whether a \n follows (making
-		// it a \r\n pair).  Keep it buffered and wait for the next Write.
+		// If \r appears before \n (or there is no \n), inspect the full
+		// contiguous run of \r bytes starting at crIdx so \r\r\n and trailing
+		// \r\r before Flush do not prematurely discard line content.
 		if crIdx >= 0 && (nlIdx < 0 || crIdx < nlIdx) {
-			if crIdx == len(w.buf)-1 {
-				break // wait for more data
+			crEnd := crIdx
+			for crEnd < len(w.buf) && w.buf[crEnd] == '\r' {
+				crEnd++
 			}
+			// Run reaches end of buffer: wait for more data to know whether
+			// \n follows (making it a line terminator) or overwrite text follows.
+			if crEnd == len(w.buf) {
+				return nil
+			}
+			// Contiguous \r run immediately followed by \n (e.g. \r\n or \r\r\n).
+			if w.buf[crEnd] == '\n' {
+				line := string(w.buf[:crIdx])
+				w.buf = w.buf[crEnd+1:]
+				if err := w.writeCompleteLine(line); err != nil && stopOnErr {
+					return err
+				}
+				continue
+			}
+			// Standalone \r run followed by overwriting text (e.g. progress bar).
 			content := string(w.buf[:crIdx])
-			w.buf = w.buf[crIdx+1:]
+			w.buf = w.buf[crEnd:]
 
 			if w.isTTY && strings.TrimSpace(content) != "" {
-				if err := w.writeOverwriteLine(content); err != nil {
-					return total, err
+				if err := w.writeOverwriteLine(content); err != nil && stopOnErr {
+					return err
 				}
 			}
 			// In non-TTY mode the overwritten segment is simply discarded.
 			continue
 		}
 
-		// Regular newline.
+		// Regular newline before any \r.
 		line := string(w.buf[:nlIdx])
 		w.buf = w.buf[nlIdx+1:]
-		if err := w.writeCompleteLine(line); err != nil {
-			return total, err
+		if err := w.writeCompleteLine(line); err != nil && stopOnErr {
+			return err
 		}
 	}
-
-	return total, nil
 }
 
 // cleanLine strips ANSI sequences from line when not writing to a TTY.
@@ -162,36 +198,53 @@ func (w *styledWriter) cleanLine(line string) string {
 	return ansiStripRe.ReplaceAllString(line, "")
 }
 
+// writeDestComplete writes a complete (or flushed) line to w.dest under the
+// shared terminal lock, atomically clearing any active TTY \r overwrite first.
+func (w *styledWriter) writeDestComplete(s string) error {
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
+	if w.isTTY && w.term.hasOverwrite {
+		s = "\r\033[2K" + s
+		w.term.hasOverwrite = false
+	}
+	_, err := io.WriteString(w.dest, s)
+	return err
+}
+
+// clearOverwrite clears any active TTY \r overwrite line on the shared terminal.
+func (w *styledWriter) clearOverwrite() {
+	if !w.isTTY {
+		return
+	}
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
+	if w.term.hasOverwrite {
+		_, _ = io.WriteString(w.dest, "\r\033[2K")
+		w.term.hasOverwrite = false
+	}
+}
+
 // writeCompleteLine formats and writes a single finished line (after \n) to
 // the underlying destination, clearing any in-progress overwrite first.
 func (w *styledWriter) writeCompleteLine(line string) error {
-	// If we previously wrote an overwrite line, clear it first.
-	if w.isTTY && w.hasOverwrite {
-		_, _ = io.WriteString(w.dest, "\r\033[2K")
-		w.hasOverwrite = false
-	}
-
 	line = w.cleanLine(line)
 
 	// Preserve blank lines without the prefix to keep output tidy.
 	if strings.TrimSpace(line) == "" {
 		w.writeToLog("\n")
-		_, err := fmt.Fprintln(w.dest)
-		return err
+		return w.writeDestComplete("\n")
 	}
 
 	// Plain mode: no prefix/style decoration.
 	if w.prefix == "" {
 		plain := fmt.Sprintf("%s\n", line)
 		w.writeToLog(plain)
-		_, err := fmt.Fprintf(w.dest, "%s\n", line)
-		return err
+		return w.writeDestComplete(plain)
 	}
 
 	formatted := fmt.Sprintf("%s%s %s%s\n", w.style, w.prefix, line, w.reset)
 	w.writeToLog(formatted)
-	_, err := io.WriteString(w.dest, formatted)
-	return err
+	return w.writeDestComplete(formatted)
 }
 
 // writeOverwriteLine writes a temporary (no trailing newline) line to the
@@ -204,8 +257,10 @@ func (w *styledWriter) writeOverwriteLine(line string) error {
 	} else {
 		formatted = fmt.Sprintf("\r\033[2K%s%s %s%s", w.style, w.prefix, line, w.reset)
 	}
+	w.term.mu.Lock()
+	defer w.term.mu.Unlock()
 	_, err := io.WriteString(w.dest, formatted)
-	w.hasOverwrite = true
+	w.term.hasOverwrite = true
 	return err
 }
 
@@ -229,18 +284,21 @@ func (w *styledWriter) FlushInline() {
 // When addNewline is true the output ends with \n; otherwise the cursor
 // stays at the end of the line.
 func (w *styledWriter) flushLocked(addNewline bool) {
-	if w.isTTY && w.hasOverwrite {
-		_, _ = io.WriteString(w.dest, "\r\033[2K")
-		w.hasOverwrite = false
-	}
+	// Drain any complete lines or \r overwrite segments left buffered after an
+	// earlier dest write error so logDest and dest never receive raw unparsed chunks.
+	_ = w.drainBufLocked(false)
 
 	if len(w.buf) == 0 {
+		w.clearOverwrite()
 		return
 	}
 
-	line := w.cleanLine(string(w.buf))
+	// Strip any trailing \r left buffered by Write() while waiting to see
+	// whether a following \n would form \r\n.
+	line := w.cleanLine(string(bytes.TrimRight(w.buf, "\r")))
 	w.buf = nil
 	if strings.TrimSpace(line) == "" {
+		w.clearOverwrite()
 		return
 	}
 
@@ -252,21 +310,11 @@ func (w *styledWriter) flushLocked(addNewline bool) {
 	if w.prefix == "" {
 		plain := fmt.Sprintf("%s%s", line, nl)
 		w.writeToLog(plain)
-		_, _ = fmt.Fprintf(w.dest, "%s%s", line, nl)
+		_ = w.writeDestComplete(plain)
 		return
 	}
 
 	formatted := fmt.Sprintf("%s%s %s%s%s", w.style, w.prefix, line, w.reset, nl)
 	w.writeToLog(formatted)
-	_, _ = io.WriteString(w.dest, formatted)
-}
-
-// indexByte returns the index of the first occurrence of b in data, or -1.
-func indexByte(data []byte, b byte) int {
-	for i, v := range data {
-		if v == b {
-			return i
-		}
-	}
-	return -1
+	_ = w.writeDestComplete(formatted)
 }

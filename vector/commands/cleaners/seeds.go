@@ -1,12 +1,12 @@
 package cleaners
 
 import (
+	"cmp"
 	"fmt"
-	"io"
-	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/seeder"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -17,45 +17,37 @@ var (
 )
 
 func sortChrootDirs(dirs []string) []string {
-	slices.SortFunc(dirs, func(a, b string) int {
-		matchesA := ChrootDirNamePattern.FindStringSubmatch(a)
-		matchesB := ChrootDirNamePattern.FindStringSubmatch(b)
-		if len(matchesA) < 3 || len(matchesB) < 3 {
+	slices.SortStableFunc(dirs, func(a, b string) int {
+		matchesA := ChrootDirNamePattern.FindStringSubmatch(filepath.Base(a))
+		matchesB := ChrootDirNamePattern.FindStringSubmatch(filepath.Base(b))
+		hasA := len(matchesA) >= 3
+		hasB := len(matchesB) >= 3
+		if !hasA && !hasB {
 			return 0
+		}
+		if !hasA {
+			return -1
+		}
+		if !hasB {
+			return 1
 		}
 		verA, _ := strconv.Atoi(matchesA[2])
 		verB, _ := strconv.Atoi(matchesB[2])
-		if verA != verB {
-			return verA - verB
-		}
-		return 0
+		return cmp.Compare(verA, verB)
 	})
 	return dirs
 }
 
 type SeedsCleaner struct {
-	cfg    config.IConfig
-	stdout io.Writer
-	stderr io.Writer
+	baseCleaner
 }
 
 func (c *SeedsCleaner) Name() string {
 	return "seeds"
 }
 
-func (c *SeedsCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
-	c.cfg = cfg
-	c.stdout = stdout
-	c.stderr = stderr
-	return nil
-}
-
 func (c *SeedsCleaner) isDryRun() (bool, error) {
-	val, err := c.cfg.GetItem("SeedsCleaner.DryRun")
-	if err != nil {
-		return false, err
-	}
-	return val == "true", nil
+	return c.isDryRunKey("SeedsCleaner.DryRun")
 }
 
 func (c *SeedsCleaner) MinAmountOfSeeds() (int, error) {
@@ -67,33 +59,10 @@ func (c *SeedsCleaner) MinAmountOfSeeds() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid SeedsCleaner.MinAmountOfSeeds %d: must be non-negative", amount)
+	}
 	return amount, nil
-}
-
-func filterChrootEntry(regex *regexp.Regexp, path string, entry os.DirEntry, stdout, stderr io.Writer) bool {
-	stat, err := os.Lstat(path)
-	if err != nil {
-		fmt.Fprintf(stderr, "Failed to stat image %s: %v\n", path, err)
-		return false
-	}
-
-	// Only accept files.
-	if stat.IsDir() {
-		fmt.Fprintf(stdout, "Path %s is a directory. Skipping.\n", path)
-		return false
-	}
-
-	mode := stat.Mode()
-	isFile := mode.IsRegular()
-	if !isFile {
-		fmt.Fprintf(stdout, "Path %s is not a regular file. Ignoring this file.\n", path)
-		return false
-	}
-
-	name := entry.Name()
-	// Search for a %Y%m%d pattern in the file name. Also, file names have to then have an
-	// .img.* pattern too and only some extensions are allowed. So, putting everything together:
-	return regex.Match([]byte(name))
 }
 
 func (c *SeedsCleaner) Run() error {
@@ -211,6 +180,10 @@ func (c *SeedsCleaner) Run() error {
 			continue
 		}
 		if stat.Mode().IsRegular() {
+			if dryRun {
+				fmt.Fprintf(c.stdout, "Dry run mode enabled. Not removing %s ...\n", path)
+				continue
+			}
 			fmt.Fprintf(c.stderr, "Path %s is a regular file. Removing ...\n", path)
 			if err := os.Remove(path); err != nil {
 				errors = append(errors, err)
@@ -228,6 +201,12 @@ func (c *SeedsCleaner) Run() error {
 		if !filesystems.DirectoryExists(path) {
 			errors = append(errors, fmt.Errorf("directory %s does not exist", path))
 			fmt.Fprintf(c.stderr, "Directory %s does not exist. Skipping.\n", path)
+			continue
+		}
+
+		if err := filesystems.CheckDirIsRoot(path); err != nil {
+			errors = append(errors, err)
+			fmt.Fprintf(c.stderr, "%v\n", err)
 			continue
 		}
 

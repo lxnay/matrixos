@@ -1,22 +1,23 @@
 package imager
 
-import (
-	"fmt"
-	"io"
-	"os"
+import "matrixos/vector/lib/worker"
+
+// Compile-time interface checks.
+var (
+	_ Bootloader = (*MockBootloader)(nil)
+	_ IImager    = (*MockImager)(nil)
 )
 
 // MockBootloader implements Bootloader for testing.
 type MockBootloader struct {
-	ConfigureCalled         bool
-	ConfigureErr            error
-	InstallCalled           bool
-	InstallErr              error
-	ConfigureMemtestCalled  bool
-	ConfigureMemtestBin     string
-	ConfigureMemtestErr     error
-	ConfigureVmtestCalled   bool
-	ConfigureVmtestErr      error
+	ConfigureCalled        bool
+	ConfigureErr           error
+	InstallCalled          bool
+	InstallErr             error
+	ConfigureMemtestCalled bool
+	ConfigureMemtestErr    error
+	ConfigureVmtestCalled  bool
+	ConfigureVmtestErr     error
 }
 
 func (m *MockBootloader) Configure() error {
@@ -33,9 +34,8 @@ func (m *MockBootloader) BootArgs() ([]string, error) {
 	return []string{}, nil
 }
 
-func (m *MockBootloader) ConfigureMemtest(memtestBin string) error {
+func (m *MockBootloader) ConfigureMemtest() error {
 	m.ConfigureMemtestCalled = true
-	m.ConfigureMemtestBin = memtestBin
 	return m.ConfigureMemtestErr
 }
 
@@ -48,6 +48,8 @@ func (m *MockBootloader) ConfigureVmtest() error {
 // Only the fields/methods relevant to each test need to be configured;
 // everything else returns safe zero values.
 type MockImager struct {
+	worker.IO
+
 	Ref_ string
 
 	// Track calls
@@ -58,34 +60,6 @@ type MockImager struct {
 	// ExecuteWithImageLock support
 	ExecuteWithImageLockCalled bool
 	ExecuteWithImageLockErr    error
-
-	// I/O writers for Print methods
-	stdout io.Writer
-	stderr io.Writer
-}
-
-func (m *MockImager) SetStdout(w io.Writer) { m.stdout = w }
-func (m *MockImager) SetStderr(w io.Writer) { m.stderr = w }
-func (m *MockImager) Print(format string, a ...any) {
-	w := m.stdout
-	if w == nil {
-		w = os.Stdout
-	}
-	fmt.Fprintf(w, format, a...)
-}
-func (m *MockImager) PrintWarning(format string, a ...any) {
-	w := m.stderr
-	if w == nil {
-		w = os.Stderr
-	}
-	fmt.Fprintf(w, format, a...)
-}
-func (m *MockImager) PrintError(format string, a ...any) {
-	w := m.stderr
-	if w == nil {
-		w = os.Stderr
-	}
-	fmt.Fprintf(w, format, a...)
 }
 
 func (m *MockImager) SetRef(ref string)              { m.Ref_ = ref }

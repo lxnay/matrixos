@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,10 +35,8 @@ func defaultKargsRunner() *kargsRunner {
 type KargsCommand struct {
 	BaseCommand
 	UI
-	fs   *flag.FlagSet
-	sub  string
-	args []string
-	run  *kargsRunner
+	subcommandRouter
+	run *kargsRunner
 }
 
 // NewKargsCommand creates a new KargsCommand.
@@ -52,13 +49,9 @@ func (c *KargsCommand) Name() string {
 	return "kargs"
 }
 
-// Init parses flags, loads config and prepares the UI.
+// Init parses flags and prepares the UI.
 func (c *KargsCommand) Init(args []string) error {
 	if err := c.parseArgs(args); err != nil {
-		return err
-	}
-
-	if err := c.initClientConfig(); err != nil {
 		return err
 	}
 
@@ -71,30 +64,11 @@ func (c *KargsCommand) Init(args []string) error {
 
 // parseArgs parses the command-line arguments without initializing config.
 func (c *KargsCommand) parseArgs(args []string) error {
-	c.fs = flag.NewFlagSet("kargs", flag.ContinueOnError)
-	c.fs.Usage = func() {
-		fmt.Printf("Usage: vector %s <subcommand> <karg> [<karg>...]\n", c.Name())
-		var scs []string
-		for k := range c.subcommands() {
-			scs = append(scs, k)
-		}
-		slices.Sort(scs)
-		fmt.Printf("Subcommands: %s\n", strings.Join(scs, ", "))
-		fmt.Println("\nExamples:")
-		fmt.Println("  vector kargs add quiet splash")
-		fmt.Println("  vector kargs rm quiet splash")
-	}
-	err := c.fs.Parse(args)
-	if err != nil {
-		return err
-	}
-	if c.fs.NArg() < 1 {
-		c.fs.Usage()
-		return fmt.Errorf("no subcommand provided")
-	}
-	c.sub = c.fs.Arg(0)
-	c.args = c.fs.Args()[1:]
-	return nil
+	return c.parseSubcommandArgs(
+		c.Name(), args, c.subcommands(), os.Stdout, "<subcommand> <karg> [<karg>...]",
+		"vector kargs add quiet splash",
+		"vector kargs rm quiet splash",
+	)
 }
 
 func (c *KargsCommand) subcommands() map[string]func() error {
@@ -106,60 +80,41 @@ func (c *KargsCommand) subcommands() map[string]func() error {
 
 // Run dispatches to the appropriate subcommand.
 func (c *KargsCommand) Run() error {
-	scs := c.subcommands()
-	cmd, ok := scs[c.sub]
-	if !ok {
-		return fmt.Errorf("unknown subcommand: %s", c.sub)
+	defer c.FlushPrinters()
+	return c.dispatchSubcommand(c.subcommands())
+}
+
+func (c *KargsCommand) updateEntries(op string, fn func(string, []string) error) error {
+	if len(c.args) == 0 {
+		return fmt.Errorf("%s requires at least one kernel argument", op)
 	}
-	return cmd()
+
+	if err := requireRootFn(c.run.getEuid); err != nil {
+		return err
+	}
+
+	entries, err := c.listBLSEntries()
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := fn(entry, c.args); err != nil {
+			return fmt.Errorf("failed to update %s: %w", filepath.Base(entry), err)
+		}
+	}
+
+	return c.printAllEntries(entries)
 }
 
 // add appends kernel arguments to all BLS configs (if not already present).
 func (c *KargsCommand) add() error {
-	if len(c.args) == 0 {
-		return fmt.Errorf("add requires at least one kernel argument")
-	}
-
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
-	}
-
-	entries, err := c.listBLSEntries()
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if err := c.addKargsToEntry(entry, c.args); err != nil {
-			return fmt.Errorf("failed to update %s: %w", filepath.Base(entry), err)
-		}
-	}
-
-	return c.printAllEntries(entries)
+	return c.updateEntries("add", c.addKargsToEntry)
 }
 
 // rm removes kernel arguments from all BLS configs.
 func (c *KargsCommand) rm() error {
-	if len(c.args) == 0 {
-		return fmt.Errorf("rm requires at least one kernel argument")
-	}
-
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
-	}
-
-	entries, err := c.listBLSEntries()
-	if err != nil {
-		return err
-	}
-
-	for _, entry := range entries {
-		if err := c.rmKargsFromEntry(entry, c.args); err != nil {
-			return fmt.Errorf("failed to update %s: %w", filepath.Base(entry), err)
-		}
-	}
-
-	return c.printAllEntries(entries)
+	return c.updateEntries("rm", c.rmKargsFromEntry)
 }
 
 // listBLSEntries returns all .conf files in the BLS entries directory.

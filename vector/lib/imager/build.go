@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
@@ -28,6 +29,8 @@ type BuildOptions struct {
 // It partitions, formats, mounts, deploys ostree, installs the bootloader,
 // and performs post-processing (productionization, compression, signing).
 func (im *Imager) Build(opts *BuildOptions) error {
+	defer im.Cleanup()
+
 	mountRootfs, err := im.prepareRootfs()
 	if err != nil {
 		return err
@@ -190,17 +193,12 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 		return fmt.Errorf("failed to partition image: %w", err)
 	}
 
-	loop, err := filesystems.NewLoop(imagePath)
+	blockDevice, err := im.attachImageLoop(imagePath, filesystems.NewLoop, func(l *filesystems.Loop) error {
+		return l.Attach()
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create loop device: %w", err)
+		return err
 	}
-	im.trackLoopDevice(loop)
-
-	if err := loop.Attach(); err != nil {
-		return fmt.Errorf("failed to attach image %s as loop device: %w",
-			imagePath, err)
-	}
-	blockDevice := loop.Device
 	im.SetDevicePath(blockDevice)
 	filesystems.DevicesSettle()
 
@@ -220,6 +218,43 @@ func (im *Imager) setupImageFile(efiSize, bootSize, imageSize string) error {
 	im.SetBootDevice(loopPartBoot)
 	im.SetRootDevice(loopPartRoot)
 	return nil
+}
+
+// attachImageLoop creates, tracks, and attaches a loop device for imagePath
+// while holding an in-flight cleanup reservation. The loop device path is
+// captured before releasing the reservation so a concurrent Cleanup() cannot
+// clear it to "" before the caller builds partition device paths.
+func (im *Imager) attachImageLoop(
+	imagePath string,
+	newLoop func(string) (*filesystems.Loop, error),
+	attach func(*filesystems.Loop) error,
+) (string, error) {
+	loop, err := newLoop(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create loop device: %w", err)
+	}
+	if !im.trackLoopDeviceIfOpen(loop) {
+		return "", fmt.Errorf("cleanup already ran; refusing to attach loop device for %s", imagePath)
+	}
+	finishLoopOp := sync.OnceFunc(im.finishTrackedOp)
+	defer finishLoopOp()
+
+	if err := attach(loop); err != nil {
+		return "", fmt.Errorf("failed to attach image %s as loop device: %w",
+			imagePath, err)
+	}
+	if im.cleanupActiveOrRan() {
+		im.trackLoopDevice(loop)
+		finishLoopOp()
+		im.Cleanup()
+		return "", fmt.Errorf("cleanup interrupted loop attach for %s", imagePath)
+	}
+	blockDevice := loop.DevicePath()
+	finishLoopOp()
+	if blockDevice == "" {
+		return "", fmt.Errorf("loop device path is empty for %s", imagePath)
+	}
+	return blockDevice, nil
 }
 
 // setupExistingPartitions configures the build to deploy onto
@@ -261,7 +296,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", fmt.Errorf("unable to get UUID for %s: %w", im.RootDevice(), err)
 	}
 
-	im.trackMount(mountRootfs)
 	if err := im.MountRootfs(mountRootfs); err != nil {
 		return "", fmt.Errorf("failed to mount rootfs: %w", err)
 	}
@@ -271,7 +305,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", err
 	}
 	mountEfifs := filepath.Join(mountRootfs, efiRoot)
-	im.trackMount(mountEfifs)
 	if err := im.MountEfifs(mountEfifs); err != nil {
 		return "", fmt.Errorf("failed to mount EFI: %w", err)
 	}
@@ -281,7 +314,6 @@ func (im *Imager) formatAndMountFilesystems(mountRootfs string) (string, error) 
 		return "", err
 	}
 	mountBootfs := filepath.Join(mountRootfs, bootRoot)
-	im.trackMount(mountBootfs)
 	if err := im.MountBootfs(mountBootfs); err != nil {
 		return "", fmt.Errorf("failed to mount boot: %w", err)
 	}
@@ -472,11 +504,6 @@ func (im *Imager) postImageCreation(releaseVersion string, pkgList []string) err
 func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([]string, error) {
 	var artifacts []string
 
-	productionize, err := im.Productionize()
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine if productionization is enabled: %w", err)
-	}
-
 	// Rename image with release version.
 	versionedImagePath, err := im.BuildImagePathWithReleaseVersion(releaseVersion)
 	if err != nil {
@@ -529,8 +556,7 @@ func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([
 	if compressor != "" {
 		im.Print("Compressing image with %s ...\n", compressor)
 		if err := im.CompressImage(); err != nil {
-			return artifacts, fmt.Errorf(
-				"failed to determine if compression is enabled: %w", err)
+			return artifacts, fmt.Errorf("failed to compress image: %w", err)
 		}
 		compressedImageCreated = true
 
@@ -543,19 +569,17 @@ func (im *Imager) productionizeImage(releaseVersion string, pkgList []string) ([
 		artifacts = append(artifacts, im.ImagePath())
 	}
 
-	if productionize {
-		sha256Paths, err := im.buildSha256sums(compressedImageCreated, qcow2Created)
-		if err != nil {
-			return artifacts, fmt.Errorf("failed to create sha256sums: %w", err)
-		}
-		artifacts = append(artifacts, sha256Paths...)
-
-		gpgArtifacts, err := im.maybeGenerateGpgSignatures(compressedImageCreated, qcow2Created)
-		if err != nil {
-			return artifacts, fmt.Errorf("failed to generate GPG signatures: %w", err)
-		}
-		artifacts = append(artifacts, gpgArtifacts...)
+	sha256Paths, err := im.buildSha256sums(compressedImageCreated, qcow2Created)
+	if err != nil {
+		return artifacts, fmt.Errorf("failed to create sha256sums: %w", err)
 	}
+	artifacts = append(artifacts, sha256Paths...)
+
+	gpgArtifacts, err := im.maybeGenerateGpgSignatures(compressedImageCreated, qcow2Created)
+	if err != nil {
+		return artifacts, fmt.Errorf("failed to generate GPG signatures: %w", err)
+	}
+	artifacts = append(artifacts, gpgArtifacts...)
 
 	return artifacts, nil
 }

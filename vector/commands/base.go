@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"matrixos/vector/lib/config"
-	"matrixos/vector/lib/ostree"
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
+
+	"matrixos/vector/lib/config"
+	"matrixos/vector/lib/filesystems"
+	"matrixos/vector/lib/ostree"
 )
 
 // Prompter provides interactive input prompting with validation.
@@ -17,6 +21,12 @@ type Prompter struct {
 	Stdout  io.Writer
 	Stderr  io.Writer
 	UI      *UI
+	eof     bool
+}
+
+// EOF reports whether the underlying input scanner has reached end-of-file.
+func (p *Prompter) EOF() bool {
+	return p.eof
 }
 
 // flusher is implemented by writers that buffer partial lines (e.g. styledWriter).
@@ -76,6 +86,7 @@ func (p *Prompter) AskInput(prompt, defaultVal string, pattern *regexp.Regexp) (
 				return "", fmt.Errorf("failed to read input: %w", err)
 			}
 			// EOF — use default.
+			p.eof = true
 			return defaultVal, nil
 		}
 		input := strings.TrimSpace(p.Scanner.Text())
@@ -100,6 +111,9 @@ func (p *Prompter) AskConfirm(prompt string) bool {
 	flushWriterInline(p.Stdout)
 
 	if !p.Scanner.Scan() {
+		if p.Scanner.Err() == nil {
+			p.eof = true
+		}
 		return false
 	}
 	response := strings.ToLower(strings.TrimSpace(p.Scanner.Text()))
@@ -156,31 +170,61 @@ func SplitCSV(s string) []string {
 	return result
 }
 
-// makeSkipFilter returns a filter function that returns true for names
-// present in the skip list.  Returns nil when the list is empty.
-func makeSkipFilter(skip []string) func(string) bool {
-	if len(skip) == 0 {
+// makeNameFilter returns a predicate that returns true for names present in
+// the list, or nil when the list is empty.
+func makeNameFilter(names []string) func(string) bool {
+	if len(names) == 0 {
 		return nil
 	}
-	set := make(map[string]bool, len(skip))
-	for _, s := range skip {
+	set := make(map[string]bool, len(names))
+	for _, s := range names {
 		set[s] = true
 	}
 	return func(name string) bool { return set[name] }
+}
+
+// makeSkipFilter returns a filter function that returns true for names
+// present in the skip list.  Returns nil when the list is empty.
+func makeSkipFilter(skip []string) func(string) bool {
+	return makeNameFilter(skip)
 }
 
 // makeOnlyFilter returns a filter function that returns true for names
 // present in the allow list.  Returns nil when the list is empty
 // (meaning all names pass).
 func makeOnlyFilter(only []string) func(string) bool {
-	if len(only) == 0 {
-		return nil
+	return makeNameFilter(only)
+}
+
+// showLocalRefs prints the local ostree refs using printFn.
+func showLocalRefs(ot ostree.IOstree, printFn func(string, ...any)) error {
+	refs, err := ot.LocalRefs()
+	if err != nil {
+		return fmt.Errorf("failed to list local refs: %w", err)
 	}
-	set := make(map[string]bool, len(only))
-	for _, s := range only {
-		set[s] = true
+	printFn("Local refs:\n")
+	for _, r := range refs {
+		printFn("  %s\n", r)
 	}
-	return func(name string) bool { return set[name] }
+	return nil
+}
+
+// showRemoteRefs prints the remote ostree refs using printFn.
+func showRemoteRefs(ot ostree.IOstree, printFn func(string, ...any)) error {
+	refs, err := ot.RemoteRefs()
+	if err != nil {
+		return fmt.Errorf("failed to list remote refs: %w", err)
+	}
+	printFn("Remote refs:\n")
+	for _, r := range refs {
+		printFn("  %s\n", r)
+	}
+	return nil
+}
+
+// configItem retrieves a required non-empty string from c.cfg.
+func (c *BaseCommand) configItem(key string) (string, error) {
+	return config.GetRequiredItem(c.cfg, key)
 }
 
 // initBaseConfig initializes the base configuration for the command.
@@ -259,11 +303,12 @@ func (c *BaseCommand) resolveRefRemote(ref string, warnf func(format string, arg
 	}
 
 	if remoted := ostree.ExtractRemoteFromRef(ref); remoted != "" {
+		origRef := ref
 		remote = remoted
 		ref = ostree.CleanRemoteFromRef(ref)
 		warnf(
 			"WARNING: %s contains the remote reference, using remote=%s and ref=%s\n",
-			ref, remote, ref)
+			origRef, remote, ref)
 
 		overlay := map[string][]string{
 			"Ostree.Remote": {remote},
@@ -307,5 +352,99 @@ func (c *BaseCommand) initGpg() error {
 func (c *BaseCommand) killGpg() {
 	if c.ot != nil {
 		c.ot.KillGpgDaemons()
+	}
+}
+
+// truncateOutputFile creates or truncates an output tracking file to empty.
+func truncateOutputFile(path string) error {
+	if err := os.WriteFile(path, []byte{}, 0644); err != nil {
+		return fmt.Errorf("failed to init %s: %w", path, err)
+	}
+	return nil
+}
+
+// appendLineToFile appends line followed by a newline to an existing output
+// tracking file. It is a no-op when path is empty.
+func appendLineToFile(path, line string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintln(f, line)
+	return err
+}
+
+// appendBytesToFile appends data to path, creating it (0644) if absent.
+func appendBytesToFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.Write(data)
+	return err
+}
+
+// cmdRunner abstracts an *exec.Cmd for testability across interactive commands.
+type cmdRunner interface {
+	Run() error
+	Output() ([]byte, error)
+	SetStdin(r io.Reader)
+	SetStdout(w io.Writer)
+	SetStderr(w io.Writer)
+}
+
+// realCmdRunner wraps a real *exec.Cmd.
+type realCmdRunner struct {
+	cmd *exec.Cmd
+}
+
+func (r *realCmdRunner) Run() error              { return r.cmd.Run() }
+func (r *realCmdRunner) Output() ([]byte, error) { return r.cmd.Output() }
+func (r *realCmdRunner) SetStdin(rd io.Reader)   { r.cmd.Stdin = rd }
+func (r *realCmdRunner) SetStdout(w io.Writer)   { r.cmd.Stdout = w }
+func (r *realCmdRunner) SetStderr(w io.Writer)   { r.cmd.Stderr = w }
+
+func newRealCmdRunner(name string, args ...string) cmdRunner {
+	return &realCmdRunner{cmd: execCommand(name, args...)}
+}
+
+// osRunner holds the common OS-level hooks embedded by interactive command
+// runners (jailbreakRunner, setupOSRunner) so they can be mocked in tests.
+type osRunner struct {
+	execCommand func(name string, args ...string) cmdRunner
+	readFile    func(path string) ([]byte, error)
+	writeFile   func(path string, data []byte, perm os.FileMode) error
+	appendFile  func(path string, data []byte) error
+	mkdirAll    func(path string, perm os.FileMode) error
+	stat        func(path string) (os.FileInfo, error)
+	lstat       func(path string) (os.FileInfo, error)
+	readlink    func(path string) (string, error)
+	removeFile  func(path string) error
+	copyFile    func(src, dst string) error
+	stdin       io.Reader
+	stdout      io.Writer
+	stderr      io.Writer
+}
+
+func defaultOSRunner() osRunner {
+	return osRunner{
+		execCommand: newRealCmdRunner,
+		readFile:    os.ReadFile,
+		writeFile:   os.WriteFile,
+		appendFile:  appendBytesToFile,
+		mkdirAll:    os.MkdirAll,
+		stat:        os.Stat,
+		lstat:       os.Lstat,
+		readlink:    os.Readlink,
+		removeFile:  os.Remove,
+		copyFile:    filesystems.CopyFile,
+		stdin:       os.Stdin,
+		stdout:      os.Stdout,
+		stderr:      os.Stderr,
 	}
 }

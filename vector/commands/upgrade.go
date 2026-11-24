@@ -97,9 +97,8 @@ func (c *UpgradeCommand) Run() error {
 
 	c.prompt = NewPrompter(os.Stdin, c.StdoutWriter(), c.StderrWriter(), &c.UI)
 
-	// Check if we are running as root. If running as user, exit with error.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	oldCommit, ref, err := c.getCurrentState()
@@ -311,12 +310,16 @@ func (c *UpgradeCommand) updateEfiBinaries(commit string) error {
 		switch h.name {
 		case grubEfiBinary:
 			haveGrub = true
-			if err := c.updateGrubDir(newRoot, h.dir, commit); err != nil {
+			if err := c.updateBootloaderBinary(
+				"GRUB", newRoot, "/usr/lib/grub/grub-x86_64.efi.signed", h.dir, grubEfiBinary, commit,
+			); err != nil {
 				return fmt.Errorf("failed to update grub binaries: %w", err)
 			}
 		case systemdBootEfiBinary:
 			haveSystemd = true
-			if err := c.updateSystemdBootDir(newRoot, h.dir, commit); err != nil {
+			if err := c.updateBootloaderBinary(
+				"systemd-boot", newRoot, "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed", h.dir, systemdBootEfiBinary, commit,
+			); err != nil {
 				return fmt.Errorf("failed to update systemd-boot binaries: %w", err)
 			}
 		}
@@ -347,31 +350,21 @@ func (c *UpgradeCommand) deploymentRoot(commit string) (string, error) {
 	for _, dep := range deployments {
 		if dep.Checksum == commit {
 			return ostree.BuildDeploymentRootfs(
-				root, dep.Stateroot, commit, dep.Index,
+				root, dep.Stateroot, commit, dep.Serial,
 			), nil
 		}
 	}
 	return "", fmt.Errorf("deployment not found for commit %s", commit)
 }
 
-func (c *UpgradeCommand) updateGrubDir(newRoot, efiDir, commit string) error {
+func (c *UpgradeCommand) updateBootloaderBinary(label, newRoot, relSrc, efiDir, dstName, commit string) error {
 	c.Printf(
-		"   %sUpdating GRUB in %s%s%s for commit %s%s%s...\n",
-		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
+		"   %sUpdating %s in %s%s%s for commit %s%s%s...\n",
+		c.iconUpdate, label, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
 	)
-	src := filepath.Join(newRoot, "/usr/lib/grub/grub-x86_64.efi.signed")
-	dst := filepath.Join(efiDir, grubEfiBinary)
-	return c.copyRequiredEfiFile(src, dst)
-}
-
-func (c *UpgradeCommand) updateSystemdBootDir(newRoot, efiDir, commit string) error {
-	c.Printf(
-		"   %sUpdating systemd-boot in %s%s%s for commit %s%s%s...\n",
-		c.iconUpdate, c.cBlue, efiDir, c.cReset, c.cBold, commit, c.cReset,
-	)
-	src := filepath.Join(newRoot, "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed")
-	dst := filepath.Join(efiDir, systemdBootEfiBinary)
-	return c.copyRequiredEfiFile(src, dst)
+	src := filepath.Join(newRoot, relSrc)
+	dst := filepath.Join(efiDir, dstName)
+	return c.copyEfiFile(src, dst, true)
 }
 
 // updateShimIfDeployed refreshes shim binaries only on EFI dirs that already
@@ -418,7 +411,7 @@ func (c *UpgradeCommand) updateShimIfDeployed(newRoot, efiRoot string) error {
 			}
 			src := filepath.Join(shimDir, entry.Name())
 			dst := filepath.Join(target, entry.Name())
-			if err := c.copyEfiFile(src, dst); err != nil {
+			if err := c.copyEfiFile(src, dst, false); err != nil {
 				return err
 			}
 		}
@@ -426,31 +419,23 @@ func (c *UpgradeCommand) updateShimIfDeployed(newRoot, efiRoot string) error {
 	return nil
 }
 
-func (c *UpgradeCommand) copyEfiFile(src, dst string) error {
+// copyEfiFile copies src to dst inside the ESP. When required is true, a
+// missing source is returned as an error (used for signed bootloader binaries);
+// otherwise it logs a warning and returns nil.
+func (c *UpgradeCommand) copyEfiFile(src, dst string, required bool) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
+		if required {
+			return fmt.Errorf("required bootloader binary missing in new commit: %s", src)
+		}
 		c.PrintErrf(
 			"%s%sExpected file was not found in new commit: %s%s\n",
 			c.cYellow, c.iconWarn, src, c.cReset)
 		return nil
 	} else if err != nil {
+		if required {
+			return fmt.Errorf("failed to stat required bootloader binary: %w", err)
+		}
 		return fmt.Errorf("failed to stat expected file: %w", err)
-	}
-	c.Printf("   %sCopying %s to %s%s%s...\n",
-		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
-	if err := filesystems.CopyFile(src, dst); err != nil {
-		return fmt.Errorf("failed to copy file: %w", err)
-	}
-	return nil
-}
-
-// copyRequiredEfiFile is like copyEfiFile but treats a missing source as a
-// hard error. Used for bootloader binaries where a missing signed binary in
-// the new commit must abort the upgrade rather than leave a stale binary.
-func (c *UpgradeCommand) copyRequiredEfiFile(src, dst string) error {
-	if _, err := os.Stat(src); os.IsNotExist(err) {
-		return fmt.Errorf("required bootloader binary missing in new commit: %s", src)
-	} else if err != nil {
-		return fmt.Errorf("failed to stat required bootloader binary: %w", err)
 	}
 	c.Printf("   %sCopying %s to %s%s%s...\n",
 		c.iconDoc, filepath.Base(src), c.cBold, dst, c.cReset)
@@ -579,79 +564,40 @@ func (c *UpgradeCommand) formatEtcChanges(changes []ostree.EtcChange) string {
 	var b strings.Builder
 
 	// Group changes by action for a structured summary.
-	var conflicts, updates, adds, removes, userOnly []ostree.EtcChange
+	byAction := make(map[ostree.EtcChangeAction][]ostree.EtcChange)
 	for _, ch := range changes {
-		switch ch.Action {
-		case ostree.EtcActionConflict:
-			conflicts = append(conflicts, ch)
-		case ostree.EtcActionUpdate:
-			updates = append(updates, ch)
-		case ostree.EtcActionAdd:
-			adds = append(adds, ch)
-		case ostree.EtcActionRemove:
-			removes = append(removes, ch)
-		case ostree.EtcActionUserOnly:
-			userOnly = append(userOnly, ch)
-		}
+		byAction[ch.Action] = append(byAction[ch.Action], ch)
+	}
+
+	sections := []struct {
+		action      ostree.EtcChangeAction
+		title       string
+		color       string
+		headerIcon  string
+		itemIcon    string
+		showDetail  bool
+		verboseOnly bool
+	}{
+		{ostree.EtcActionConflict, "Conflicts (manual resolution required):", c.cRed, c.iconWarn, c.iconError, true, false},
+		{ostree.EtcActionUpdate, "Updated by upstream (will be applied):", c.cGreen, c.iconUpdate, c.iconUpdate, true, false},
+		{ostree.EtcActionAdd, "New files from upstream:", c.cGreen, c.iconNew, c.iconNew, true, false},
+		{ostree.EtcActionRemove, "Removed by upstream (will be deleted):", c.cYellow, c.iconError, c.iconError, false, false},
+		{ostree.EtcActionUserOnly, "User modifications (preserved):", c.cBlue, c.iconDoc, c.iconDoc, false, true},
 	}
 
 	somethingPrinted := false
-
-	// Conflicts first — they require attention.
-	if len(conflicts) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Conflicts (manual resolution required):%s\n",
-			c.cRed, c.iconWarn, c.cReset)
-		for _, ch := range conflicts {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconError, c.cRed, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
+	for _, sec := range sections {
+		items := byAction[sec.action]
+		if len(items) == 0 || (sec.verboseOnly && !c.verbose) {
+			continue
 		}
-	}
-
-	// Updates — clean upstream changes that will be applied.
-	if len(updates) > 0 {
 		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Updated by upstream (will be applied):%s\n",
-			c.cGreen, c.iconUpdate, c.cReset)
-		for _, ch := range updates {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconUpdate, c.cGreen, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
-		}
-	}
-
-	// Adds — new files from upstream.
-	if len(adds) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s New files from upstream:%s\n",
-			c.cGreen, c.iconNew, c.cReset)
-		for _, ch := range adds {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconNew, c.cGreen, ch.Path, c.cReset)
-			c.writeChangeDetail(&b, ch)
-		}
-	}
-
-	// Removes — files removed upstream.
-	if len(removes) > 0 {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s Removed by upstream (will be deleted):%s\n",
-			c.cYellow, c.iconError, c.cReset)
-		for _, ch := range removes {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconError, c.cYellow, ch.Path, c.cReset)
-		}
-	}
-
-	// User-only — local changes preserved as-is.
-	if len(userOnly) > 0 && c.verbose {
-		somethingPrinted = true
-		fmt.Fprintf(&b, "\n   %s%s User modifications (preserved):%s\n",
-			c.cBlue, c.iconDoc, c.cReset)
-		for _, ch := range userOnly {
-			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n",
-				c.iconDoc, c.cBlue, ch.Path, c.cReset)
+		fmt.Fprintf(&b, "\n   %s%s %s%s\n", sec.color, sec.headerIcon, sec.title, c.cReset)
+		for _, ch := range items {
+			fmt.Fprintf(&b, "      %s %s/etc/%s%s\n", sec.itemIcon, sec.color, ch.Path, c.cReset)
+			if sec.showDetail {
+				c.writeChangeDetail(&b, ch)
+			}
 		}
 	}
 
@@ -663,7 +609,12 @@ func (c *UpgradeCommand) formatEtcChanges(changes []ostree.EtcChange) string {
 	// Summary line
 	fmt.Fprintf(&b, "\n   %sSummary:%s %d conflict(s), %d update(s), %d add(s), %d remove(s), %d user-only\n",
 		c.cBold, c.cReset,
-		len(conflicts), len(updates), len(adds), len(removes), len(userOnly))
+		len(byAction[ostree.EtcActionConflict]),
+		len(byAction[ostree.EtcActionUpdate]),
+		len(byAction[ostree.EtcActionAdd]),
+		len(byAction[ostree.EtcActionRemove]),
+		len(byAction[ostree.EtcActionUserOnly]),
+	)
 
 	return b.String()
 }

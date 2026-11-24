@@ -77,6 +77,9 @@ func (im *Imager) SetupPasswords() error {
 		}
 		lines = append(lines, line)
 	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("failed to scan shadow file: %w", err)
+	}
 
 	shadowEntry := func(user string) string {
 		return fmt.Sprintf("%s:%s:%s:0:99999:7:::", user, passHash, lastChange)
@@ -155,8 +158,8 @@ func (im *Imager) SetupHooks() error {
 	}
 
 	cmd := exec.Command(hookExec)
-	cmd.Stdout = im.stdout
-	cmd.Stderr = im.stderr
+	cmd.Stdout = im.Stdout()
+	cmd.Stderr = im.Stderr()
 
 	env := os.Environ()
 	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
@@ -215,7 +218,11 @@ func (im *Imager) TestImage() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir for testing: %w", err)
 	}
-	defer os.RemoveAll(imageTempDir)
+	im.trackTmpDir(imageTempDir)
+	defer func() {
+		os.RemoveAll(imageTempDir)
+		im.untrackTmpDir(imageTempDir)
+	}()
 
 	imageName := filepath.Base(im.imagePath)
 	testImagePath := filepath.Join(imageTempDir, imageName)
@@ -251,8 +258,8 @@ func (im *Imager) TestImage() error {
 
 		im.Print("Running test script %s ...\n", ts)
 		cmd := exec.Command(ts)
-		cmd.Stdout = im.stdout
-		cmd.Stderr = im.stderr
+		cmd.Stdout = im.Stdout()
+		cmd.Stderr = im.Stderr()
 
 		env := os.Environ()
 		env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")

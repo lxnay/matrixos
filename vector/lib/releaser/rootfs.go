@@ -5,9 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
-	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 )
 
 const (
@@ -75,32 +74,30 @@ func (r *Releaser) CleanRootfs() error {
 		"/etc/ssl/apache2/server.key",
 		"/etc/ssl/apache2/server.pem",
 		"/etc/portage/secureboot.x509",
-		"/root/.bash_history",
 		"/root/.lesshst",
 		"/root/.bashrc",
 		"/root/.xauth*",
-		"/var/lib/sbctl/keys",
 	}
 
 	rdOpts := filesystems.RemoveDirOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, d := range removeDirs {
 		_ = filesystems.RemoveDir(filepath.Join(r.imageDir, d), rdOpts)
 	}
 
 	edOpts := filesystems.EmptyDirOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, d := range emptyDirs {
 		_ = filesystems.EmptyDir(filepath.Join(r.imageDir, d), edOpts)
 	}
 
 	rfgOpts := filesystems.RemoveFileWithGlobOptions{
-		Stdout: r.stdout,
-		Stderr: r.stderr,
+		Stdout: r.Stdout(),
+		Stderr: r.Stderr(),
 	}
 	for _, p := range removeFiles {
 		_ = filesystems.RemoveFileWithGlob(
@@ -117,42 +114,21 @@ func (r *Releaser) CleanRootfs() error {
 
 // chroot executes a command inside the image directory via chroot and unshare.
 func (r *Releaser) chroot(env []string, name string, args []string) error {
-
 	devDir, err := r.DevDir()
 	if err != nil {
 		return fmt.Errorf("failed to get dev dir: %w", err)
 	}
-
-	initScript := filepath.Join(devDir, "build", "init", "init.sh")
-	if _, err := os.Stat(initScript); os.IsNotExist(err) {
-		return fmt.Errorf("init script not found at %s", initScript)
-	}
-
-	env = config.FilterEnvKey(env, "MATRIXOS_DEV_DIR")
-	env = config.FilterEnvKey(env, "RUNNER_TYPE")
-	env = append(env,
-		"MATRIXOS_DEV_DIR="+devDir,
-		"RUNNER_TYPE=releaser",
-	)
-
-	cmd := runner.ChrootCmd{
-		Cmd: runner.Cmd{
-			Name:   name,
-			Args:   args,
-			Env:    env,
-			Stdout: r.stdout,
-			Stderr: r.stderr,
-		},
-		ChrootExec: initScript,
+	return worker.RunInitChroot(worker.InitChrootOptions{
+		DevDir:     devDir,
 		ChrootDir:  r.imageDir,
-	}
-
-	err = r.chrootRunner(&cmd)
-	if err != nil {
-		return fmt.Errorf("chrooted %s %s failed: %w", name, args, err)
-	}
-
-	return nil
+		RunnerType: "releaser",
+		Name:       name,
+		Args:       args,
+		Env:        env,
+		Stdout:     r.Stdout(),
+		Stderr:     r.Stderr(),
+		ChrootRun:  r.chrootRunner,
+	})
 }
 
 func (r *Releaser) PostCleanShrink() error {
@@ -193,15 +169,15 @@ func (r *Releaser) PostCleanShrink() error {
 
 	for _, d := range removeDirs {
 		opts := filesystems.RemoveDirOptions{
-			Stdout: r.stdout,
-			Stderr: r.stderr,
+			Stdout: r.Stdout(),
+			Stderr: r.Stderr(),
 		}
 		_ = filesystems.RemoveDir(filepath.Join(r.imageDir, d), opts)
 	}
 	for _, d := range emptyDirs {
 		opts := filesystems.EmptyDirOptions{
-			Stdout: r.stdout,
-			Stderr: r.stderr,
+			Stdout: r.Stdout(),
+			Stderr: r.Stderr(),
 		}
 		_ = filesystems.EmptyDir(filepath.Join(r.imageDir, d), opts)
 	}

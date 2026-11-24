@@ -7,7 +7,32 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
+
+	"matrixos/vector/lib/filesystems"
 )
+
+var (
+	repoLocksMu sync.Mutex
+	repoLocks   = make(map[string]*sync.Mutex)
+)
+
+// LockRepo acquires an exclusive in-process lock for repoDir and returns its
+// unlock function. This serializes ostree repository mutations (init, remote
+// setup, commit, prune, static-delta, summary) across concurrent workers.
+func LockRepo(repoDir string) func() {
+	key := filesystems.CanonicalPath(repoDir)
+	repoLocksMu.Lock()
+	mu, ok := repoLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		repoLocks[key] = mu
+	}
+	repoLocksMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
+}
 
 type AddRemoteOptions struct {
 	Remote    string
@@ -31,35 +56,6 @@ func (o *Ostree) InitRepo() error {
 	// is held by another process (e.g. parallel branch releases).
 	// Use "--" to prevent "-1" from being parsed as an option flag.
 	return o.ostreeRun("--repo="+repoDir, "config", "set", "--", "core.lock-timeout-secs", "-1")
-}
-
-
-// LastCommit returns the commit hash of the latest commit in the given ref.
-func LastCommit(repoDir, ref string, verbose bool) (string, error) {
-	if repoDir == "" {
-		return "", errors.New("invalid repoDir parameter")
-	}
-	if ref == "" {
-		return "", errors.New("invalid ref parameter")
-	}
-
-	stdout, err := RunWithStdoutCapture(
-		verbose,
-		"rev-parse",
-		"--repo="+repoDir,
-		ref,
-	)
-	if err != nil {
-		return "", err
-	}
-	lines, err := readerToList(stdout)
-	if err != nil {
-		return "", err
-	}
-	if len(lines) == 0 {
-		return "", fmt.Errorf("no commit found for ref %s", ref)
-	}
-	return lines[0], nil
 }
 
 // listRemotesFromRepo lists remotes using the instance runner.
@@ -193,19 +189,13 @@ func (o *Ostree) pruneFromRepo(repoDir, ref, keepObjectsYoungerThan string) erro
 	)
 }
 
-func (o *Ostree) ListRemotes() ([]string, error) {
-	repoDir, err := o.RepoDir()
-	if err != nil {
-		return nil, err
-	}
-	return o.listRemotesFromRepo(repoDir)
-}
-
 func (o *Ostree) LastCommit() (string, error) {
 	repoDir, err := o.RepoDir()
 	if err != nil {
 		return "", err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.lastCommitFromRepo(repoDir, o.ref)
 }
 
@@ -222,6 +212,8 @@ func (o *Ostree) Pull() error {
 	if err != nil {
 		return err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.pullFromRepo(repoDir, remote, ref)
 }
 
@@ -254,41 +246,25 @@ func (o *Ostree) GenerateStaticDelta() error {
 
 	o.Print("Generating static delta for %s and ref %s ...\n", repoDir, ref)
 
-	stdout, err := o.ostreeRunCapture(
-		"--repo="+repoDir,
-		"rev-parse",
-		ref,
-	)
+	revNew, err := o.lastCommitFromRepo(repoDir, ref)
 	if err != nil {
 		return err
 	}
 
-	revNew, err := readerToFirstNonEmptyLine(stdout)
-	if err != nil {
-		return err
-	}
-
-	stdout, err = o.ostreeRunCapture(
-		"--repo="+repoDir,
-		"rev-parse",
-		ref+"^",
-	)
-	if err != nil {
-		// This is not a fatal error, the branch might not have a previous commit.
-	}
-	revOld, _ := readerToFirstNonEmptyLine(stdout)
+	// Non-fatal: the branch might not have a previous commit.
+	revOld, _ := o.lastCommitFromRepo(repoDir, ref+"^")
 
 	if revOld != "" {
 		err := o.runCmd(
 			io.Discard,
-			os.Stderr,
+			o.Stderr(),
+			o.verbose,
 			"--repo="+repoDir,
 			"rev-parse",
 			revOld,
 		)
 		if err != nil {
-			fmt.Fprintf(
-				os.Stderr,
+			o.PrintError(
 				"WARNING: rev-parse for old revision %s failed, Falling back to full delta ...\n",
 				revOld,
 			)
@@ -299,14 +275,14 @@ func (o *Ostree) GenerateStaticDelta() error {
 	if revOld != "" {
 		err := o.runCmd(
 			io.Discard,
-			os.Stderr,
+			o.Stderr(),
+			o.verbose,
 			"show",
 			"--repo="+repoDir,
 			revOld,
 		)
 		if err != nil {
-			fmt.Fprintf(
-				os.Stderr,
+			o.PrintError(
 				"WARNING: Parent commit %s is referenced but missing. Falling back to full delta.\n",
 				revOld,
 			)
@@ -347,7 +323,14 @@ func (o *Ostree) UpdateSummary() error {
 		"--update",
 	}
 
-	gpgArgs, err := o.GpgArgs()
+	// Hold gpgMu across GpgArgs + summary signing so ostree's internal GPGME
+	// signing never races with concurrent gpg keyring/agent operations.
+	// Callers (e.g. Releaser.Release) hold LockRepo before UpdateSummary,
+	// preserving LockRepo -> gpgMu.
+	gpgMu.Lock()
+	defer gpgMu.Unlock()
+
+	gpgArgs, err := o.gpgArgsLocked()
 	if err != nil {
 		return err
 	}
@@ -356,57 +339,40 @@ func (o *Ostree) UpdateSummary() error {
 	return o.ostreeRun(args...)
 }
 
+func (o *Ostree) addRemoteForTarget(repoDir, sysroot string) error {
+	gpgArgs, err := o.ClientSideGpgArgs()
+	if err != nil {
+		return err
+	}
+	remote, err := o.Remote()
+	if err != nil {
+		return err
+	}
+	remoteURL, err := o.RemoteURL()
+	if err != nil {
+		return err
+	}
+	return o.addRemote(AddRemoteOptions{
+		Remote:    remote,
+		RemoteURL: remoteURL,
+		GpgArgs:   gpgArgs,
+		RepoDir:   repoDir,
+		Sysroot:   sysroot,
+	})
+}
+
 func (o *Ostree) AddRemote() error {
 	repoDir, err := o.RepoDir()
 	if err != nil {
 		return err
 	}
-
-	gpgArgs, err := o.ClientSideGpgArgs()
-	if err != nil {
-		return err
-	}
-
-	remote, err := o.Remote()
-	if err != nil {
-		return err
-	}
-	remoteURL, err := o.RemoteURL()
-	if err != nil {
-		return err
-	}
-
-	opts := AddRemoteOptions{
-		Remote:    remote,
-		RemoteURL: remoteURL,
-		GpgArgs:   gpgArgs,
-		RepoDir:   repoDir,
-	}
-	return o.addRemote(opts)
+	unlock := LockRepo(repoDir)
+	defer unlock()
+	return o.addRemoteForTarget(repoDir, "")
 }
 
 func (o *Ostree) AddRemoteToRootfs(rootfs string) error {
-	gpgArgs, err := o.ClientSideGpgArgs()
-	if err != nil {
-		return err
-	}
-
-	remote, err := o.Remote()
-	if err != nil {
-		return err
-	}
-	remoteURL, err := o.RemoteURL()
-	if err != nil {
-		return err
-	}
-
-	opts := AddRemoteOptions{
-		Remote:    remote,
-		RemoteURL: remoteURL,
-		GpgArgs:   gpgArgs,
-		Sysroot:   rootfs,
-	}
-	return o.addRemote(opts)
+	return o.addRemoteForTarget("", rootfs)
 }
 
 func (o *Ostree) LocalRefs() ([]string, error) {
@@ -414,6 +380,8 @@ func (o *Ostree) LocalRefs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.listLocalRefsFromRepo(repoDir)
 }
 
@@ -426,6 +394,8 @@ func (o *Ostree) RemoteRefs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	unlock := LockRepo(repoDir)
+	defer unlock()
 	return o.listRemoteRefsFromRepo(repoDir, remote)
 }
 
@@ -444,6 +414,9 @@ func (o *Ostree) MaybeInitializeRemote() error {
 	if err != nil {
 		return err
 	}
+
+	unlock := LockRepo(repoDir)
+	defer unlock()
 
 	if !directoryExists(repoDir) {
 		if err := os.MkdirAll(repoDir, 0755); err != nil {
@@ -474,10 +447,12 @@ func (o *Ostree) MaybeInitializeRemote() error {
 		if err != nil {
 			return err
 		}
-		args := []string{"--repo=" + repoDir, "remote", "add"}
-		args = append(args, gpgArgs...)
-		args = append(args, remote, remoteURL)
-		err = o.ostreeRun(args...)
+		err = o.addRemote(AddRemoteOptions{
+			Remote:    remote,
+			RemoteURL: remoteURL,
+			GpgArgs:   gpgArgs,
+			RepoDir:   repoDir,
+		})
 		if err != nil {
 			return err
 		}

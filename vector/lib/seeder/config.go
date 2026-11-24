@@ -28,14 +28,7 @@ func NewSeederConfig(cfg config.IConfig) *SeederConfig {
 
 // configItem retrieves a non-empty config string or returns an error.
 func (c *SeederConfig) configItem(key string) (string, error) {
-	v, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", err
-	}
-	if v == "" {
-		return "", fmt.Errorf("invalid %s", key)
-	}
-	return v, nil
+	return config.GetRequiredItem(c.cfg, key)
 }
 
 // --- Config getters exposed to external callers via SeederConfig ---
@@ -55,21 +48,7 @@ func (c *SeederConfig) DefaultPrivateGitRepoPath() (string, error) {
 // Parallelism returns the maximum number of seeders to build in parallel.
 // Defaults to 1 (sequential) if not set or invalid.
 func (c *SeederConfig) Parallelism() (int, error) {
-	v, err := c.cfg.GetItem("Seeder.Parallelism")
-	if err != nil {
-		return 1, nil
-	}
-	if v == "" {
-		return 1, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("invalid Seeder.Parallelism %q: %w", v, err)
-	}
-	if n < 1 {
-		return 1, nil
-	}
-	return n, nil
+	return config.GetParallelism(c.cfg, "Seeder.Parallelism")
 }
 
 // MaxMemoryGiB returns the maximum total memory (in GiB) to allocate across
@@ -126,22 +105,6 @@ func (c *SeederConfig) CoresMultiplier() (float64, error) {
 
 // --- Internal config getters (only used by Seeder methods) ---
 
-func (s *Seeder) SeedersDir() (string, error) {
-	return s.configItem("Seeder.SeedersDir")
-}
-
-func (s *Seeder) ChrootSeedersDir() (string, error) {
-	return s.configItem("Seeder.ChrootSeedersDir")
-}
-
-func (s *Seeder) ChrootBuildArtifactsDir() (string, error) {
-	return s.configItem("Seeder.ChrootBuildArtifactsDir")
-}
-
-func (s *Seeder) DisabledSeederFile() (string, error) {
-	return s.configItem("Seeder.SeederDisabledFileName")
-}
-
 func (s *Seeder) UseLocalGitRepoInsideChroot() (bool, error) {
 	return s.cfg.GetBool("Seeder.UseLocalGitRepoInsideChroot")
 }
@@ -152,18 +115,6 @@ func (s *Seeder) DeleteDotGitFromGitRepo() (bool, error) {
 
 func (s *Seeder) GitCloneArgs() (string, error) {
 	return s.configItem("Seeder.GitCloneArgs")
-}
-
-func (s *Seeder) ChrootExecName() (string, error) {
-	return s.configItem("Seeder.ChrootExecutableName")
-}
-
-func (s *Seeder) PrepperExecName() (string, error) {
-	return s.configItem("Seeder.PrepperExecutableName")
-}
-
-func (s *Seeder) PostBuildExecName() (string, error) {
-	return s.configItem("Seeder.PostBuildExecutableName")
 }
 
 func (s *Seeder) ChrootMetadataDir() (string, error) {
@@ -262,5 +213,3 @@ func (s *Seeder) SeedsVersioningCadence() (string, error) {
 		)
 	}
 }
-
-

@@ -38,47 +38,29 @@ type Func func(cmd *Cmd) error
 // Tests can replace the default with a mock to avoid real process execution.
 type OutputFunc func(cmd *Cmd) ([]byte, error)
 
-// CombinedOutputFunc is a function type that executes an external command
-// and returns its combined standard output and standard error. It mirrors
-// the (*exec.Cmd).CombinedOutput() pattern.
-// Tests can replace the default with a mock to avoid real process execution.
-type CombinedOutputFunc func(cmd *Cmd) ([]byte, error)
+func buildExecCmd(c *Cmd) *exec.Cmd {
+	cmd := exec.Command(c.Name, c.Args...)
+	cmd.Dir = c.Dir
+	cmd.Env = c.Env
+	cmd.Stdin = c.Stdin
+	cmd.SysProcAttr = c.SysProcAttr
+	return cmd
+}
 
 // Run is the default Func implementation. It executes the named program
 // with the given arguments, wiring all Cmd fields to the underlying
 // exec.Cmd.
 var Run Func = func(c *Cmd) error {
-	cmd := exec.Command(c.Name, c.Args...)
-	cmd.Dir = c.Dir
-	cmd.Env = c.Env
-	cmd.Stdin = c.Stdin
+	cmd := buildExecCmd(c)
 	cmd.Stdout = c.Stdout
 	cmd.Stderr = c.Stderr
-	cmd.SysProcAttr = c.SysProcAttr
 	return cmd.Run()
 }
 
 // Output is the default OutputFunc implementation. It executes the named
 // program and returns its standard output, mirroring (*exec.Cmd).Output().
 var Output OutputFunc = func(c *Cmd) ([]byte, error) {
-	cmd := exec.Command(c.Name, c.Args...)
-	cmd.Dir = c.Dir
-	cmd.Env = c.Env
-	cmd.Stdin = c.Stdin
-	cmd.SysProcAttr = c.SysProcAttr
-	return cmd.Output()
-}
-
-// CombinedOutput is the default CombinedOutputFunc implementation. It
-// executes the named program and returns its combined stdout and stderr,
-// mirroring (*exec.Cmd).CombinedOutput().
-var CombinedOutput CombinedOutputFunc = func(c *Cmd) ([]byte, error) {
-	cmd := exec.Command(c.Name, c.Args...)
-	cmd.Dir = c.Dir
-	cmd.Env = c.Env
-	cmd.Stdin = c.Stdin
-	cmd.SysProcAttr = c.SysProcAttr
-	return cmd.CombinedOutput()
+	return buildExecCmd(c).Output()
 }
 
 // chrootArgs builds the unshare argument list for running a command inside

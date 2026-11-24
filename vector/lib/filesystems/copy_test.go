@@ -2,10 +2,10 @@ package filesystems
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -260,6 +260,84 @@ func TestCopyFilePreserveXattrs(t *testing.T) {
 			t.Error("expected error when sysLsetxattr fails on destination")
 		}
 	})
+
+	t.Run("RejectsNonRegularSrcAndDst", func(t *testing.T) {
+		tmp := t.TempDir()
+		srcDir := filepath.Join(tmp, "srcdir")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		existingDst := filepath.Join(tmp, "existing.txt")
+		if err := os.WriteFile(existingDst, []byte("preserve me"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		newDst := filepath.Join(tmp, "should-not-exist.txt")
+
+		if err := CopyFilePreserveXattrs(srcDir, existingDst); err == nil {
+			t.Fatal("expected error copying directory with CopyFilePreserveXattrs")
+		}
+		if data, err := os.ReadFile(existingDst); err != nil || string(data) != "preserve me" {
+			t.Fatalf("existing dst damaged: (%q, %v)", string(data), err)
+		}
+		if err := CopyFilePreserveXattrs(srcDir, newDst); err == nil {
+			t.Fatal("expected error copying directory to new dst")
+		}
+		if _, err := os.Lstat(newDst); !os.IsNotExist(err) {
+			t.Fatalf("newDst was created despite directory src (err=%v)", err)
+		}
+
+		// Same-file copy must be a no-op rather than truncating src to 0 bytes.
+		regSrc := filepath.Join(tmp, "reg.txt")
+		if err := os.WriteFile(regSrc, []byte("keep content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := CopyFilePreserveXattrs(regSrc, regSrc); err != nil {
+			t.Fatalf("CopyFilePreserveXattrs(f, f): %v", err)
+		}
+		if data, err := os.ReadFile(regSrc); err != nil || string(data) != "keep content" {
+			t.Fatalf("same-file copy damaged file: (%q, %v)", string(data), err)
+		}
+
+		// FIFO src and FIFO/symlink-to-FIFO dst must fail promptly without blocking.
+		fifoSrc := filepath.Join(tmp, "src.fifo")
+		if err := unix.Mkfifo(fifoSrc, 0640); err != nil {
+			t.Fatal(err)
+		}
+		fifoDst := filepath.Join(tmp, "dst.fifo")
+		if err := unix.Mkfifo(fifoDst, 0640); err != nil {
+			t.Fatal(err)
+		}
+		linkToFifo := filepath.Join(tmp, "link-to-fifo")
+		if err := os.Symlink(fifoDst, linkToFifo); err != nil {
+			t.Fatal(err)
+		}
+
+		mustFailPromptly := func(name string, fn func() error) {
+			t.Helper()
+			done := make(chan error, 1)
+			go func() { done <- fn() }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Errorf("%s succeeded on FIFO, want error", name)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("%s blocked on FIFO", name)
+			}
+		}
+		mustFailPromptly("CopyFile(fifoSrc, dst)", func() error {
+			return CopyFile(fifoSrc, filepath.Join(tmp, "copy-fifo.out"))
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(fifoSrc, dst)", func() error {
+			return CopyFilePreserveXattrs(fifoSrc, filepath.Join(tmp, "xattr-fifo.out"))
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(regSrc, fifoDst)", func() error {
+			return CopyFilePreserveXattrs(regSrc, fifoDst)
+		})
+		mustFailPromptly("CopyFilePreserveXattrs(regSrc, linkToFifo)", func() error {
+			return CopyFilePreserveXattrs(regSrc, linkToFifo)
+		})
+	})
 }
 
 func TestCheckHardlinkPreservation(t *testing.T) {
@@ -301,51 +379,6 @@ func TestCheckHardlinkPreservation(t *testing.T) {
 	if err := CheckHardlinkPreservation(srcDir, dstDirBroken, CheckHardlinkPreservationOptions{}); err == nil {
 		t.Error("CheckHardlinkPreservation should fail when links are broken")
 	}
-}
-
-func TestCpReflinkCopyAllowed(t *testing.T) {
-	setupMockExec(t)
-
-	src := t.TempDir()
-	dst := t.TempDir()
-
-	t.Run("Allowed", func(t *testing.T) {
-		// Mock capability support
-		originalCheckFsCapabilitySupport := CheckFsCapabilitySupport
-		CheckFsCapabilitySupport = func(testDir string) (bool, error) {
-			return true, nil
-		}
-		t.Cleanup(func() { CheckFsCapabilitySupport = originalCheckFsCapabilitySupport })
-
-		allowed, err := CpReflinkCopyAllowed(src, dst, true)
-		if err != nil {
-			t.Fatalf("CpReflinkCopyAllowed failed: %v", err)
-		}
-		if !allowed {
-			t.Error("Expected reflink copy to be allowed")
-		}
-	})
-
-	t.Run("NotAllowedWithoutFlag", func(t *testing.T) {
-		allowed, err := CpReflinkCopyAllowed(src, dst, false)
-		if err != nil {
-			t.Fatalf("CpReflinkCopyAllowed failed: %v", err)
-		}
-		if allowed {
-			t.Error("Expected reflink copy to be not allowed without useCpFlag")
-		}
-	})
-
-	t.Run("NotAllowedOnRoot", func(t *testing.T) {
-		allowed, err := CpReflinkCopyAllowed("/", dst, true)
-		if err != nil {
-			t.Fatalf("CpReflinkCopyAllowed failed: %v", err)
-		}
-		if allowed {
-			t.Error("Expected reflink copy to be not allowed on root")
-		}
-
-	})
 }
 
 func TestCopyFileReflink(t *testing.T) {
@@ -660,9 +693,32 @@ func TestCopyDirPreserve(t *testing.T) {
 		if err := unix.Lsetxattr(fileInDir, fileAttr, fileAttrVal, 0); err != nil {
 			t.Skipf("filesystem does not support user xattrs: %v", err)
 		}
+		// Make the source subdir read-only to verify directory xattrs are
+		// applied before bottom-up chmod restores 0555 permissions.
+		if err := os.Chmod(subDir, 0555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = os.Chmod(subDir, 0755)
+			_ = os.Chmod(filepath.Join(dst, "xattrdir"), 0755)
+		})
 
 		if err := CopyDirPreserve(src, dst); err != nil {
 			t.Fatalf("CopyDirPreserve failed: %v", err)
+		}
+
+		// Verify directory xattrs were preserved (including on read-only dirs).
+		dstDir := filepath.Join(dst, "xattrdir")
+		dirSz, err := unix.Lgetxattr(dstDir, attrName, nil)
+		if err != nil {
+			t.Fatalf("directory xattr %q not found on %s: %v", attrName, dstDir, err)
+		}
+		dirBuf := make([]byte, dirSz)
+		if _, err := unix.Lgetxattr(dstDir, attrName, dirBuf); err != nil {
+			t.Fatalf("failed to read directory xattr: %v", err)
+		}
+		if string(dirBuf) != string(attrVal) {
+			t.Errorf("directory xattr: got %q, want %q", dirBuf, attrVal)
 		}
 
 		// Verify file xattrs were preserved.
@@ -702,222 +758,6 @@ func TestCopyDirPreserve(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "not a directory") {
 			t.Errorf("unexpected error message: %v", err)
-		}
-	})
-}
-func TestRsyncCopy(t *testing.T) {
-	t.Run("EmptySrc", func(t *testing.T) {
-		err := RsyncCopy(RsyncCopyOptions{
-			Src:      "",
-			Dst:      "/tmp/dst",
-			Excludes: []string{"/tmp/dst/skip"},
-		})
-		if err == nil {
-			t.Fatal("expected error for empty src")
-		}
-		if !strings.Contains(err.Error(), "missing parameters") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("EmptyDst", func(t *testing.T) {
-		err := RsyncCopy(RsyncCopyOptions{
-			Src:      "/tmp/src",
-			Dst:      "",
-			Excludes: []string{"/tmp/dst/skip"},
-		})
-		if err == nil {
-			t.Fatal("expected error for empty dst")
-		}
-		if !strings.Contains(err.Error(), "missing parameters") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("EmptyExcludes", func(t *testing.T) {
-		err := RsyncCopy(RsyncCopyOptions{
-			Src: "/tmp/src",
-			Dst: "/tmp/dst",
-		})
-		if err == nil {
-			t.Fatal("expected error for empty excludes")
-		}
-		if !strings.Contains(err.Error(), "excluded paths") {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("NilWritersDefaultSafely", func(t *testing.T) {
-		// Verify that nil Stdout/Stderr don't panic during validation
-		// (the function returns early due to missing rsync before writing).
-		err := RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src-path",
-			Dst:      "/nonexistent-dst-path",
-			Excludes: []string{"/skip"},
-			Stdout:   nil,
-			Stderr:   nil,
-		})
-		// We expect an error (rsync will fail or not be found), but no panic.
-		if err == nil {
-			t.Fatal("expected error for nonexistent paths")
-		}
-	})
-
-	t.Run("CustomWriters", func(t *testing.T) {
-		var stdoutBuf, stderrBuf strings.Builder
-		err := RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src-path",
-			Dst:      "/nonexistent-dst-path",
-			Excludes: []string{"/skip"},
-			Stdout:   &stdoutBuf,
-			Stderr:   &stderrBuf,
-		})
-		if err == nil {
-			t.Fatal("expected error for nonexistent paths")
-		}
-		// The function should have written the "Running: rsync ..." line to stdout.
-		if !strings.Contains(stdoutBuf.String(), "Running: rsync") {
-			t.Errorf("expected 'Running: rsync' in stdout, got: %q", stdoutBuf.String())
-		}
-	})
-
-	t.Run("VerboseArgs", func(t *testing.T) {
-		var stdoutBuf strings.Builder
-		// This will fail because paths don't exist, but we can inspect the command line.
-		_ = RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src",
-			Dst:      "/nonexistent-dst",
-			Excludes: []string{"/skip"},
-			Verbose:  true,
-			Stdout:   &stdoutBuf,
-			Stderr:   &strings.Builder{},
-		})
-		output := stdoutBuf.String()
-		for _, flag := range []string{"--verbose", "--partial", "--progress"} {
-			if !strings.Contains(output, flag) {
-				t.Errorf("expected %s in rsync command, got: %q", flag, output)
-			}
-		}
-	})
-
-	t.Run("NonVerboseArgs", func(t *testing.T) {
-		var stdoutBuf strings.Builder
-		_ = RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src",
-			Dst:      "/nonexistent-dst",
-			Excludes: []string{"/skip"},
-			Verbose:  false,
-			Stdout:   &stdoutBuf,
-			Stderr:   &strings.Builder{},
-		})
-		output := stdoutBuf.String()
-		if strings.Contains(output, "--verbose") {
-			t.Errorf("did not expect --verbose in rsync command, got: %q", output)
-		}
-	})
-
-	t.Run("ExcludesInArgs", func(t *testing.T) {
-		var stdoutBuf strings.Builder
-		excludes := []string{"/tmp/dst/foo", "/tmp/dst/bar/*"}
-		_ = RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src",
-			Dst:      "/nonexistent-dst",
-			Excludes: excludes,
-			Stdout:   &stdoutBuf,
-			Stderr:   &strings.Builder{},
-		})
-		output := stdoutBuf.String()
-		for _, exc := range excludes {
-			expected := "--exclude=" + exc
-			if !strings.Contains(output, expected) {
-				t.Errorf("expected %q in rsync command, got: %q", expected, output)
-			}
-		}
-	})
-
-	t.Run("TrailingSlashNormalised", func(t *testing.T) {
-		var stdoutBuf strings.Builder
-		_ = RsyncCopy(RsyncCopyOptions{
-			Src:      "/nonexistent-src///",
-			Dst:      "/nonexistent-dst",
-			Excludes: []string{"/skip"},
-			Stdout:   &stdoutBuf,
-			Stderr:   &strings.Builder{},
-		})
-		output := stdoutBuf.String()
-		// Both src and dst should end with exactly one "/".
-		if !strings.Contains(output, "/nonexistent-src/ ") && !strings.Contains(output, "/nonexistent-src/\n") {
-			// Check it appears with a trailing slash followed by space (next arg) or at end of args.
-			if !strings.Contains(output, "/nonexistent-src/") {
-				t.Errorf("expected normalised src path in output, got: %q", output)
-			}
-		}
-		if strings.Contains(output, "/nonexistent-src///") {
-			t.Errorf("src trailing slashes not normalised, got: %q", output)
-		}
-		if strings.Contains(output, "/nonexistent-dst///") {
-			t.Errorf("dst trailing slashes not normalised, got: %q", output)
-		}
-	})
-
-	t.Run("IntegrationWithRsync", func(t *testing.T) {
-		// Skip if rsync is not installed.
-		if _, err := exec.LookPath("rsync"); err != nil {
-			t.Skip("rsync not found, skipping integration test")
-		}
-
-		srcDir := t.TempDir()
-		dstDir := filepath.Join(t.TempDir(), "dst")
-
-		// Create test files.
-		if err := os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("hello"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		subDir := filepath.Join(srcDir, "subdir")
-		if err := os.MkdirAll(subDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(subDir, "file2.txt"), []byte("world"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		// Create a file that should be excluded.
-		if err := os.WriteFile(filepath.Join(srcDir, "skip.me"), []byte("excluded"), 0644); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := os.MkdirAll(dstDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-
-		excludePath := strings.TrimRight(dstDir, "/") + "/skip.me"
-		var stdoutBuf, stderrBuf strings.Builder
-		err := RsyncCopy(RsyncCopyOptions{
-			Src:      srcDir,
-			Dst:      dstDir,
-			Excludes: []string{excludePath},
-			Verbose:  false,
-			Stdout:   &stdoutBuf,
-			Stderr:   &stderrBuf,
-		})
-		if err != nil {
-			t.Fatalf("RsyncCopy failed: %v\nstdout: %s\nstderr: %s", err, stdoutBuf.String(), stderrBuf.String())
-		}
-
-		// Verify copied files.
-		data, err := os.ReadFile(filepath.Join(dstDir, "file1.txt"))
-		if err != nil {
-			t.Fatalf("file1.txt not copied: %v", err)
-		}
-		if string(data) != "hello" {
-			t.Errorf("file1.txt content: got %q, want %q", data, "hello")
-		}
-
-		data, err = os.ReadFile(filepath.Join(dstDir, "subdir", "file2.txt"))
-		if err != nil {
-			t.Fatalf("subdir/file2.txt not copied: %v", err)
-		}
-		if string(data) != "world" {
-			t.Errorf("subdir/file2.txt content: got %q, want %q", data, "world")
 		}
 	})
 }

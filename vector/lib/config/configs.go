@@ -2,7 +2,11 @@
 // params reading.
 package config
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 type IConfig interface {
 	// Load loads the associated config file or source.
@@ -24,10 +28,6 @@ type IConfig interface {
 	// and casts it to a bool value. This is a shortcut function for config values that
 	// are strictly boolean.
 	GetBool(key string) (bool, error)
-
-	// GetItems retrieves the config values associated to the provided config key.
-	// Config keys can be of type: category.name.
-	GetItems(key string) ([]string, error)
 }
 
 // FilterEnvKey returns a copy of env with all entries for the given key removed.
@@ -40,4 +40,36 @@ func FilterEnvKey(env []string, key string) []string {
 		}
 	}
 	return filtered
+}
+
+// GetRequiredItem retrieves a non-empty config string for key.
+func GetRequiredItem(cfg IConfig, key string) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("missing config parameter")
+	}
+	val, err := cfg.GetItem(key)
+	if err != nil {
+		return "", err
+	}
+	if val == "" {
+		return "", fmt.Errorf("invalid %s", key)
+	}
+	return val, nil
+}
+
+// GetParallelism retrieves a positive integer parallelism value from key.
+// Defaults to 1 (sequential) if the key is missing, empty, or < 1.
+func GetParallelism(cfg IConfig, key string) (int, error) {
+	v, err := cfg.GetItem(key)
+	if err != nil || v == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", key, v, err)
+	}
+	if n < 1 {
+		return 1, nil
+	}
+	return n, nil
 }

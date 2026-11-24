@@ -3,6 +3,7 @@ package filesystems
 import (
 	"fmt"
 	"io"
+	"os"
 
 	"matrixos/vector/lib/runner"
 )
@@ -15,6 +16,12 @@ import (
 func Fstrim(run runner.Func, stdout, stderr io.Writer, mountPoint string) error {
 	if mountPoint == "" {
 		return fmt.Errorf("missing mount point for fstrim")
+	}
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	if stderr == nil {
+		stderr = os.Stderr
 	}
 	fmt.Fprintf(stdout, "Executing fstrim on %s\n", mountPoint)
 	return run(&runner.Cmd{

@@ -105,13 +105,16 @@ func TestParseMountInfoLine(t *testing.T) {
 	})
 
 	t.Run("OctalEscapes", func(t *testing.T) {
-		line := `25 1 8:1 / /mnt/my\040dir rw,relatime shared:1 - ext4 /dev/sda1 rw`
+		line := `25 1 8:1 / /mnt/my\040dir rw,relatime shared:1 - ext4 /mnt/src\040dir rw`
 		entry, err := parseMountInfoLine(line)
 		if err != nil {
 			t.Fatalf("parseMountInfoLine failed: %v", err)
 		}
 		if entry.Mountpoint != "/mnt/my dir" {
 			t.Errorf("Expected '/mnt/my dir', got %q", entry.Mountpoint)
+		}
+		if entry.Source != "/mnt/src dir" {
+			t.Errorf("Expected Source '/mnt/src dir', got %q", entry.Source)
 		}
 	})
 
@@ -545,6 +548,85 @@ func TestResolvePath(t *testing.T) {
 		want := filepath.Clean(p)
 		if got != want {
 			t.Errorf("resolvePath(%q) = %q, want %q", p, got, want)
+		}
+	})
+
+	t.Run("RelativePathResolvedToAbsoluteForMountChecks", func(t *testing.T) {
+		tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		mnt := filepath.Join(tmpDir, "mnt")
+		if err := os.MkdirAll(mnt, 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(tmpDir)
+
+		setupMockMountInfo(t, []*MountInfoEntry{
+			{MountID: 1, Mountpoint: mnt, Source: "/dev/loop0p3", FSType: "btrfs"},
+		})
+
+		if got := resolvePath("./mnt"); got != mnt {
+			t.Errorf("resolvePath(./mnt) = %q, want %q", got, mnt)
+		}
+		if got := resolvePath("./nonexistent"); got != filepath.Join(tmpDir, "nonexistent") {
+			t.Errorf("resolvePath(./nonexistent) = %q, want %q", got, filepath.Join(tmpDir, "nonexistent"))
+		}
+		mounted, err := IsMounted("./mnt")
+		if err != nil {
+			t.Fatalf("IsMounted(./mnt): %v", err)
+		}
+		if !mounted {
+			t.Error("IsMounted(./mnt) = false, want true")
+		}
+		if err := CheckActiveMounts("./mnt"); err == nil {
+			t.Error("CheckActiveMounts(./mnt) returned nil despite active mount at ./mnt")
+		}
+	})
+
+	t.Run("SymlinkDotDotResolvesPosixOrderBeforeCleaning", func(t *testing.T) {
+		tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		mnt := filepath.Join(tmpDir, "mnt")
+		sub := filepath.Join(mnt, "sub")
+		other := filepath.Join(tmpDir, "other")
+		if err := os.MkdirAll(sub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(other, 0755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(other, "link")
+		if err := os.Symlink(sub, link); err != nil {
+			t.Fatal(err)
+		}
+
+		setupMockMountInfo(t, []*MountInfoEntry{
+			{MountID: 1, Mountpoint: mnt, Source: "/dev/loop0p3", FSType: "btrfs"},
+		})
+
+		// POSIX target of <other>/link/.. is <mnt>, NOT <other>.
+		absViaLink := filepath.Join(other, "link") + "/.."
+		if got := resolvePath(absViaLink); got != mnt {
+			t.Errorf("resolvePath(%q) = %q, want %q", absViaLink, got, mnt)
+		}
+		if err := CheckActiveMounts(absViaLink); err == nil {
+			t.Errorf("CheckActiveMounts(%q) returned nil despite active mount at %s", absViaLink, mnt)
+		}
+		mounted, err := IsMounted(absViaLink)
+		if err != nil || !mounted {
+			t.Errorf("IsMounted(%q) = (%v, %v), want (true, nil)", absViaLink, mounted, err)
+		}
+
+		// Same check with a relative path from other/.
+		t.Chdir(other)
+		if got := resolvePath("link/.."); got != mnt {
+			t.Errorf("resolvePath(\"link/..\") = %q, want %q", got, mnt)
+		}
+		if err := CheckActiveMounts("link/.."); err == nil {
+			t.Errorf("CheckActiveMounts(\"link/..\") returned nil despite active mount at %s", mnt)
 		}
 	})
 }

@@ -260,15 +260,11 @@ func TestKargsInitNoSubcommand(t *testing.T) {
 	}
 }
 
-func TestKargsInitConfigFailure(t *testing.T) {
+func TestKargsInitSucceedsWithoutConfig(t *testing.T) {
 	noConfigDir(t)
 	cmd := NewKargsCommand()
-	err := cmd.Init([]string{"show"})
-	if err == nil {
-		t.Fatal("expected error from Init (config not available)")
-	}
-	if !strings.Contains(err.Error(), "failed to load config") {
-		t.Errorf("error = %q, want 'failed to load config'", err.Error())
+	if err := cmd.Init([]string{"add", "quiet"}); err != nil {
+		t.Fatalf("Init should not require config: %v", err)
 	}
 }
 

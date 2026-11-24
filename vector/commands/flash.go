@@ -126,8 +126,8 @@ func (c *FlashCommand) parseArgs(args []string) error {
 		return err
 	}
 
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	return nil
@@ -141,6 +141,7 @@ func (c *FlashCommand) Run() error {
 // runFlash implements the main flash/install logic.
 func (c *FlashCommand) runFlash() error {
 	c.SetupPrinters(c.Name())
+	defer c.FlushPrinters()
 
 	ref, err := c.resolveRef()
 	if err != nil {
@@ -149,68 +150,37 @@ func (c *FlashCommand) runFlash() error {
 
 	// Narrow the prefix now that we know the ref.
 	c.SetupPrinters(fmt.Sprintf("flash:%s", c.shortRef(ref)))
-	defer c.FlushPrinters()
 
-	c.ot.SetStdout(c.StdoutWriter())
-	c.ot.SetStderr(c.StderrWriter())
-	c.ot.SetVerbose(false)
-
-	if err := c.qa.VerifyImagerEnvironmentSetup(installRoot); err != nil {
-		return fmt.Errorf("environment verification failed: %w", err)
-	}
-
-	fsenc, err := filesystems.NewFsenc(
-		c.cfg,
-		func(n string) { c.Printf("Opening encrypted rootfs as %s ...\n", n) },
-		func(n string) { c.Printf("Closing encrypted rootfs as %s ...\n", n) },
-	)
+	fsenc, im, err := initImagerRuntime(c.cfg, c.ot, c.qa, &c.UI, installRoot, c.im)
 	if err != nil {
-		return fmt.Errorf("failed to initialize fsenc: %w", err)
+		return err
 	}
 	c.fsenc = fsenc
-
-	if err := c.fsenc.ValidateLuksVariables(); err != nil {
-		return fmt.Errorf("LUKS validation failed: %w", err)
-	}
-
-	if c.im == nil {
-		im, err := imager.NewImager(c.cfg, c.ot, c.fsenc, nil)
-		if err != nil {
-			return fmt.Errorf("failed to initialize imager: %w", err)
-		}
-		c.im = im
-	}
-	c.im.SetStdout(c.StdoutWriter())
-	c.im.SetStderr(c.StderrWriter())
+	c.im = im
 
 	buildOpts, err := c.resolveDevices()
 	if err != nil {
 		return err
 	}
 
-	if err := c.detectRemotedAndPlainRefs(c.im.PrintError); err != nil {
-		return err
-	}
-
-	rr, err := c.resolveRefRemote(ref, c.im.PrintWarning)
+	ref, err = c.prepareImagerRef(c.im, ref)
 	if err != nil {
 		return err
 	}
-	ref = rr.Ref
 
-	c.im.SetRef(ref)
-	c.ot.SetRef(ref)
-
-	c.PushCleanup(c.im.Cleanup)
-	c.PushCleanup(c.fsenc.Cleanup)
+	// Register cleanups in reverse execution order (LIFO): unmount/detach
+	// imager resources first, close any remaining LUKS mappers second, and
+	// flush buffered printer output last.
 	c.PushCleanup(c.FlushPrinters)
+	c.PushCleanup(c.fsenc.Cleanup)
+	c.PushCleanup(c.im.Cleanup)
 
 	if err := c.initGpg(); err != nil {
 		return err
 	}
 	c.PushCleanup(c.killGpg)
 
-	if err := c.showLocalRefs(); err != nil {
+	if err := showLocalRefs(c.ot, c.im.Print); err != nil {
 		return err
 	}
 
@@ -342,9 +312,9 @@ func validateDeviceExistence(opts *imager.BuildOptions) error {
 	return nil
 }
 
-// validateDeviceCombination checks that the flags form a valid combination:
-// either whole device, or all three individual partitions, or none.
-func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) error {
+// validateBuildDeviceCombination checks that the device flags form a valid
+// combination: either whole device, or all three individual partitions, or none.
+func validateBuildDeviceCombination(opts *imager.BuildOptions) error {
 	anyPartition := opts.EfiDevice != "" || opts.BootDevice != "" || opts.RootDevice != ""
 	allPartitions := opts.EfiDevice != "" && opts.BootDevice != "" && opts.RootDevice != ""
 
@@ -354,6 +324,16 @@ func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) erro
 	if opts.WholeDevice != "" && anyPartition {
 		return fmt.Errorf("please specify either --install-device or individual --*-device-path flags, not both")
 	}
+	return nil
+}
+
+// validateDeviceCombination checks that the flags form a valid combination
+// for flash mode (including requiring devices in batch mode).
+func (c *FlashCommand) validateDeviceCombination(opts *imager.BuildOptions) error {
+	if err := validateBuildDeviceCombination(opts); err != nil {
+		return err
+	}
+	anyPartition := opts.EfiDevice != "" || opts.BootDevice != "" || opts.RootDevice != ""
 	if c.batch && opts.WholeDevice == "" && !anyPartition {
 		return fmt.Errorf("batch mode requires device flags; see --help")
 	}
@@ -430,6 +410,9 @@ func (c *FlashCommand) promptWholeDevice(opts *imager.BuildOptions) error {
 		if err != nil {
 			return err
 		}
+		if prompt.EOF() {
+			return fmt.Errorf("unexpected end of input while prompting for block device")
+		}
 		if dev == "" || !filesystems.PathExists(dev) {
 			c.PrintErrf("Device %s does not exist. Try again.\n", dev)
 			continue
@@ -494,6 +477,9 @@ func (c *FlashCommand) promptPartition(target *string, label, expectedType strin
 		if err != nil {
 			return err
 		}
+		if prompt.EOF() {
+			return fmt.Errorf("unexpected end of input while prompting for %s partition", label)
+		}
 		if dev == "" || !filesystems.PathExists(dev) {
 			c.PrintErrf("Partition %s does not exist. Try again.\n", dev)
 			continue
@@ -538,19 +524,6 @@ func (c *FlashCommand) showSummary(opts *imager.BuildOptions) {
 		c.Printf("  %s (ROOT) — format and install /. DATA WILL BE LOST.\n", opts.RootDevice)
 	}
 	c.Println("Note: final partition resizing will happen on first boot.")
-}
-
-// showLocalRefs lists the locally available ostree refs.
-func (c *FlashCommand) showLocalRefs() error {
-	refs, err := c.ot.LocalRefs()
-	if err != nil {
-		return fmt.Errorf("failed to list local refs: %w", err)
-	}
-	c.im.Print("Local refs:\n")
-	for _, r := range refs {
-		c.im.Print("  %s\n", r)
-	}
-	return nil
 }
 
 // getPrompter returns the interactive prompter, creating one if needed.

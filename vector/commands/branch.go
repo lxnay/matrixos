@@ -1,20 +1,17 @@
 package commands
 
 import (
-	"flag"
 	"fmt"
 	"matrixos/vector/lib/ostree"
+	"os"
 	"slices"
-	"strings"
 )
 
 // BranchCommand is a command for managing branches
 type BranchCommand struct {
 	BaseCommand
 	UI
-	fs   *flag.FlagSet
-	sub  string
-	args []string
+	subcommandRouter
 }
 
 // NewBranchCommand creates a new BranchCommand
@@ -47,30 +44,10 @@ func (c *BranchCommand) Init(args []string) error {
 
 // parseArgs parses the command-line arguments without initializing config or ostree.
 func (c *BranchCommand) parseArgs(args []string) error {
-	c.fs = flag.NewFlagSet("branch", flag.ContinueOnError)
-	c.fs.Usage = func() {
-		fmt.Printf("Usage: vector %s <subcommand>\n", c.Name())
-		var scs []string
-		for k := range c.subcommands() {
-			scs = append(scs, k)
-		}
-		slices.Sort(scs)
-		fmt.Printf("Subcommands: %s\n", strings.Join(scs, ", "))
-	}
-	err := c.fs.Parse(args)
-	if err != nil {
-		return err
-	}
-	if c.fs.NArg() < 1 {
-		c.fs.Usage()
-		return fmt.Errorf("no subcommand provided")
-	}
-	c.sub = c.fs.Arg(0)
-	c.args = c.fs.Args()[1:]
-	return nil
+	return c.parseSubcommandArgs(c.Name(), args, c.subcommands(), os.Stdout, "<subcommand>")
 }
 
-func (c *BranchCommand) printDeployment(dep *ostree.Deployment) error {
+func (c *BranchCommand) printDeployment(dep *ostree.Deployment) {
 	if dep.Booted {
 		c.Println("Booted deployment:")
 	} else {
@@ -84,7 +61,6 @@ func (c *BranchCommand) printDeployment(dep *ostree.Deployment) error {
 	c.Printf("  Pending: %t\n", dep.Pending)
 	c.Printf("  Staged: %t\n", dep.Staged)
 	c.Printf("  Rollback: %t\n", dep.Rollback)
-	return nil
 }
 
 func (c *BranchCommand) show() error {
@@ -110,10 +86,7 @@ func (c *BranchCommand) show() error {
 		return fmt.Errorf("no booted deployment found")
 	}
 
-	if err := c.printDeployment(booted); err != nil {
-		return err
-	}
-
+	c.printDeployment(booted)
 	return nil
 }
 
@@ -145,15 +118,11 @@ func (c *BranchCommand) deployment() error {
 	})
 
 	if booted != nil {
-		if err := c.printDeployment(booted); err != nil {
-			return err
-		}
+		c.printDeployment(booted)
 	}
 
 	for _, dep := range others {
-		if err := c.printDeployment(dep); err != nil {
-			return err
-		}
+		c.printDeployment(dep)
 	}
 
 	return nil
@@ -264,11 +233,5 @@ func (c *BranchCommand) subcommands() map[string]func() error {
 
 func (c *BranchCommand) Run() error {
 	defer c.FlushPrinters()
-
-	scs := c.subcommands()
-	cmd, ok := scs[c.sub]
-	if !ok {
-		return fmt.Errorf("unknown subcommand: %s", c.sub)
-	}
-	return cmd()
+	return c.dispatchSubcommand(c.subcommands())
 }

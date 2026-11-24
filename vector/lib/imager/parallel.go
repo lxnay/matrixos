@@ -4,13 +4,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/ostree"
+	"matrixos/vector/lib/worker"
 )
+
+// luksMapperSeq generates unique per-worker suffixes for host-side LUKS
+// device-mapper names during parallel encrypted image builds.
+var luksMapperSeq atomic.Uint64
 
 // ParallelImageOptions configures the parallel image creation engine.
 type ParallelImageOptions struct {
@@ -54,76 +61,29 @@ type ParallelImageOptions struct {
 // semaphore-based worker pool.  Unlike seed parallelism, image builds
 // have no inter-dependencies so all refs are immediately eligible.
 func ParallelImage(ctx context.Context, opts *ParallelImageOptions) error {
-	return runImageWorkerPool(ctx, opts)
-}
-
-// runImageWorkerPool spawns a fixed pool of worker goroutines that
-// pull refs from a work channel.
-func runImageWorkerPool(ctx context.Context, opts *ParallelImageOptions) error {
-	var firstErr error
-	var errMu sync.Mutex
+	if opts.Parallelism < 1 {
+		return fmt.Errorf("parallelism must be >= 1, got %d", opts.Parallelism)
+	}
 
 	poolStderr := opts.NewStderrWriter("images")
+	defer worker.FlushWriters(poolStderr)
 
-	setError := func(err error) {
-		errMu.Lock()
-		defer errMu.Unlock()
-		if firstErr == nil {
-			firstErr = err
-		}
-		fmt.Fprintf(poolStderr, "%v\n", err)
-	}
-
-	work := make(chan string, len(opts.Refs))
-	for _, ref := range opts.Refs {
-		work <- ref
-	}
-	close(work)
-
-	var wg sync.WaitGroup
-	for i := 0; i < opts.Parallelism; i++ {
-		wg.Go(func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case ref, ok := <-work:
-					if !ok {
-						return
-					}
-
-					// Check for earlier failure.
-					errMu.Lock()
-					failed := firstErr != nil
-					errMu.Unlock()
-					if failed {
-						fmt.Fprintf(poolStderr,
-							"Skipping ref %s due to earlier failure.\n", ref)
-						return
-					}
-
-					err := imageWorker(ctx, opts, ref)
-					if err != nil {
-						setError(fmt.Errorf(
-							"ref %s image failed: %w",
-							ref, err,
-						))
-						return
-					}
-				}
+	return worker.RunPool(ctx, worker.PoolOptions[string]{
+		Items:       opts.Refs,
+		Parallelism: opts.Parallelism,
+		Run: func(poolCtx context.Context, ref string) error {
+			if err := imageWorker(poolCtx, opts, ref); err != nil {
+				return fmt.Errorf("ref %s image failed: %w", ref, err)
 			}
-		})
-	}
-
-	wg.Wait()
-
-	// Drain any refs that were never picked up by a worker.
-	for ref := range work {
-		fmt.Fprintf(poolStderr,
-			"Skipping ref %s due to earlier failure.\n", ref)
-	}
-
-	return firstErr
+			return nil
+		},
+		OnError: func(err error) {
+			fmt.Fprintf(poolStderr, "%v\n", err)
+		},
+		OnSkip: func(ref string) {
+			fmt.Fprintf(poolStderr, "Skipping ref %s due to earlier failure.\n", ref)
+		},
+	})
 }
 
 // imageWorker processes a single image build.
@@ -132,6 +92,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 	workerStdout := opts.NewStdoutWriter(
 		fmt.Sprintf("images:%s", ref),
 	)
+	defer worker.FlushWriters(workerStdout)
 	workerPrint := func(format string, args ...any) {
 		fmt.Fprintf(workerStdout, format, args...)
 	}
@@ -168,18 +129,25 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 		fmt.Sprintf("image:%s", shortRef),
 	)
 	flushWriters := func() {
-		if f, ok := imgStdout.(interface{ Flush() }); ok {
-			f.Flush()
-		}
-		if f, ok := imgStderr.(interface{ Flush() }); ok {
-			f.Flush()
-		}
+		worker.FlushWriters(imgStdout, imgStderr, workerStdout)
 	}
 	defer flushWriters()
 
 	// Clone the config so each worker has an isolated copy
 	// (Build mutates Ostree.Sysroot via AddOverlay).
 	workerCfg := opts.Config.Clone()
+
+	// Give each parallel worker a unique host-side LUKS device-mapper name so
+	// concurrent encrypted image builds do not collide on /dev/mapper/<name>.
+	// Guest boot arguments use rd.luks.uuid=<UUID>, not this mapper name.
+	if baseName, err := workerCfg.GetItem("Imager.EncryptedRootFsName"); err == nil && baseName != "" {
+		uniqueName := fmt.Sprintf("%s-%d-%d", baseName, os.Getpid(), luksMapperSeq.Add(1))
+		if err := workerCfg.AddOverlay(map[string][]string{
+			"Imager.EncryptedRootFsName": {uniqueName},
+		}); err != nil {
+			return fmt.Errorf("failed to set unique LUKS mapper name for ref %s: %w", ref, err)
+		}
+	}
 
 	// Create an isolated ostree instance for this worker using the
 	// cloned config.  We cannot use CloneForRef here because it
@@ -206,7 +174,7 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 			fmt.Fprintf(imgStdout, "Opening encrypted rootfs as %s ...\n", mapperName)
 		},
 		func(mapperName string) {
-			fmt.Fprintf(imgStdout, "Closing encrypted rootfs as %s ...\n", mapperName)
+			fmt.Fprintf(imgStdout, "Opened encrypted rootfs as %s.\n", mapperName)
 		},
 	)
 	if err != nil {
@@ -215,6 +183,8 @@ func imageWorker(ctx context.Context, opts *ParallelImageOptions, ref string) er
 			ref, err,
 		)
 	}
+	fsenc.SetStdout(imgStdout)
+	fsenc.SetStderr(imgStderr)
 	if err := fsenc.ValidateLuksVariables(); err != nil {
 		return fmt.Errorf(
 			"LUKS validation failed for ref %s: %w",

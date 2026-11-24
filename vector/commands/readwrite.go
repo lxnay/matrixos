@@ -58,9 +58,8 @@ func (c *ReadWriteCommand) Run() error {
 	c.SetupPlainPrinters()
 	defer c.FlushPrinters()
 
-	// Check if we are running as root. If running as user, exit with error.
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	mode := "transient"

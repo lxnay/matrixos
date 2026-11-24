@@ -3,6 +3,7 @@ package commands
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ import (
 
 func TestNewStyledWriter(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[P]", "\033[32m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[P]", "\033[32m", "\033[0m", true)
 	if sw == nil {
 		t.Fatal("expected non-nil styledWriter")
 	}
@@ -25,33 +26,11 @@ func TestNewStyledWriter(t *testing.T) {
 	}
 }
 
-// --- indexByte ---
-
-func TestIndexByte(t *testing.T) {
-	tests := []struct {
-		data []byte
-		b    byte
-		want int
-	}{
-		{[]byte("hello\nworld"), '\n', 5},
-		{[]byte("no newline"), '\n', -1},
-		{[]byte(""), '\n', -1},
-		{[]byte("\n"), '\n', 0},
-		{[]byte("abc\rdef"), '\r', 3},
-	}
-	for _, tt := range tests {
-		got := indexByte(tt.data, tt.b)
-		if got != tt.want {
-			t.Errorf("indexByte(%q, %q) = %d, want %d", tt.data, tt.b, got, tt.want)
-		}
-	}
-}
-
 // --- cleanLine ---
 
 func TestCleanLineTTY(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 	// TTY mode: ANSI sequences should be preserved.
 	input := "\033[31mred\033[0m"
 	got := sw.cleanLine(input)
@@ -62,7 +41,7 @@ func TestCleanLineTTY(t *testing.T) {
 
 func TestCleanLineNonTTY(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", false)
+	sw := newStyledWriter(&buf, nil, "", "", "", false)
 	input := "\033[31mred\033[0m normal"
 	got := sw.cleanLine(input)
 	if strings.Contains(got, "\033[") {
@@ -75,7 +54,7 @@ func TestCleanLineNonTTY(t *testing.T) {
 
 func TestCleanLineStripsDCS(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", false)
+	sw := newStyledWriter(&buf, nil, "", "", "", false)
 	input := "before\x1bPdevice\x1b\\after"
 	got := sw.cleanLine(input)
 	if got != "beforeafter" {
@@ -85,7 +64,7 @@ func TestCleanLineStripsDCS(t *testing.T) {
 
 func TestCleanLineStripsOSC(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", false)
+	sw := newStyledWriter(&buf, nil, "", "", "", false)
 	input := "before\x1b]0;title\x07after"
 	got := sw.cleanLine(input)
 	if got != "beforeafter" {
@@ -97,7 +76,7 @@ func TestCleanLineStripsOSC(t *testing.T) {
 
 func TestWriteCompleteLine(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[X]", "\033[1m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[X]", "\033[1m", "\033[0m", true)
 
 	n, err := sw.Write([]byte("hello world\n"))
 	if err != nil {
@@ -121,7 +100,7 @@ func TestWriteCompleteLine(t *testing.T) {
 
 func TestWriteBlankLine(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[X]", "\033[1m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[X]", "\033[1m", "\033[0m", true)
 
 	sw.Write([]byte("\n"))
 	got := buf.String()
@@ -136,7 +115,7 @@ func TestWriteBlankLine(t *testing.T) {
 
 func TestWriteNoPrefix(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Write([]byte("plain line\n"))
 	got := buf.String()
@@ -147,7 +126,7 @@ func TestWriteNoPrefix(t *testing.T) {
 
 func TestWriteMultipleLines(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, ">", "", "", true)
+	sw := newStyledWriter(&buf, nil, ">", "", "", true)
 
 	sw.Write([]byte("line1\nline2\nline3\n"))
 	got := buf.String()
@@ -164,7 +143,7 @@ func TestWriteMultipleLines(t *testing.T) {
 
 func TestWritePartialThenComplete(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	// Partial write — no output yet.
 	sw.Write([]byte("partial"))
@@ -184,7 +163,7 @@ func TestWritePartialThenComplete(t *testing.T) {
 
 func TestWriteCRLF(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Write([]byte("windows line\r\n"))
 	got := buf.String()
@@ -193,9 +172,158 @@ func TestWriteCRLF(t *testing.T) {
 	}
 }
 
+func TestWriteLFFollowedByCRLF(t *testing.T) {
+	t.Run("PreservesPrefixOnBothLines", func(t *testing.T) {
+		var buf bytes.Buffer
+		sw := newStyledWriter(&buf, nil, "[P]", "", "", false)
+
+		if _, err := sw.Write([]byte("line1\nline2\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		want := "[P] line1\n[P] line2\n"
+		if got := buf.String(); got != want {
+			t.Errorf("Write(\"line1\\nline2\\r\\n\") = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("PreservesTwoBlankLines", func(t *testing.T) {
+		var buf bytes.Buffer
+		sw := newStyledWriter(&buf, nil, "[P]", "", "", false)
+
+		if _, err := sw.Write([]byte("\n\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := buf.String(); got != "\n\n" {
+			t.Errorf("Write(\"\\n\\r\\n\") = %q, want \"\\n\\n\"", got)
+		}
+	})
+}
+
+func TestFlushStripsBufferedTrailingCR(t *testing.T) {
+	t.Run("NonTTYAndLog", func(t *testing.T) {
+		var dest, logBuf bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "", "", false)
+		sw.SetLogWriter(&logBuf)
+
+		if _, err := sw.Write([]byte("progress 50%\rprogress 100%\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.Flush()
+		if strings.Contains(dest.String(), "\r") {
+			t.Errorf("non-TTY Flush leaked raw CR: %q", dest.String())
+		}
+		if strings.Contains(logBuf.String(), "\r") {
+			t.Errorf("log Flush leaked raw CR: %q", logBuf.String())
+		}
+		if got := dest.String(); got != "[P] progress 100%\n" {
+			t.Errorf("dest = %q, want %q", got, "[P] progress 100%\n")
+		}
+	})
+
+	t.Run("TTYAndFlushInline", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "\033[32m", "\033[0m", true)
+
+		if _, err := sw.Write([]byte("100%\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.FlushInline()
+		if strings.Contains(dest.String(), "\r") {
+			t.Errorf("TTY FlushInline leaked raw trailing CR: %q", dest.String())
+		}
+	})
+}
+
+type failFirstWriter struct {
+	failed bool
+	buf    bytes.Buffer
+}
+
+func (f *failFirstWriter) Write(p []byte) (int, error) {
+	if !f.failed {
+		f.failed = true
+		return 0, bytes.ErrTooLarge
+	}
+	return f.buf.Write(p)
+}
+
+func TestWriteConsecutiveCRBeforeLFAndFlush(t *testing.T) {
+	t.Run("NonTTY_CRCRLF", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("Write(\"hello\\r\\r\\n\") = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("NonTTY_SplitCR_CRLF", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r")); err != nil {
+			t.Fatalf("Write 1: %v", err)
+		}
+		if _, err := sw.Write([]byte("\r\n")); err != nil {
+			t.Fatalf("Write 2: %v", err)
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("split Write(\"hello\\r\", \"\\r\\n\") = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("NonTTY_CRCR_ThenFlush", func(t *testing.T) {
+		var dest bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "", "", false)
+		if _, err := sw.Write([]byte("hello\r\r")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		sw.Flush()
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("Write(\"hello\\r\\r\") + Flush() = %q, want %q", got, "[P] hello\n")
+		}
+	})
+
+	t.Run("TTY_CRCRLF_PreservesLineAndLog", func(t *testing.T) {
+		var dest, logBuf bytes.Buffer
+		sw := newStyledWriter(&dest, nil, "[P]", "", "", true)
+		sw.SetLogWriter(&logBuf)
+		if _, err := sw.Write([]byte("hello\r\r\n")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if got := logBuf.String(); got != "[P] hello\n" {
+			t.Errorf("logBuf = %q, want %q", got, "[P] hello\n")
+		}
+		if got := dest.String(); got != "[P] hello\n" {
+			t.Errorf("dest = %q, want %q", got, "[P] hello\n")
+		}
+	})
+}
+
+func TestFlushAfterDestWriteErrorStillParsesBufferedLines(t *testing.T) {
+	dest := &failFirstWriter{}
+	var logBuf bytes.Buffer
+	sw := newStyledWriter(dest, nil, "[P]", "", "", false)
+	sw.SetLogWriter(&logBuf)
+
+	if _, err := sw.Write([]byte("line1\nprogress 50%\rprogress 100%\nline3\n")); err == nil {
+		t.Fatal("expected Write to return dest error")
+	}
+	sw.Flush()
+
+	want := "[P] line1\n[P] progress 100%\n[P] line3\n"
+	if got := logBuf.String(); got != want {
+		t.Errorf("logBuf after Flush = %q, want %q", got, want)
+	}
+	if strings.Contains(dest.buf.String(), "\r") || strings.Contains(dest.buf.String(), "progress 50%") {
+		t.Errorf("dest received unparsed CR/overwrite buffer: %q", dest.buf.String())
+	}
+}
+
 func TestWriteCROverwriteTTY(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	// Standalone \r on TTY should produce an overwrite line.
 	sw.Write([]byte("progress 50%\rprogress 100%\n"))
@@ -211,7 +339,7 @@ func TestWriteCROverwriteTTY(t *testing.T) {
 
 func TestWriteCROverwriteNonTTY(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", false)
+	sw := newStyledWriter(&buf, nil, "", "", "", false)
 
 	// Non-TTY: \r segments are discarded.
 	sw.Write([]byte("progress 50%\rprogress 100%\n"))
@@ -227,7 +355,7 @@ func TestWriteCROverwriteNonTTY(t *testing.T) {
 
 func TestWriteCREmptySegment(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	// Empty \r segment (just whitespace) should be silently ignored on TTY.
 	sw.Write([]byte("   \rreal line\n"))
@@ -241,13 +369,13 @@ func TestWriteCREmptySegment(t *testing.T) {
 
 func TestWriteOverwriteLineWithPrefix(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[P]", "\033[1m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[P]", "\033[1m", "\033[0m", true)
 
 	err := sw.writeOverwriteLine("downloading...")
 	if err != nil {
 		t.Fatalf("writeOverwriteLine error: %v", err)
 	}
-	if !sw.hasOverwrite {
+	if !sw.term.hasOverwrite {
 		t.Error("hasOverwrite should be true")
 	}
 	got := buf.String()
@@ -264,7 +392,7 @@ func TestWriteOverwriteLineWithPrefix(t *testing.T) {
 
 func TestWriteOverwriteLineNoPrefix(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.writeOverwriteLine("bare progress")
 	got := buf.String()
@@ -280,11 +408,11 @@ func TestWriteOverwriteLineNoPrefix(t *testing.T) {
 
 func TestWriteCompleteLineClearsOverwrite(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
-	sw.hasOverwrite = true
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
+	sw.term.hasOverwrite = true
 
 	sw.writeCompleteLine("final")
-	if sw.hasOverwrite {
+	if sw.term.hasOverwrite {
 		t.Error("hasOverwrite should be false after writeCompleteLine")
 	}
 	got := buf.String()
@@ -301,7 +429,7 @@ func TestWriteCompleteLineClearsOverwrite(t *testing.T) {
 
 func TestFlushWithContent(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Write([]byte("buffered"))
 	if buf.Len() != 0 {
@@ -320,7 +448,7 @@ func TestFlushWithContent(t *testing.T) {
 
 func TestFlushEmpty(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Flush()
 	if buf.Len() != 0 {
@@ -330,7 +458,7 @@ func TestFlushEmpty(t *testing.T) {
 
 func TestFlushWithPrefix(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[P]", "\033[1m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[P]", "\033[1m", "\033[0m", true)
 
 	sw.Write([]byte("trail"))
 	sw.Flush()
@@ -345,7 +473,7 @@ func TestFlushWithPrefix(t *testing.T) {
 
 func TestFlushBlankOnly(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Write([]byte("   "))
 	sw.Flush()
@@ -356,8 +484,8 @@ func TestFlushBlankOnly(t *testing.T) {
 
 func TestFlushClearsOverwrite(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
-	sw.hasOverwrite = true
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
+	sw.term.hasOverwrite = true
 
 	sw.Write([]byte("trail"))
 	sw.Flush()
@@ -365,7 +493,7 @@ func TestFlushClearsOverwrite(t *testing.T) {
 	if !strings.Contains(got, "\r\033[2K") {
 		t.Errorf("flush should clear overwrite, got %q", got)
 	}
-	if sw.hasOverwrite {
+	if sw.term.hasOverwrite {
 		t.Error("hasOverwrite should be false after flush")
 	}
 }
@@ -374,7 +502,7 @@ func TestFlushClearsOverwrite(t *testing.T) {
 
 func TestFlushInline(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	sw.Write([]byte("prompt>"))
 	sw.FlushInline()
@@ -389,7 +517,7 @@ func TestFlushInline(t *testing.T) {
 
 func TestFlushInlineWithPrefix(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[>]", "\033[1m", "\033[0m", true)
+	sw := newStyledWriter(&buf, nil, "[>]", "\033[1m", "\033[0m", true)
 
 	sw.Write([]byte("input? "))
 	sw.FlushInline()
@@ -406,7 +534,7 @@ func TestFlushInlineWithPrefix(t *testing.T) {
 
 func TestWriteNonTTYStripsANSI(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "[X]", "", "", false)
+	sw := newStyledWriter(&buf, nil, "[X]", "", "", false)
 
 	sw.Write([]byte("\033[1m\033[32mbold green text\033[0m\n"))
 	got := buf.String()
@@ -422,7 +550,7 @@ func TestWriteNonTTYStripsANSI(t *testing.T) {
 
 func TestWriteConcurrent(t *testing.T) {
 	var buf bytes.Buffer
-	sw := newStyledWriter(&buf, "", "", "", true)
+	sw := newStyledWriter(&buf, nil, "", "", "", true)
 
 	done := make(chan struct{})
 	for i := 0; i < 10; i++ {
@@ -445,7 +573,7 @@ func TestWriteConcurrent(t *testing.T) {
 
 func TestSetLogWriterCaptures(t *testing.T) {
 	var dest, logBuf bytes.Buffer
-	sw := newStyledWriter(&dest, "[P]", "\033[32m", "\033[0m", true)
+	sw := newStyledWriter(&dest, nil, "[P]", "\033[32m", "\033[0m", true)
 	sw.SetLogWriter(&logBuf)
 
 	sw.Write([]byte("hello world\n"))
@@ -467,7 +595,7 @@ func TestSetLogWriterCaptures(t *testing.T) {
 
 func TestSetLogWriterBlankLine(t *testing.T) {
 	var dest, logBuf bytes.Buffer
-	sw := newStyledWriter(&dest, "[P]", "\033[32m", "\033[0m", true)
+	sw := newStyledWriter(&dest, nil, "[P]", "\033[32m", "\033[0m", true)
 	sw.SetLogWriter(&logBuf)
 
 	sw.Write([]byte("\n"))
@@ -479,7 +607,7 @@ func TestSetLogWriterBlankLine(t *testing.T) {
 
 func TestSetLogWriterNoPrefix(t *testing.T) {
 	var dest, logBuf bytes.Buffer
-	sw := newStyledWriter(&dest, "", "", "", true)
+	sw := newStyledWriter(&dest, nil, "", "", "", true)
 	sw.SetLogWriter(&logBuf)
 
 	sw.Write([]byte("plain\n"))
@@ -491,7 +619,7 @@ func TestSetLogWriterNoPrefix(t *testing.T) {
 
 func TestSetLogWriterNil(t *testing.T) {
 	var dest bytes.Buffer
-	sw := newStyledWriter(&dest, "[P]", "\033[32m", "\033[0m", true)
+	sw := newStyledWriter(&dest, nil, "[P]", "\033[32m", "\033[0m", true)
 	// No log writer set — should not panic.
 	sw.Write([]byte("safe\n"))
 	if !strings.Contains(dest.String(), "safe") {
@@ -501,7 +629,7 @@ func TestSetLogWriterNil(t *testing.T) {
 
 func TestSetLogWriterFlush(t *testing.T) {
 	var dest, logBuf bytes.Buffer
-	sw := newStyledWriter(&dest, "[P]", "\033[32m", "\033[0m", true)
+	sw := newStyledWriter(&dest, nil, "[P]", "\033[32m", "\033[0m", true)
 	sw.SetLogWriter(&logBuf)
 
 	// Write partial (no newline), then flush.
@@ -524,10 +652,10 @@ func TestUISetLogWriterCapturesBothStreams(t *testing.T) {
 
 	ui := &UI{}
 	ui.printer = newStyledWriter(
-		&stdoutDest, "[out]", "\033[32m", "\033[0m", true,
+		&stdoutDest, nil, "[out]", "\033[32m", "\033[0m", true,
 	)
 	ui.errPrinter = newStyledWriter(
-		&stderrDest, "[err]", "\033[31m", "\033[0m", true,
+		&stderrDest, nil, "[err]", "\033[31m", "\033[0m", true,
 	)
 
 	// Both printers share the same log writer.
@@ -580,7 +708,7 @@ func TestGlobalLogWriterInheritedByNewWriters(t *testing.T) {
 	// after the global is set — it should inherit the log.
 	var dest bytes.Buffer
 	sw := newStyledWriter(
-		&dest, "[sub]", "\033[34m", "\033[0m", true,
+		&dest, nil, "[sub]", "\033[34m", "\033[0m", true,
 	)
 
 	sw.Write([]byte("sub-command output\n"))
@@ -607,7 +735,7 @@ func TestGlobalLogWriterClearedAfter(t *testing.T) {
 
 	// Writers created after clearing should not log.
 	var dest bytes.Buffer
-	sw := newStyledWriter(&dest, "[P]", "", "", true)
+	sw := newStyledWriter(&dest, nil, "[P]", "", "", true)
 	sw.Write([]byte("after clear\n"))
 
 	if logBuf.Len() != 0 {
@@ -627,7 +755,7 @@ func TestGlobalLogWriterMultipleSubCommands(t *testing.T) {
 	// per-instance, then multiple sub-commands created.
 	var parentDest bytes.Buffer
 	parent := newStyledWriter(
-		&parentDest, "[all]", "\033[32m", "\033[0m", true,
+		&parentDest, nil, "[all]", "\033[32m", "\033[0m", true,
 	)
 	parent.SetLogWriter(&logBuf) // per-instance (pre-existing)
 	parent.Write([]byte("parent line\n"))
@@ -635,14 +763,14 @@ func TestGlobalLogWriterMultipleSubCommands(t *testing.T) {
 	// Sub-command 1: its own UI with own printers.
 	var sub1Dest bytes.Buffer
 	sub1 := newStyledWriter(
-		&sub1Dest, "[seeds]", "\033[34m", "\033[0m", true,
+		&sub1Dest, nil, "[seeds]", "\033[34m", "\033[0m", true,
 	)
 	sub1.Write([]byte("seed output\n"))
 
 	// Sub-command 2: its own UI with own printers.
 	var sub2Dest bytes.Buffer
 	sub2 := newStyledWriter(
-		&sub2Dest, "[release]", "\033[35m", "\033[0m", true,
+		&sub2Dest, nil, "[release]", "\033[35m", "\033[0m", true,
 	)
 	sub2.Write([]byte("release output\n"))
 
@@ -656,5 +784,108 @@ func TestGlobalLogWriterMultipleSubCommands(t *testing.T) {
 	}
 	if strings.Contains(logStr, "\033[") {
 		t.Error("log should be ANSI-stripped")
+	}
+}
+
+// --- Cross-writer TTY overwrite coordination ---
+
+func TestStyledWriterSharedTTYClearsOtherWorkersOverwrite(t *testing.T) {
+	var dest bytes.Buffer
+	term := &termState{}
+	gnome := newStyledWriter(&dest, term, "[image:m/a/d/gnome]", "", "", true)
+	server := newStyledWriter(&dest, term, "[image:m/a/d/server]", "", "", true)
+
+	// Worker 1 (gnome) emits a \r progress update (e.g. qemu-img convert -p),
+	// leaving an active overwrite line on the terminal without a trailing \n.
+	if _, err := gnome.Write([]byte("    (84.02/100%)\r    (89.02/100%)\r")); err != nil {
+		t.Fatalf("gnome.Write: %v", err)
+	}
+
+	// Worker 2 (server) prints a complete line. It must clear gnome's active
+	// overwrite line (\r\033[2K) before printing its own line so the two do not
+	// overlap on the same terminal row.
+	if _, err := server.Write([]byte("Creating sha256sum of: server.img.xz\n")); err != nil {
+		t.Fatalf("server.Write: %v", err)
+	}
+
+	gnome.Flush()
+	server.Flush()
+
+	out := dest.String()
+	// Server's line must be preceded by \r\033[2K, not glued directly onto "(84.02/100%)".
+	wantCleared := "\r\033[2K[image:m/a/d/server] Creating sha256sum of: server.img.xz\n"
+	if !strings.Contains(out, wantCleared) {
+		t.Errorf("server line was not preceded by overwrite clear:\ngot:  %q\nwant substring: %q", out, wantCleared)
+	}
+}
+
+func TestStyledWriterSharedTTYConcurrentNoInterleave(t *testing.T) {
+	var dest bytes.Buffer
+	term := &termState{}
+	progressWorker := newStyledWriter(&dest, term, "[worker:progress]", "", "", true)
+	logWorker := newStyledWriter(&dest, term, "[worker:log]", "", "", true)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_, _ = progressWorker.Write([]byte("progress\rnext\r"))
+		}
+		progressWorker.Flush()
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			_, _ = logWorker.Write([]byte("complete line\n"))
+		}
+		logWorker.Flush()
+	}()
+	wg.Wait()
+
+	out := dest.String()
+	// Every occurrence of "[worker:log] complete line\n" must start either at
+	// index 0, right after '\n', or right after "\r\033[2K" — never glued onto
+	// "[worker:progress] progress".
+	const needle = "[worker:log] complete line\n"
+	search := out
+	count := 0
+	for {
+		idx := strings.Index(search, needle)
+		if idx < 0 {
+			break
+		}
+		count++
+		before := search[:idx]
+		if len(before) > 0 && !strings.HasSuffix(before, "\n") && !strings.HasSuffix(before, "\r\033[2K") {
+			start := len(before) - 40
+			if start < 0 {
+				start = 0
+			}
+			t.Fatalf("log line #%d glued onto previous output: ...%q + %q", count, before[start:], needle)
+		}
+		search = search[idx+len(needle):]
+	}
+	if count != 100 {
+		t.Errorf("expected 100 log lines, got %d", count)
+	}
+}
+
+func TestUIWritersShareStdTermState(t *testing.T) {
+	ui1 := &UI{isTTY: true}
+	ui2 := &UI{isTTY: true}
+
+	w1 := ui1.NewStdoutWriter("image:gnome")
+	w2 := ui1.NewStderrWriter("image:server")
+	ui2.SetupPlainPrinters()
+
+	if w1.term != stdTermState {
+		t.Error("NewStdoutWriter should use stdTermState")
+	}
+	if w2.term != stdTermState {
+		t.Error("NewStderrWriter should use stdTermState")
+	}
+	if ui2.StdoutWriter().term != stdTermState || ui2.StderrWriter().term != stdTermState {
+		t.Error("SetupPlainPrinters should use stdTermState")
 	}
 }

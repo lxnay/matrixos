@@ -1,8 +1,9 @@
 package ostree
 
 import (
-	"errors"
 	"fmt"
+
+	"matrixos/vector/lib/config"
 )
 
 func (o *Ostree) GpgEnabled() (bool, error) {
@@ -22,124 +23,47 @@ func (o *Ostree) SetGpg(enabled bool) error {
 }
 
 func (o *Ostree) GpgPrivateKeyPath() (string, error) {
-	pk, err := o.cfg.GetItem("Ostree.GpgPrivateKey")
-	if err != nil {
-		return "", err
-	}
-	if pk == "" {
-		return "", errors.New("invalid Ostree.GpgPrivateKey")
-	}
-	return pk, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.GpgPrivateKey")
 }
 
 func (o *Ostree) GpgPublicKeyPath() (string, error) {
-	pk, err := o.cfg.GetItem("Ostree.GpgPublicKey")
-	if err != nil {
-		return "", err
-	}
-	if pk == "" {
-		return "", errors.New("invalid Ostree.GpgPublicKey")
-	}
-	return pk, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.GpgPublicKey")
 }
 
 func (o *Ostree) GpgOfficialPubKeyPath() (string, error) {
-	pk, err := o.cfg.GetItem("Ostree.GpgOfficialPublicKey")
-	if err != nil {
-		return "", err
-	}
-	if pk == "" {
-		return "", errors.New("invalid Ostree.GpgOfficialPublicKey")
-	}
-	return pk, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.GpgOfficialPublicKey")
 }
 
 func (o *Ostree) OsName() (string, error) {
-	name, err := o.cfg.GetItem("matrixOS.OsName")
-	if err != nil {
-		return "", err
-	}
-	if name == "" {
-		return "", errors.New("invalid matrixOS.OsName")
-	}
-	return name, nil
+	return config.GetRequiredItem(o.cfg, "matrixOS.OsName")
 }
 
 func (o *Ostree) FancyOsName() (string, error) {
-	name, err := o.cfg.GetItem("matrixOS.FancyOsName")
-	if err != nil {
-		return "", err
-	}
-	if name == "" {
-		return "", errors.New("invalid matrixOS.FancyOsName")
-	}
-	return name, nil
+	return config.GetRequiredItem(o.cfg, "matrixOS.FancyOsName")
 }
 
 func (o *Ostree) Arch() (string, error) {
-	arch, err := o.cfg.GetItem("matrixOS.Arch")
-	if err != nil {
-		return "", err
-	}
-	if arch == "" {
-		return "", errors.New("invalid matrixOS.Arch")
-	}
-	return arch, nil
+	return config.GetRequiredItem(o.cfg, "matrixOS.Arch")
 }
 
 func (o *Ostree) RepoDir() (string, error) {
-	repoDir, err := o.cfg.GetItem("Ostree.RepoDir")
-	if err != nil {
-		return "", err
-	}
-	if repoDir == "" {
-		return "", errors.New("invalid Ostree.RepoDir")
-	}
-	return repoDir, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.RepoDir")
 }
 
 func (o *Ostree) Sysroot() (string, error) {
-	sysroot, err := o.cfg.GetItem("Ostree.Sysroot")
-	if err != nil {
-		return "", err
-	}
-	if sysroot == "" {
-		return "", errors.New("invalid Ostree.Sysroot")
-	}
-	return sysroot, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.Sysroot")
 }
 
 func (o *Ostree) Root() (string, error) {
-	root, err := o.cfg.GetItem("Ostree.Root")
-	if err != nil {
-		return "", err
-	}
-	if root == "" {
-		return "", errors.New("invalid Ostree.Root")
-	}
-	return root, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.Root")
 }
 
 func (o *Ostree) Remote() (string, error) {
-	remote, err := o.cfg.GetItem("Ostree.Remote")
-	if err != nil {
-		return "", err
-	}
-	if remote == "" {
-		return "", errors.New("invalid Ostree.Remote")
-	}
-	return remote, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.Remote")
 }
 
 func (o *Ostree) RemoteURL() (string, error) {
-	url, err := o.cfg.GetItem("Ostree.RemoteUrl")
-	if err != nil {
-		return "", err
-	}
-	if url == "" {
-		return "", errors.New("invalid Ostree.RemoteUrl")
-	}
-	return url, nil
+	return config.GetRequiredItem(o.cfg, "Ostree.RemoteUrl")
 }
 
 func (o *Ostree) AvailableGpgPubKeyPaths() ([]string, error) {

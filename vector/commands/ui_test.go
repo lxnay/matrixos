@@ -82,8 +82,8 @@ func newUIWithBuffers(t *testing.T) (*UI, *bytes.Buffer, *bytes.Buffer) {
 
 	outBuf := &bytes.Buffer{}
 	errBuf := &bytes.Buffer{}
-	ui.printer = newStyledWriter(outBuf, "", "", "", false)
-	ui.errPrinter = newStyledWriter(errBuf, "", "", "", false)
+	ui.printer = newStyledWriter(outBuf, nil, "", "", "", false)
+	ui.errPrinter = newStyledWriter(errBuf, nil, "", "", "", false)
 	return &ui, outBuf, errBuf
 }
 

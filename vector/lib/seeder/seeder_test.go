@@ -11,11 +11,12 @@ import (
 func newTestSeeder() *Seeder {
 	mr := runner.NewMockRunner()
 	cfg := &config.MockConfig{Items: map[string][]string{}, Bools: map[string]bool{}}
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       mr.Run,
 		chrootRunner: mr.ChrootRun,
-		stdout:       &bytes.Buffer{},
-		stderr:       &bytes.Buffer{},
 	}
+	s.SetStdout(&bytes.Buffer{})
+	s.SetStderr(&bytes.Buffer{})
+	return s
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"matrixos/vector/lib/config"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,28 +19,15 @@ const (
 )
 
 type ImagesCleaner struct {
-	cfg    config.IConfig
-	stdout io.Writer
-	stderr io.Writer
+	baseCleaner
 }
 
 func (c *ImagesCleaner) Name() string {
 	return "images"
 }
 
-func (c *ImagesCleaner) Init(cfg config.IConfig, stdout, stderr io.Writer) error {
-	c.cfg = cfg
-	c.stdout = stdout
-	c.stderr = stderr
-	return nil
-}
-
 func (c *ImagesCleaner) isDryRun() (bool, error) {
-	val, err := c.cfg.GetItem("ImagesCleaner.DryRun")
-	if err != nil {
-		return false, err
-	}
-	return val == "true", nil
+	return c.isDryRunKey("ImagesCleaner.DryRun")
 }
 
 func (c *ImagesCleaner) MinAmountOfImages() (int, error) {
@@ -52,6 +38,9 @@ func (c *ImagesCleaner) MinAmountOfImages() (int, error) {
 	amount, err := strconv.Atoi(val)
 	if err != nil {
 		return 0, err
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("invalid ImagesCleaner.MinAmountOfImages %d: must be non-negative", amount)
 	}
 	return amount, nil
 }
@@ -137,9 +126,13 @@ func (c *ImagesCleaner) Run() error {
 	// Here we are ok following symlinks, because the user could have just swapped
 	// out a normal dir for a dir symlink.
 	stat, err := os.Stat(imgDir)
-	if errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(c.stderr, "Images directory %s does not exist. Nothing to do.\n", imgDir)
-		return nil
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(c.stderr, "Images directory %s does not exist. Nothing to do.\n", imgDir)
+			return nil
+		}
+		fmt.Fprintf(c.stderr, "Failed to stat images directory %s: %v\n", imgDir, err)
+		return err
 	}
 	if !stat.IsDir() {
 		fmt.Fprintf(c.stderr, "Images directory %s is not a directory.\n", imgDir)

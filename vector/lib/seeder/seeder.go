@@ -4,16 +4,12 @@ package seeder
 
 import (
 	"errors"
-	"fmt"
 	"io"
-	"os"
-	"slices"
-	"sync"
 	"syscall"
 
 	"matrixos/vector/lib/config"
-	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 )
 
 // Compile-time interface check.
@@ -37,10 +33,9 @@ type SeederInfo struct {
 
 // NewSeederOptions contains options for creating a new Seeder.
 type NewSeederOptions struct {
-	Verbose bool // show detailed output
-	Stdin   io.Reader
-	Stdout  io.Writer
-	Stderr  io.Writer
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 // SeedOptions contains options for running a seeder.
@@ -131,18 +126,10 @@ type ISeeder interface {
 // Seeder provides seed detection and manipulation operations.
 type Seeder struct {
 	*SeederConfig
+	worker.IO
 	runner       runner.Func
 	chrootRunner runner.ChrootRunFunc
 	stdin        io.Reader
-	stdout       io.Writer
-	stderr       io.Writer
-
-	verbose bool
-
-	// trackedMounts records every mount point created by this Seeder
-	// so that Cleanup can unmount them all on failure or signal.
-	trackedMountsMu sync.Mutex
-	trackedMounts   []string
 }
 
 // NewSeeder creates a new Seeder instance.
@@ -154,58 +141,16 @@ func NewSeeder(cfg config.IConfig, opts *NewSeederOptions) (*Seeder, error) {
 		opts = &NewSeederOptions{}
 	}
 
-	stdin := opts.Stdin
-	// keep nil.
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-
-	return &Seeder{
+	s := &Seeder{
 		SeederConfig: NewSeederConfig(cfg),
 		runner:       runner.Run,
 		chrootRunner: runner.ChrootRun,
-		stdin:        stdin,
-		stdout:       stdout,
-		stderr:       stderr,
-		verbose:      opts.Verbose,
-	}, nil
-}
-
-// trackMount appends a single mount point to the tracked list.
-func (s *Seeder) trackMount(mnt string) {
-	s.trackedMountsMu.Lock()
-	defer s.trackedMountsMu.Unlock()
-	s.trackedMounts = append(s.trackedMounts, mnt)
-}
-
-// trackMounts appends multiple mount points to the tracked list.
-func (s *Seeder) trackMounts(mnts []string) {
-	s.trackedMountsMu.Lock()
-	defer s.trackedMountsMu.Unlock()
-	s.trackedMounts = append(s.trackedMounts, mnts...)
-}
-
-// Cleanup unmounts all mount points tracked by this Seeder instance
-// in reverse order. It is safe to call multiple times.
-func (s *Seeder) Cleanup() {
-	s.trackedMountsMu.Lock()
-	mounts := slices.Clone(s.trackedMounts)
-	s.trackedMounts = nil
-	s.trackedMountsMu.Unlock()
-
-	if len(mounts) == 0 {
-		return
+		stdin:        opts.Stdin,
 	}
-
-	fmt.Fprintf(s.stdout, "Cleaning up %d tracked mount(s)...\n", len(mounts))
-	filesystems.CleanupMounts(filesystems.CleanupMountsOptions{
-		Mounts: mounts,
-		Stdout: s.stdout,
-		Stderr: s.stderr,
-	})
+	s.SetStdout(opts.Stdout)
+	s.SetStderr(opts.Stderr)
+	return s, nil
 }
+
+// Cleanup releases any resources held by this Seeder instance.
+func (s *Seeder) Cleanup() {}

@@ -47,7 +47,7 @@ func TestNewWorkerPool_InvalidTotalMemBytes(t *testing.T) {
 func TestNewWorkerPool_NoCgroupV2(t *testing.T) {
 	root := t.TempDir() // no cgroup.subtree_control file
 	_, err := NewWorkerPool(&WorkerPoolOptions{
-		Parallelism: 2, NumCPUs: 4, TotalMemBytes: 8 * 1024 * 1024 * 1024, CgroupRoot: root,
+		Parallelism: 2, NumCPUs: 4, MemPerWorkerBytes: 4 * 1024 * 1024 * 1024, TotalMemBytes: 8 * 1024 * 1024 * 1024, CgroupRoot: root,
 	})
 	if err == nil {
 		t.Fatal("expected error when cgroup v2 not available")
@@ -342,7 +342,7 @@ func TestBoostWorker_OutOfBounds(t *testing.T) {
 func TestBoostUnboostWorker_Memory(t *testing.T) {
 	root := fakeCgroupRoot(t)
 	memPerWorker := uint64(4 * 1024 * 1024 * 1024) // 4 GiB
-	totalMem := uint64(12 * 1024 * 1024 * 1024)     // 12 GiB
+	totalMem := uint64(12 * 1024 * 1024 * 1024)    // 12 GiB
 	pool, err := NewWorkerPool(&WorkerPoolOptions{
 		Parallelism:       3,
 		NumCPUs:           12,
@@ -388,8 +388,8 @@ func TestBoostUnboostWorker_CPUQuota(t *testing.T) {
 		t.Errorf("partitioned cpu.max: got %q, want %q", got, "200000 100000")
 	}
 
-	if err := writeCPUQuotaFull(dir, 0, opts); err != nil {
-		t.Fatalf("writeCPUQuotaFull: %v", err)
+	if err := writeCPUQuotaValue(dir, 0, opts.NumCPUs*cpuPeriod, " (boost)"); err != nil {
+		t.Fatalf("writeCPUQuotaValue (boost): %v", err)
 	}
 	got, _ = os.ReadFile(filepath.Join(dir, "cpu.max"))
 	if string(got) != "800000 100000" {

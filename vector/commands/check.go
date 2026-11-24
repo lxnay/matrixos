@@ -68,39 +68,25 @@ func (c *CheckCommand) Run() error {
 	c.Println("")
 
 	allOk := true
-
-	// Verify seeder environment.
-	c.Printf("%sChecking for seeders support (to build root filesystem from gentoo stage3):%s\n",
-		c.cBold, c.cReset)
-	if err := c.qa.VerifySeederEnvironmentSetup("/"); err != nil {
-		c.PrintErrf("%s%s%s\n", c.cRed, err, c.cReset)
-		allOk = false
-	} else {
-		c.Printf("  %s%sOK%s\n", c.cGreen, c.iconCheck, c.cReset)
+	checks := []struct {
+		label string
+		fn    func(string) error
+	}{
+		{"seeders support (to build root filesystem from gentoo stage3)", c.qa.VerifySeederEnvironmentSetup},
+		{"releaser support (to release chroots to ostree)", c.qa.VerifyReleaserEnvironmentSetup},
+		{"imager support (to create bootable images)", c.qa.VerifyImagerEnvironmentSetup},
 	}
-	c.Println("")
 
-	// Verify releaser environment.
-	c.Printf("%sChecking for releaser support (to release chroots to ostree):%s\n",
-		c.cBold, c.cReset)
-	if err := c.qa.VerifyReleaserEnvironmentSetup("/"); err != nil {
-		c.PrintErrf("%s%s%s\n", c.cRed, err, c.cReset)
-		allOk = false
-	} else {
-		c.Printf("  %s%sOK%s\n", c.cGreen, c.iconCheck, c.cReset)
+	for _, chk := range checks {
+		c.Printf("%sChecking for %s:%s\n", c.cBold, chk.label, c.cReset)
+		if err := chk.fn("/"); err != nil {
+			c.PrintErrf("%s%s%s\n", c.cRed, err, c.cReset)
+			allOk = false
+		} else {
+			c.Printf("  %s%sOK%s\n", c.cGreen, c.iconCheck, c.cReset)
+		}
+		c.Println("")
 	}
-	c.Println("")
-
-	// Verify imager environment.
-	c.Printf("%sChecking for imager support (to create bootable images):%s\n",
-		c.cBold, c.cReset)
-	if err := c.qa.VerifyImagerEnvironmentSetup("/"); err != nil {
-		c.PrintErrf("%s%s%s\n", c.cRed, err, c.cReset)
-		allOk = false
-	} else {
-		c.Printf("  %s%sOK%s\n", c.cGreen, c.iconCheck, c.cReset)
-	}
-	c.Println("")
 
 	if allOk {
 		c.Printf("%s%sAll environment checks passed.%s\n",

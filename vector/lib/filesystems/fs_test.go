@@ -85,36 +85,6 @@ func fakeExecOutput(c *runner.Cmd) ([]byte, error) {
 	return fakeExecCommand(c.Name, c.Args...).Output()
 }
 
-// fakeExecCombinedOutput wraps fakeExecCommand to implement runner.CombinedOutputFunc.
-func fakeExecCombinedOutput(c *runner.Cmd) ([]byte, error) {
-	return fakeExecCommand(c.Name, c.Args...).CombinedOutput()
-}
-
-// fakeChrootRun wraps fakeExecCommand to implement runner.ChrootRunFunc.
-func fakeChrootRun(c *runner.ChrootCmd) error {
-	if c.ChrootDir == "" {
-		return fmt.Errorf("missing chrootDir parameter")
-	}
-	if c.Name == "" {
-		return fmt.Errorf("missing Name parameter")
-	}
-	// Build the same unshare args that runner.chrootArgs would build,
-	// then delegate to fakeExecRun so TestHelperProcess handles "unshare".
-	cmdArgs := []string{
-		"--pid", "--fork", "--kill-child", "--mount", "--uts", "--ipc",
-		fmt.Sprintf("--mount-proc=%s/proc", c.ChrootDir),
-		"chroot", c.ChrootDir, c.Name,
-	}
-	cmdArgs = append(cmdArgs, c.Args...)
-	return fakeExecRun(&runner.Cmd{
-		Name:   "unshare",
-		Args:   cmdArgs,
-		Stdin:  c.Stdin,
-		Stdout: c.Stdout,
-		Stderr: c.Stderr,
-	})
-}
-
 // fakeChrootOutput wraps fakeExecCommand to implement runner.ChrootOutputFunc.
 func fakeChrootOutput(c *runner.ChrootCmd) ([]byte, error) {
 	if c.ChrootDir == "" {
@@ -135,22 +105,13 @@ func fakeChrootOutput(c *runner.ChrootCmd) ([]byte, error) {
 // setupMockExec swaps all execution vars with fakes and registers cleanup.
 func setupMockExec(t *testing.T) {
 	origExecRun := execRun
-	origExecOutput := execOutput
-	origExecCombinedOutput := execCombinedOutput
-	origChrootRun := ExecChrootRun
 	origChrootOutput := ExecChrootOutput
 
 	execRun = fakeExecRun
-	execOutput = fakeExecOutput
-	execCombinedOutput = fakeExecCombinedOutput
-	ExecChrootRun = fakeChrootRun
 	ExecChrootOutput = fakeChrootOutput
 
 	t.Cleanup(func() {
 		execRun = origExecRun
-		execOutput = origExecOutput
-		execCombinedOutput = origExecCombinedOutput
-		ExecChrootRun = origChrootRun
 		ExecChrootOutput = origChrootOutput
 	})
 }
@@ -445,22 +406,6 @@ func TestTempDirAndFileOperations(t *testing.T) {
 	}
 }
 
-func TestCheckDirsSameFilesystem(t *testing.T) {
-	tmpDir := t.TempDir()
-	subDir := filepath.Join(tmpDir, "subdir")
-	if err := os.Mkdir(subDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	same, err := CheckDirsSameFilesystem(tmpDir, subDir)
-	if err != nil {
-		t.Fatalf("CheckDirsSameFilesystem failed: %v", err)
-	}
-	if !same {
-		t.Errorf("Expected same filesystem for parent and subdir")
-	}
-}
-
 func TestCheckDirIsRoot(t *testing.T) {
 	err := CheckDirIsRoot("/")
 	if err == nil {
@@ -471,120 +416,6 @@ func TestCheckDirIsRoot(t *testing.T) {
 	err = CheckDirIsRoot(tmpDir)
 	if err != nil {
 		t.Errorf("CheckDirIsRoot(tmpDir) failed: %v", err)
-	}
-}
-
-func TestCheckFsCapabilitySupport(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	t.Run("Supported", func(t *testing.T) {
-		origRun := execRun
-		origCombinedOutput := execCombinedOutput
-
-		execRun = func(c *runner.Cmd) error {
-			// setcap and cp -a succeed
-			if c.Name == "cp" && len(c.Args) >= 3 {
-				// Actually create the copy file so defer os.Remove works
-				src := c.Args[1]
-				dst := c.Args[2]
-				data, _ := os.ReadFile(src)
-				os.WriteFile(dst, data, 0644)
-			}
-			return nil
-		}
-		execCombinedOutput = func(c *runner.Cmd) ([]byte, error) {
-			// getcap returns the capability string
-			if c.Name == "getcap" {
-				return []byte(c.Args[0] + " cap_net_raw=ep\n"), nil
-			}
-			return nil, nil
-		}
-		t.Cleanup(func() {
-			execRun = origRun
-			execCombinedOutput = origCombinedOutput
-		})
-
-		supported, err := CheckFsCapabilitySupport(tmpDir)
-		if err != nil {
-			t.Fatalf("CheckFsCapabilitySupport failed: %v", err)
-		}
-		if !supported {
-			t.Error("Expected capability support to be true")
-		}
-	})
-
-	t.Run("SetcapFails", func(t *testing.T) {
-		origRun := execRun
-		execRun = func(c *runner.Cmd) error {
-			if c.Name == "setcap" {
-				return fmt.Errorf("setcap failed")
-			}
-			return nil
-		}
-		t.Cleanup(func() { execRun = origRun })
-
-		supported, err := CheckFsCapabilitySupport(tmpDir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if supported {
-			t.Error("expected false when setcap fails")
-		}
-	})
-
-	t.Run("GetcapShowsNoCap", func(t *testing.T) {
-		origRun := execRun
-		origCombinedOutput := execCombinedOutput
-
-		execRun = func(c *runner.Cmd) error {
-			if c.Name == "cp" && len(c.Args) >= 3 {
-				src := c.Args[1]
-				dst := c.Args[2]
-				data, _ := os.ReadFile(src)
-				os.WriteFile(dst, data, 0644)
-			}
-			return nil
-		}
-		execCombinedOutput = func(c *runner.Cmd) ([]byte, error) {
-			// getcap returns empty — capability not preserved
-			return []byte(""), nil
-		}
-		t.Cleanup(func() {
-			execRun = origRun
-			execCombinedOutput = origCombinedOutput
-		})
-
-		supported, err := CheckFsCapabilitySupport(tmpDir)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if supported {
-			t.Error("expected false when getcap shows no capability")
-		}
-	})
-}
-
-func TestCheckFsCapabilitySupportIntegration(t *testing.T) {
-	// Integration test: exercises real setcap/getcap/cp -a binaries.
-	// Requires root (CAP_SETFCAP) and setcap/getcap in PATH.
-	if os.Getuid() != 0 {
-		t.Skip("skipping: requires root")
-	}
-	if _, err := exec.LookPath("setcap"); err != nil {
-		t.Skip("skipping: setcap not found in PATH")
-	}
-	if _, err := exec.LookPath("getcap"); err != nil {
-		t.Skip("skipping: getcap not found in PATH")
-	}
-
-	tmpDir := t.TempDir()
-	supported, err := checkFsCapabilitySupport(tmpDir)
-	if err != nil {
-		t.Fatalf("checkFsCapabilitySupport failed: %v", err)
-	}
-	// On a normal ext4/btrfs/xfs tmpdir as root, capabilities should work.
-	if !supported {
-		t.Log("WARNING: filesystem does not support capabilities (may be expected on some FS types)")
 	}
 }
 
@@ -639,31 +470,6 @@ func TestChrootOutput(t *testing.T) {
 		_, err := ChrootOutput("/target", "")
 		if err == nil {
 			t.Error("Expected error for missing chrootExec, got nil")
-		}
-	})
-}
-
-func TestChrootRun(t *testing.T) {
-	setupMockExec(t)
-
-	t.Run("Success", func(t *testing.T) {
-		if err := ChrootRun("/target", "/bin/true"); err != nil {
-			t.Errorf("ChrootRun failed: %v", err)
-		}
-	})
-
-	t.Run("CommandFail", func(t *testing.T) {
-		os.Setenv("MOCK_UNSHARE_FAIL", "1")
-		defer os.Unsetenv("MOCK_UNSHARE_FAIL")
-
-		if err := ChrootRun("/target", "/bin/false"); err == nil {
-			t.Error("Expected error from unshare failure, got nil")
-		}
-	})
-
-	t.Run("MissingArgs", func(t *testing.T) {
-		if err := ChrootRun("", "/bin/true"); err == nil {
-			t.Error("Expected error for missing chrootDir, got nil")
 		}
 	})
 }

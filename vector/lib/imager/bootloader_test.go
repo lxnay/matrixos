@@ -27,12 +27,12 @@ func TestMockBootloaderImplementsBootloader(t *testing.T) {
 	var _ Bootloader = (*MockBootloader)(nil)
 }
 
-func TestGetBootloader(t *testing.T) {
+func TestBootloaderSelection(t *testing.T) {
 	t.Run("DefaultsToGrub", func(t *testing.T) {
 		im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
-		bl := im.GetBootloader()
+		bl := im.bootloader
 		if bl == nil {
-			t.Fatal("GetBootloader() returned nil")
+			t.Fatal("im.bootloader is nil")
 		}
 		if _, ok := bl.(*GrubBootloader); !ok {
 			t.Fatalf("expected *GrubBootloader, got %T", bl)
@@ -43,9 +43,9 @@ func TestGetBootloader(t *testing.T) {
 		cfg := baseImageConfig()
 		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
 		im := newTestImager(cfg, &ostree.MockOstree{})
-		bl := im.GetBootloader()
+		bl := im.bootloader
 		if bl == nil {
-			t.Fatal("GetBootloader() returned nil")
+			t.Fatal("im.bootloader is nil")
 		}
 		if _, ok := bl.(*SystemdBootBootloader); !ok {
 			t.Fatalf("expected *SystemdBootBootloader, got %T", bl)
@@ -389,9 +389,6 @@ func TestInstallMemtest(t *testing.T) {
 		if !mock.ConfigureMemtestCalled {
 			t.Error("ConfigureMemtest should have been called on the bootloader")
 		}
-		if mock.ConfigureMemtestBin != hostMemtest {
-			t.Errorf("ConfigureMemtest bin = %q, want %q", mock.ConfigureMemtestBin, hostMemtest)
-		}
 	})
 
 	t.Run("SkippedWhenMemtestMissing", func(t *testing.T) {
@@ -419,7 +416,7 @@ func TestInstallMemtest(t *testing.T) {
 func TestGrubConfigureMemtestIsNoop(t *testing.T) {
 	im := newTestImager(baseImageConfig(), &ostree.MockOstree{})
 	g := NewGrubBootloader(im)
-	if err := g.ConfigureMemtest("/anywhere/memtest.efi64"); err != nil {
+	if err := g.ConfigureMemtest(); err != nil {
 		t.Errorf("GRUB ConfigureMemtest should be a no-op, got: %v", err)
 	}
 }
@@ -438,7 +435,7 @@ func TestSystemdBootConfigureMemtest(t *testing.T) {
 		im.efifsMount = efiMount
 		s := NewSystemdBootBootloader(im)
 
-		if err := s.ConfigureMemtest("/rootfs/usr/share/memtest86+/memtest.efi64"); err != nil {
+		if err := s.ConfigureMemtest(); err != nil {
 			t.Fatalf("ConfigureMemtest: %v", err)
 		}
 
@@ -461,7 +458,7 @@ func TestSystemdBootConfigureMemtest(t *testing.T) {
 		cfg.Items["Imager.Bootloader"] = []string{"systemd-boot"}
 		im := newTestImager(cfg, &ostree.MockOstree{})
 		s := NewSystemdBootBootloader(im)
-		if err := s.ConfigureMemtest("/x"); err == nil {
+		if err := s.ConfigureMemtest(); err == nil {
 			t.Error("should error when efifsMount is unset")
 		}
 	})
@@ -474,7 +471,7 @@ func TestSystemdBootConfigureMemtest(t *testing.T) {
 		im := newTestImager(cfg, &ostree.MockOstree{})
 		im.efifsMount = tmpDir
 		s := NewSystemdBootBootloader(im)
-		if err := s.ConfigureMemtest("/x"); err == nil {
+		if err := s.ConfigureMemtest(); err == nil {
 			t.Error("should error when RelativeEfiBootPath is unset")
 		}
 	})

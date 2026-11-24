@@ -11,7 +11,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Run / Output / CombinedOutput – real execution with a trivial command
+// Run / Output – real execution with a trivial command
 // ---------------------------------------------------------------------------
 
 func TestRun_Echo(t *testing.T) {
@@ -39,18 +39,6 @@ func TestOutput_Echo(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != "world" {
 		t.Errorf("output = %q, want %q", got, "world")
-	}
-}
-
-func TestCombinedOutput_Echo(t *testing.T) {
-	out, err := CombinedOutput(
-		&Cmd{Name: "echo", Args: []string{"combined"}},
-	)
-	if err != nil {
-		t.Fatalf("CombinedOutput(echo combined): unexpected error: %v", err)
-	}
-	if got := strings.TrimSpace(string(out)); got != "combined" {
-		t.Errorf("output = %q, want %q", got, "combined")
 	}
 }
 
@@ -97,20 +85,6 @@ func TestOutput_WithEnv(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "MY_OUTPUT_VAR=from_output") {
 		t.Errorf("env output should contain MY_OUTPUT_VAR, got: %s", string(out))
-	}
-}
-
-func TestCombinedOutput_WithEnv(t *testing.T) {
-	cmd := &Cmd{
-		Name: "env",
-		Env:  []string{"MY_COMBINED_VAR=from_combined"},
-	}
-	out, err := CombinedOutput(cmd)
-	if err != nil {
-		t.Fatalf("CombinedOutput(env): unexpected error: %v", err)
-	}
-	if !strings.Contains(string(out), "MY_COMBINED_VAR=from_combined") {
-		t.Errorf("env output should contain MY_COMBINED_VAR, got: %s", string(out))
 	}
 }
 
@@ -513,28 +487,6 @@ func TestMockRunner_FailOnCall(t *testing.T) {
 	// Call 2 succeeds
 	if err := mr.Run(&Cmd{Name: "c", Stdout: io.Discard, Stderr: io.Discard}); err != nil {
 		t.Fatalf("call 2: unexpected error: %v", err)
-	}
-}
-
-func TestMockRunner_OutputWithData(t *testing.T) {
-	mr := NewMockRunnerWithOutput(map[int][]byte{
-		0: []byte("first"),
-		1: []byte("second"),
-	})
-
-	out0, err := mr.Output(&Cmd{Name: "cmd0"})
-	if err != nil {
-		t.Fatalf("Output call 0: %v", err)
-	}
-	out1, err := mr.Output(&Cmd{Name: "cmd1"})
-	if err != nil {
-		t.Fatalf("Output call 1: %v", err)
-	}
-	if string(out0) != "first" {
-		t.Errorf("out0 = %q, want %q", string(out0), "first")
-	}
-	if string(out1) != "second" {
-		t.Errorf("out1 = %q, want %q", string(out1), "second")
 	}
 }
 

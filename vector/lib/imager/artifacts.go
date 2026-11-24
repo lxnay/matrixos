@@ -31,16 +31,7 @@ func (im *Imager) cleanAndStripRef() (string, error) {
 	if im.ref == "" {
 		return "", errors.New("missing ref, set Ref in NewImagerOptions")
 	}
-	stripped, err := im.ostree.RemoveFullFromBranch()
-	if err != nil {
-		return "", err
-	}
-
-	stripped = ostree.CleanRemoteFromRef(stripped)
-	if stripped == "" {
-		return "", errors.New("invalid ref parameter after cleaning")
-	}
-	return stripped, nil
+	return ostree.CleanAndStripRef(im.ostree)
 }
 
 // refToSuffix converts slashes in a ref to underscores for use in file names.
@@ -75,8 +66,12 @@ func (im *Imager) extractSeedName(data []byte) (string, error) {
 		seedName := strings.TrimPrefix(line, "SEED_NAME=")
 		// Version is the part after the last '-'.
 		if idx := strings.LastIndex(seedName, "-"); idx >= 0 {
-			releaseVersion = seedName[idx+1:]
-			im.Print("Extracted release version: %s\n", releaseVersion)
+			releaseVersion = strings.TrimSpace(seedName[idx+1:])
+			if releaseVersion != "" {
+				im.Print("Extracted release version: %s\n", releaseVersion)
+			} else {
+				im.PrintWarning("WARNING: SEED_NAME= has empty version after '-'\n")
+			}
 		} else {
 			im.PrintWarning("WARNING: SEED_NAME= value has no '-' separator\n")
 		}
@@ -111,10 +106,13 @@ func (im *Imager) ExtractReleaseVersion() (string, error) {
 		}
 		im.Print("%s", string(data))
 
-		releaseVersion, err = im.extractSeedName(data)
+		extracted, err := im.extractSeedName(data)
 		if err != nil {
 			return "", fmt.Errorf(
 				"failed to extract release version from build metadata: %w", err)
+		}
+		if extracted != "" {
+			releaseVersion = extracted
 		}
 	} else {
 		im.PrintWarning(
@@ -165,33 +163,22 @@ func (im *Imager) CompressedImagePath() (string, error) {
 }
 
 func (im *Imager) CompressImage() error {
-	if err := im.validateImageModeForCreation(); err != nil {
+	imagePathWithExt, err := im.CompressedImagePath()
+	if err != nil {
 		return err
 	}
 	compressor, err := im.Compressor()
 	if err != nil {
 		return fmt.Errorf("failed to get compressor: %w", err)
 	}
-	if compressor == "" {
-		return errors.New("missing compressor parameter")
-	}
-
-	imagePathWithExt, err := im.CompressedImagePath()
-	if err != nil {
-		return err
-	}
-
 	parts := strings.Fields(compressor)
-	if len(parts) == 0 {
-		return errors.New("invalid compressor parameters: empty command")
-	}
 
 	args := append(parts[1:], im.imagePath)
 	cmd := &runner.Cmd{
 		Name:   parts[0],
 		Args:   args,
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	}
 	if err := im.runner(cmd); err != nil {
 		return fmt.Errorf("compression failed: %w", err)
@@ -226,8 +213,8 @@ func (im *Imager) CreateQcow2Image() error {
 			im.imagePath,
 			qcow2Path,
 		},
-		Stdout: im.stdout,
-		Stderr: im.stderr,
+		Stdout: im.Stdout(),
+		Stderr: im.Stderr(),
 	})
 }
 
@@ -255,17 +242,17 @@ func (im *Imager) ShowFinalFilesystemInfo() error {
 	}
 
 	im.Print("Final boot partition directory tree:\n")
-	if err := filesystems.PrintDirectoryTree(im.stdout, im.bootfsMount); err != nil {
+	if err := filesystems.PrintDirectoryTree(im.Stdout(), im.bootfsMount); err != nil {
 		im.PrintWarning("WARNING: failed to list boot directory tree: %v\n", err)
 	}
 
 	im.Print("Final EFI partition directory tree:\n")
-	if err := filesystems.PrintDirectoryTree(im.stdout, im.efifsMount); err != nil {
+	if err := filesystems.PrintDirectoryTree(im.Stdout(), im.efifsMount); err != nil {
 		im.PrintWarning("WARNING: failed to list EFI directory tree: %v\n", err)
 	}
 
 	im.Print("Block devices on %s:\n", im.devicePath)
-	if err := filesystems.PrintBlockDeviceInfo(im.stdout, im.devicePath); err != nil {
+	if err := filesystems.PrintBlockDeviceInfo(im.Stdout(), im.devicePath); err != nil {
 		im.PrintWarning("WARNING: failed to get block device info: %v\n", err)
 	}
 

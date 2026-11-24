@@ -4,17 +4,20 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"matrixos/vector/lib/config"
 	"matrixos/vector/lib/filesystems"
 	"matrixos/vector/lib/runner"
+	"matrixos/vector/lib/worker"
 	"os"
 	"strings"
 )
 
-// IOstree defines the interface for ostree operations.
-// It mirrors all public methods of Ostree for testability.
+// Compile-time interface check.
+var _ IOstree = (*Ostree)(nil)
+
+// IOstree defines the interface for ostree operations used by callers
+// outside package ostree. Internal helpers remain on the concrete *Ostree.
 type IOstree interface {
 
 	// CloneForRef creates a new IOstree instance with the same configuration but a different ref.
@@ -24,22 +27,14 @@ type IOstree interface {
 	SetStdout(io.Writer)
 	// SetStderr sets the stderr writer for the Ostree instance.
 	SetStderr(io.Writer)
-	// Print prints to stdout with the given format and arguments.
-	Print(format string, a ...any)
-	// PrintError prints to stderr with the given format and arguments.
-	PrintError(format string, a ...any)
 
 	// Ref returns the ref for the Ostree instance.
 	Ref() string
 	// SetRef sets the ref for the Ostree instance.
 	SetRef(ref string)
 
-	// FullBranchSuffix returns the configured suffix used to identify "full" branches.
-	FullBranchSuffix() (string, error)
 	// IsBranchFullSuffixed checks if the instance ref is a "full" branch.
 	IsBranchFullSuffixed() (bool, error)
-	// BranchShortnameToFull converts a short branch name to a full one.
-	BranchShortnameToFull(shortName, relStage, osName, arch string) (string, error)
 	// BranchToFull converts a normal branch name to a full one.
 	BranchToFull() (string, error)
 	// RemoveFullFromBranch removes the "-full" suffix from a branch name.
@@ -48,10 +43,6 @@ type IOstree interface {
 	GpgEnabled() (bool, error)
 	// GpgPrivateKeyPath returns the user defined private/ placed GPG private key path.
 	GpgPrivateKeyPath() (string, error)
-	// GpgPublicKeyPath returns the user defined private/ placed GPG public key path.
-	GpgPublicKeyPath() (string, error)
-	// GpgOfficialPubKeyPath returns the official, git repository distributed GPG public key path.
-	GpgOfficialPubKeyPath() (string, error)
 	// OsName returns the name of the OS as defined in the config.
 	OsName() (string, error)
 	// FancyOsName returns the fancy (display) name of the OS as defined in the config.
@@ -67,27 +58,14 @@ type IOstree interface {
 	Root() (string, error)
 	// Remote returns the name of the remote.
 	Remote() (string, error)
-	// RemoteURL returns the URL of the remote.
-	RemoteURL() (string, error)
-	// AvailableGpgPubKeyPaths returns the list of available (file exists)
-	// GPG public key paths.
-	AvailableGpgPubKeyPaths() ([]string, error)
 	// GpgBestPubKeyPath returns the path to the GPG public key to use.
 	// It prefers the private key path over the official one.
 	GpgBestPubKeyPath() (string, error)
-	// ClientSideGpgArgs returns arguments for client-side GPG verification.
-	ClientSideGpgArgs() ([]string, error)
-	// GpgHomeDir returns the path to the GPG homedir, creating and setting permissions if needed.
-	GpgHomeDir() (string, error)
-	// GpgKeyID returns the GPG key ID to use for signing.
-	GpgKeyID() (string, error)
 	// GpgArgs returns the gpg arguments for ostree commands.
 	GpgArgs() ([]string, error)
 	// SetGpg enables or disables GPG verification in the local ostree repository.
 	SetGpg(enabled bool) error
 
-	// SetupEtc moves the /etc directory to /usr/etc.
-	SetupEtc(rootfs string) error
 	// PrepareFilesystemHierarchy prepares the filesystem hierarchy for OSTree.
 	PrepareFilesystemHierarchy(rootfs string) error
 	// ValidateFilesystemHierarchy validates the filesystem hierarchy for OSTree.
@@ -102,16 +80,10 @@ type IOstree interface {
 	InitRepo() error
 	// BootCommit returns the boot commit from an ostree sysroot.
 	BootCommit(sysroot string) (string, error)
-	// ListRemotes lists all the remote refs in the configuration's ostree repository.
-	ListRemotes() ([]string, error)
 	// LastCommit returns the last commit for the instance ref.
 	LastCommit() (string, error)
-	// ImportGpgKey imports a GPG key into the GPG homedir.
-	ImportGpgKey(keyPath string) error
 	// GpgSignFile signs a file with GPG.
 	GpgSignFile(file string) error
-	// GpgKeys returns the list of GPG key paths used for signing and verification.
-	GpgKeys() ([]string, error)
 	// InitializeSigningGpg imports GPG keys into the local GPG keyring.
 	InitializeSigningGpg() error
 	// MaybeInitializeGpg initializes GPG keys for an ostree repository.
@@ -142,8 +114,6 @@ type IOstree interface {
 	DeployedRootfs() (string, error)
 	// BootedRef returns the ref of the booted deployment.
 	BootedRef() (string, error)
-	// BootedHash returns the commit hash of the booted deployment.
-	BootedHash() (string, error)
 	// Switch runs `ostree admin switch` to switch to the instance ref.
 	Switch() error
 	// PostCopy runs `ostree admin post-copy` to perform post-copy operations
@@ -159,8 +129,6 @@ type IOstree interface {
 	Unpin(targetIndex int) error
 	// ListPackages lists the packages in a commit.
 	ListPackages(commit string) ([]string, error)
-	// ListContents lists the contents of a path in a commit.
-	ListContents(commit, path string) (*[]filesystems.PathInfo, error)
 	// ListEtcChanges performs a 3-way diff between the old pristine /usr/etc,
 	// the new pristine /usr/etc, and the user's live /etc, and returns a list of
 	// changes with their classification (add/update/remove/conflict/user-only).
@@ -203,23 +171,6 @@ func readerToList(reader io.Reader) ([]string, error) {
 	return elements, nil
 }
 
-func readerToFirstNonEmptyLine(reader io.Reader) (string, error) {
-	scanner := bufio.NewScanner(reader)
-	var line string
-	for scanner.Scan() {
-		line = scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		break
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-	return line, nil
-}
-
 // SetupEnvironment sets the LC_TIME environment variable to "C".
 // This is to ensure that Cloudflare can correctly process requests
 // without throwing HTTP 400 errors.
@@ -228,15 +179,14 @@ func SetupEnvironment() {
 }
 
 type Ostree struct {
+	worker.IO
 	cfg     config.IConfig
-	stdout  io.Writer
-	stderr  io.Writer
 	runner  runner.Func
 	verbose bool
 	ref     string
 }
 
-// NewOstreeWithRunner creates a new Ostree instance with a custom command runner (for testing).
+// NewOstreeOptions holds configuration for NewOstree.
 type NewOstreeOptions struct {
 	Config  config.IConfig
 	Stdout  io.Writer
@@ -250,48 +200,30 @@ func NewOstree(opts NewOstreeOptions) (*Ostree, error) {
 	if opts.Config == nil {
 		return nil, errors.New("missing config parameter")
 	}
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = os.Stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
-	}
-	return &Ostree{
+	o := &Ostree{
 		cfg:     opts.Config,
-		stdout:  stdout,
-		stderr:  stderr,
 		runner:  runCommand,
 		verbose: opts.Verbose,
 		ref:     opts.Ref,
-	}, nil
+	}
+	o.SetStdout(opts.Stdout)
+	o.SetStderr(opts.Stderr)
+	return o, nil
 }
 
 func (o *Ostree) CloneForRef(ref string) (IOstree, error) {
-	return NewOstree(NewOstreeOptions{
+	clone, err := NewOstree(NewOstreeOptions{
 		Config:  o.cfg,
-		Stdout:  o.stdout,
-		Stderr:  o.stderr,
+		Stdout:  o.Stdout(),
+		Stderr:  o.Stderr(),
 		Verbose: o.verbose,
 		Ref:     ref,
 	})
-}
-
-func (o *Ostree) SetStdout(w io.Writer) {
-	o.stdout = w
-}
-
-func (o *Ostree) SetStderr(w io.Writer) {
-	o.stderr = w
-}
-
-func (o *Ostree) Print(format string, a ...any) {
-	fmt.Fprintf(o.stdout, format, a...)
-}
-
-func (o *Ostree) PrintError(format string, a ...any) {
-	fmt.Fprintf(o.stderr, format, a...)
+	if err != nil {
+		return nil, err
+	}
+	clone.runner = o.runner
+	return clone, nil
 }
 
 func (o *Ostree) SetVerbose(v bool) {
@@ -306,11 +238,11 @@ func (o *Ostree) SetRef(ref string) {
 	o.ref = ref
 }
 
-// runCmd runs a command via the instance's command runner, adding --verbose
-// and the "ostree" binary name automatically.
-func (o *Ostree) runCmd(stdout, stderr io.Writer, args ...string) error {
+// runCmd runs a command via the instance's command runner, optionally adding
+// --verbose and the "ostree" binary name automatically.
+func (o *Ostree) runCmd(stdout, stderr io.Writer, verbose bool, args ...string) error {
 	var finalArgs []string
-	if o.verbose {
+	if verbose {
 		finalArgs = append(finalArgs, "--verbose")
 		o.PrintError(">> Executing: ostree --verbose %s\n", strings.Join(args, " "))
 	}
@@ -320,7 +252,7 @@ func (o *Ostree) runCmd(stdout, stderr io.Writer, args ...string) error {
 
 // ostreeRun runs an ostree command with stdout/stderr directed to the instance's stdout/stderr.
 func (o *Ostree) ostreeRun(args ...string) error {
-	return o.runCmd(o.stdout, o.stderr, args...)
+	return o.runCmd(o.Stdout(), o.Stderr(), o.verbose, args...)
 }
 
 // ostreeRunCapture runs an ostree command and captures its stdout.
@@ -329,36 +261,7 @@ func (o *Ostree) ostreeRunCapture(args ...string) (io.Reader, error) {
 		o.PrintError(">> Executing: ostree (stdout capture) %s\n", strings.Join(args, " "))
 	}
 	stdo := new(bytes.Buffer)
-	verbose := o.verbose
-	o.verbose = false
-	err := o.runCmd(stdo, o.stderr, args...)
-	o.verbose = verbose
-	return stdo, err
-}
-
-func run(stdout, stderr io.Writer, verbose bool, args ...string) error {
-	var finalArgs []string
-	if verbose {
-		finalArgs = append(finalArgs, "--verbose")
-		fmt.Fprintf(stderr, ">> Executing: ostree --verbose %s\n", strings.Join(args, " "))
-	}
-	finalArgs = append(finalArgs, args...)
-	return runCommand(newOstreeCmd(stdout, stderr, finalArgs...))
-}
-
-// Run runs an ostree command with --verbose if requested.
-var Run = func(verbose bool, args ...string) error {
-	return run(os.Stdout, os.Stderr, verbose, args...)
-}
-
-// RunWithStdoutCapture runs an ostree command and captures its stdout,
-// with --verbose if requested.
-var RunWithStdoutCapture = func(verbose bool, args ...string) (io.Reader, error) {
-	if verbose {
-		fmt.Fprintf(os.Stderr, ">> Executing: ostree (stdout capture) %s\n", strings.Join(args, " "))
-	}
-	stdo := new(bytes.Buffer)
-	err := run(stdo, os.Stderr, false /* do not run ostree with verbose! */, args...)
+	err := o.runCmd(stdo, o.Stderr(), false, args...)
 	return stdo, err
 }
 

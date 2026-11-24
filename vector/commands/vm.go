@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"matrixos/vector/lib/filesystems"
@@ -30,15 +31,26 @@ func qemuSystemBinary() string {
 }
 
 const (
-	rootPassword = "matrix"
+	rootPassword     = "matrix"
+	vmMaxBufferedOut = 1 << 20 // 1 MiB rolling buffer cap
 )
 
 type VMDriver struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	reader  *bufio.Reader
-	display io.Writer // where to echo VM output (nil = discard)
+	ctx      context.Context
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	reader   *bufio.Reader
+	display  io.Writer // where to echo VM output (nil = discard)
+	pumpOnce sync.Once
+	waitOnce sync.Once
+	waitErr  error
+	mu       sync.Mutex
+	outBuf   string
+	eof      bool
+	eofErr   error
+	notify   chan struct{}
+	pumpDone chan struct{}
 }
 
 func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
@@ -59,10 +71,12 @@ func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return nil, err
 	}
 
 	return &VMDriver{
+		ctx:     ctx,
 		cmd:     cmd,
 		stdin:   stdin,
 		stdout:  stdout,
@@ -71,51 +85,93 @@ func NewVMDriver(ctx context.Context, args []string) (*VMDriver, error) {
 	}, nil
 }
 
-// Start starts the VM process
+// Start starts the VM process and immediately begins draining stdout.
 func (vm *VMDriver) Start() error {
-	return vm.cmd.Start()
+	if err := vm.cmd.Start(); err != nil {
+		return err
+	}
+	vm.ensurePump()
+	return nil
+}
+
+// ensurePump starts a single background goroutine that drains vm.reader
+// continuously without blocking on Expect callers, avoiding both concurrent
+// bufio.Reader access and pipe stalls after Expect returns.
+func (vm *VMDriver) ensurePump() {
+	vm.pumpOnce.Do(func() {
+		vm.notify = make(chan struct{}, 1)
+		pumpDone := make(chan struct{})
+		vm.mu.Lock()
+		vm.pumpDone = pumpDone
+		vm.mu.Unlock()
+		go func() {
+			defer close(pumpDone)
+			buf := make([]byte, 1024)
+			for {
+				n, err := vm.reader.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					if vm.display != nil {
+						fmt.Fprint(vm.display, chunk)
+					}
+					vm.mu.Lock()
+					vm.outBuf += chunk
+					if len(vm.outBuf) > vmMaxBufferedOut {
+						vm.outBuf = vm.outBuf[len(vm.outBuf)-vmMaxBufferedOut:]
+					}
+					vm.mu.Unlock()
+					select {
+					case vm.notify <- struct{}{}:
+					default:
+					}
+				}
+				if err != nil {
+					vm.mu.Lock()
+					vm.eof = true
+					vm.eofErr = err
+					vm.mu.Unlock()
+					select {
+					case vm.notify <- struct{}{}:
+					default:
+					}
+					return
+				}
+			}
+		}()
+	})
 }
 
 // Expect waits for a specific string in the output within a timeout
 func (vm *VMDriver) Expect(target string, timeout time.Duration) error {
+	vm.ensurePump()
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	resultCh := make(chan error)
-
-	go func() {
-		buf := make([]byte, 1024)
-		var matchBuf strings.Builder
-		for {
-			n, err := vm.reader.Read(buf)
-			if n > 0 {
-				chunk := string(buf[:n])
-				if vm.display != nil {
-					fmt.Fprint(vm.display, chunk)
-				}
-				matchBuf.WriteString(chunk)
-				if strings.Contains(matchBuf.String(), target) {
-					resultCh <- nil
-					return
-				}
-			}
-			if err != nil {
-				if err != io.EOF {
-					resultCh <- err
-				} else {
-					// EOF reached but target not found yet, loop will exit next read
-					resultCh <- fmt.Errorf("EOF reached while waiting for pattern: %q", target)
-				}
-				return
-			}
+	for {
+		vm.mu.Lock()
+		if idx := strings.Index(vm.outBuf, target); idx >= 0 {
+			vm.outBuf = vm.outBuf[idx+len(target):]
+			vm.mu.Unlock()
+			return nil
 		}
-	}()
+		eof := vm.eof
+		eofErr := vm.eofErr
+		vm.mu.Unlock()
 
-	select {
-	case err := <-resultCh:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("timeout waiting for pattern: %q", target)
+		if eof {
+			if eofErr == io.EOF {
+				return fmt.Errorf("EOF reached while waiting for pattern: %q", target)
+			}
+			return eofErr
+		}
+
+		select {
+		case <-vm.notify:
+		case <-vm.pumpDone:
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for pattern: %q", target)
+		}
 	}
 }
 
@@ -126,18 +182,71 @@ func (vm *VMDriver) Send(cmd string) error {
 }
 
 func (vm *VMDriver) Close() error {
+	if vm == nil {
+		return nil
+	}
+	if vm.stdin != nil {
+		_ = vm.stdin.Close()
+	}
+	if vm.cmd == nil || vm.cmd.Process == nil {
+		if vm.stdout != nil {
+			_ = vm.stdout.Close()
+		}
+		return nil
+	}
 	return vm.Wait()
 }
 
-// Wait waits for the VM process to exit
+// Wait waits for the stdout pump goroutine to finish draining and then reaps
+// the VM process. Waiting for the pump before cmd.Wait() honours os/exec's
+// StdoutPipe contract so trailing output is never truncated.
+// It is safe to call multiple times (e.g. an explicit Wait followed by a
+// deferred Close).
 func (vm *VMDriver) Wait() error {
-	return vm.cmd.Wait()
+	if vm == nil || vm.cmd == nil || vm.cmd.Process == nil {
+		return nil
+	}
+	vm.waitOnce.Do(func() {
+		vm.mu.Lock()
+		done := vm.pumpDone
+		vm.mu.Unlock()
+		if done != nil {
+			if vm.ctx != nil {
+				select {
+				case <-done:
+				case <-vm.ctx.Done():
+					// Context cancelled: give the pump up to WaitDelay to drain
+					// naturally, then fall through to cmd.Wait() which closes
+					// StdoutPipe and unblocks the pump even if a descendant kept
+					// stdout open.
+					delay := vm.cmd.WaitDelay
+					if delay <= 0 {
+						delay = 5 * time.Second
+					}
+					timer := time.NewTimer(delay)
+					select {
+					case <-done:
+						timer.Stop()
+					case <-timer.C:
+					}
+				}
+			} else {
+				<-done
+			}
+		}
+		vm.waitErr = vm.cmd.Wait()
+		if done != nil {
+			<-done
+		}
+	})
+	return vm.waitErr
 }
 
 // VMCommand checks matrixOS images via QEMU
 type VMCommand struct {
 	BaseCommand
 	UI
+	SignalGuard
 	fs            *flag.FlagSet
 	imagePath     string
 	memory        string
@@ -156,10 +265,6 @@ type VMCommand struct {
 	cpus          string
 	extraDisk     bool
 	extraDiskSize string
-
-	// Styled I/O writers
-	stdout *styledWriter
-	stderr *styledWriter
 }
 
 // NewVMCommand creates a new VMCommand
@@ -213,20 +318,21 @@ func (c *VMCommand) Run() error {
 		c.fs.Usage()
 		return fmt.Errorf("missing required flag: --image")
 	}
+	return c.RunWithGuard(c.run)
+}
 
+func (c *VMCommand) run() error {
 	// Set up styled writers for output.
-	c.stdout = c.NewStdoutWriter("vm")
-	c.stderr = c.NewStderrWriter("vm")
 	c.SetupPrinters("vm")
 	defer c.FlushPrinters()
-	defer c.stdout.Flush()
-	defer c.stderr.Flush()
+	c.PushCleanup(c.FlushPrinters)
 
 	tempDir, err := os.MkdirTemp("", "matrixos-vm-")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
+	c.PushCleanup(func() { _ = os.RemoveAll(tempDir) })
 
 	mroot, err := c.cfg.GetItem("matrixOS.Root")
 	if err != nil {
@@ -251,19 +357,22 @@ func (c *VMCommand) Run() error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer os.Remove(testImageFile.Name())
-	truncCmd := exec.Command("truncate", "-s", "64M", testImageFile.Name())
+	testImagePath := testImageFile.Name()
+	_ = testImageFile.Close()
+	defer os.Remove(testImagePath)
+	c.PushCleanup(func() { _ = os.Remove(testImagePath) })
+
+	truncCmd := exec.Command("truncate", "-s", "64M", testImagePath)
 	if err := truncCmd.Run(); err != nil {
 		return fmt.Errorf("failed to truncate test image: %w", err)
 	}
-	testImageFile.Close()
 
 	mkfsTestImgArgs := []string{
 		"mkfs.ext4",
 		"-L", "TESTDATA",
 		"-F",
-		"-d", "tests/vm-suite",
-		testImageFile.Name(),
+		"-d", filepath.Join(mroot, "vector/tests/vm-suite"),
+		testImagePath,
 	}
 	c.Printf("Generating test filesystem with command: %v\n", mkfsTestImgArgs)
 	if err := exec.Command(mkfsTestImgArgs[0], mkfsTestImgArgs[1:]...).Run(); err != nil {
@@ -271,21 +380,22 @@ func (c *VMCommand) Run() error {
 	}
 
 	// Optionally create an extra block device.
-	var extraDiskFile *os.File
+	var extraDiskPath string
 	if c.extraDisk {
-		var err error
-		extraDiskFile, err = os.CreateTemp("", "vm-extra-disk-*.img")
+		extraDiskFile, err := os.CreateTemp("", "vm-extra-disk-*.img")
 		if err != nil {
 			return fmt.Errorf("failed to create extra disk temp file: %w", err)
 		}
-		defer os.Remove(extraDiskFile.Name())
-		extraDiskFile.Close()
+		extraDiskPath = extraDiskFile.Name()
+		_ = extraDiskFile.Close()
+		defer os.Remove(extraDiskPath)
+		c.PushCleanup(func() { _ = os.Remove(extraDiskPath) })
 
-		truncExtraCmd := exec.Command("truncate", "-s", c.extraDiskSize, extraDiskFile.Name())
+		truncExtraCmd := exec.Command("truncate", "-s", c.extraDiskSize, extraDiskPath)
 		if out, err := truncExtraCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to truncate extra disk to %s: %s: %w", c.extraDiskSize, string(out), err)
 		}
-		c.Printf("Created extra block device: %s (%s)\n", extraDiskFile.Name(), c.extraDiskSize)
+		c.Printf("Created extra block device: %s (%s)\n", extraDiskPath, c.extraDiskSize)
 	}
 
 	format := "raw"
@@ -305,12 +415,12 @@ func (c *VMCommand) Run() error {
 		"-drive", "if=pflash,format=raw,readonly=on,file=" + codeDst,
 		"-drive", "if=pflash,format=raw,file=" + varsDst,
 		"-drive", fmt.Sprintf("file=%s,format=%s,if=virtio", c.imagePath, format),
-		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", testImageFile.Name()),
+		"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", testImagePath),
 	}
 
-	if extraDiskFile != nil {
+	if extraDiskPath != "" {
 		qemuArgs = append(qemuArgs,
-			"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", extraDiskFile.Name()),
+			"-drive", fmt.Sprintf("file=%s,format=raw,if=virtio", extraDiskPath),
 		)
 	}
 
@@ -368,19 +478,65 @@ func (c *VMCommand) displayArgs() []string {
 	return qemuArgs
 }
 
+// startGuardedVM registers QEMU cancellation and teardown cleanups before
+// calling start so SIGINT/SIGTERM kills and reaps QEMU before temporary disks
+// are removed. The returned stop function is idempotent and should be deferred.
+func (c *VMCommand) startGuardedVM(cancel context.CancelFunc, start, stop func() error) (func(), error) {
+	var mu sync.Mutex
+	started := false
+	stopOnce := sync.OnceFunc(func() {
+		cancel()
+		mu.Lock()
+		wasStarted := started
+		mu.Unlock()
+		if wasStarted {
+			_ = stop()
+		}
+	})
+	c.PushPreCleanup(cancel)
+	c.PushCleanup(stopOnce)
+
+	mu.Lock()
+	err := start()
+	if err == nil {
+		started = true
+	}
+	mu.Unlock()
+	return stopOnce, err
+}
+
 func (c *VMCommand) runInteractive(qemuArgs []string) error {
 	c.Println("Starting VM in interactive mode...")
-	vm, err := NewVMDriver(context.Background(), qemuArgs)
-	if err != nil {
-		return fmt.Errorf("failed to init VM: %w", err)
-	}
-	vm.display = os.Stdout
-	defer vm.Close()
+	c.FlushPrinters()
 
-	if err := vm.Start(); err != nil {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Wire QEMU directly to stdio so interactive input works and large serial
+	// output never deadlocks on an unread pipe.
+	cmd := exec.CommandContext(ctx, qemuSystemBinary(), qemuArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Cancel = func() error {
+		return cmd.Process.Signal(os.Interrupt)
+	}
+	cmd.WaitDelay = 5 * time.Second
+
+	var waitOnce sync.Once
+	var waitErr error
+	waitCmd := func() error {
+		waitOnce.Do(func() { waitErr = cmd.Wait() })
+		return waitErr
+	}
+
+	stopVM, err := c.startGuardedVM(cancel, cmd.Start, waitCmd)
+	defer stopVM()
+	if err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
-	if err := vm.Wait(); err != nil {
+
+	if err := waitCmd(); err != nil {
 		return fmt.Errorf("VM exited with error: %w", err)
 	}
 	return nil
@@ -403,9 +559,16 @@ func (c *VMCommand) runTests(qemuArgs []string) error {
 		return fmt.Errorf("failed to init VM: %w", err)
 	}
 	vm.display = os.Stdout
-	defer vm.Close()
 
-	if err := vm.Start(); err != nil {
+	stopVM, err := c.startGuardedVM(cancel, func() error {
+		if err := vm.Start(); err != nil {
+			_ = vm.Close()
+			return err
+		}
+		return nil
+	}, vm.Close)
+	defer stopVM()
+	if err != nil {
 		return fmt.Errorf("failed to start VM: %w", err)
 	}
 

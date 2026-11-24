@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -15,91 +14,57 @@ import (
 
 var userRegex = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
+const maxLuksPasswordAttempts = 5
+
 // setupOSRunner abstracts OS-level operations so they can be replaced in tests.
 type setupOSRunner struct {
-	// execCommand wraps exec.Command for spawning processes.
-	execCommand func(name string, args ...string) cmdRunner
-	// readFile reads a file's content.
-	readFile func(path string) ([]byte, error)
-	// writeFile writes data to a file with the given permissions.
-	writeFile func(path string, data []byte, perm os.FileMode) error
-	// appendFile appends data to a file.
-	appendFile func(path string, data []byte) error
-	// mkdirAll creates directories recursively.
-	mkdirAll func(path string, perm os.FileMode) error
-	// stat returns file info for a path.
-	stat func(path string) (os.FileInfo, error)
-	// removeFile removes a file.
-	removeFile func(path string) error
-	// fileExists returns true if a file exists.
-	fileExists func(path string) bool
-	// copyFile copies src to dst.
-	copyFile func(src, dst string) error
-	// chmod changes file permissions.
-	chmod func(path string, mode os.FileMode) error
-	// chown changes file owner.
-	chown func(path string, uid, gid int) error
-	// getMountDevice returns the device for a mountpoint.
-	getMountDevice func(mnt string) (string, error)
-	// getPartitionNumber returns the partition number.
+	osRunner
+	// interactiveStdout/interactiveStderr bypass line-buffered styledWriter so
+	// interactive prompts (passwd, cryptsetup, systemd-firstboot) display
+	// without waiting for a trailing newline. Nil falls back to stdout/stderr.
+	interactiveStdout  io.Writer
+	interactiveStderr  io.Writer
+	mkdirTemp          func(dir, pattern string) (string, error)
+	fileExists         func(path string) bool
+	chmod              func(path string, mode os.FileMode) error
+	chown              func(path string, uid, gid int) error
+	getMountDevice     func(mnt string) (string, error)
 	getPartitionNumber func(device string) (string, error)
-	// getPartitionLabel returns the partition label.
-	getPartitionLabel func(device string) (string, error)
-	// getBlockDevice returns the block device for a partition.
-	getBlockDevice func(device string) (string, error)
-	// listBlockDevices lists block devices with given output fields.
-	listBlockDevices func(fields string) ([]string, error)
-	// getBlkidValue returns a blkid attribute value for a device.
-	getBlkidValue func(device, tag string) (string, error)
-	// getEuid returns the effective user ID.
-	getEuid func() int
-	// getCurrentUser returns the current username.
-	getCurrentUser func() string
-	// stdin provides user input for prompts.
-	stdin io.Reader
-	// stdout is the writer for info output.
-	stdout io.Writer
-	// stderr is the writer for error/warning output.
-	stderr io.Writer
-	// glob returns paths matching a pattern.
-	glob func(pattern string) ([]string, error)
+	getPartitionLabel  func(device string) (string, error)
+	getBlockDevice     func(device string) (string, error)
+	listBlockDevices   func(fields string) ([]string, error)
+	getBlkidValue      func(device, tag string) (string, error)
+	getEuid            func() int
+	getCurrentUser     func() string
+	glob               func(pattern string) ([]string, error)
+}
+
+func (r *setupOSRunner) getInteractiveStdout() io.Writer {
+	if r.interactiveStdout != nil {
+		return r.interactiveStdout
+	}
+	return r.stdout
+}
+
+func (r *setupOSRunner) getInteractiveStderr() io.Writer {
+	if r.interactiveStderr != nil {
+		return r.interactiveStderr
+	}
+	return r.stderr
 }
 
 func defaultSetupOSRunner() *setupOSRunner {
 	return &setupOSRunner{
-		execCommand: func(name string, args ...string) cmdRunner {
-			cmd := execCommand(name, args...)
-			return &realCmdRunner{
-				cmd:    cmd,
-				stdout: &cmd.Stdout,
-				stderr: &cmd.Stderr,
-			}
-		},
-		readFile:  os.ReadFile,
-		writeFile: os.WriteFile,
-		appendFile: func(path string, data []byte) error {
-			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = f.Write(data)
-			return err
-		},
-		mkdirAll:   os.MkdirAll,
-		stat:       os.Stat,
-		removeFile: os.Remove,
+		osRunner:          defaultOSRunner(),
+		interactiveStdout: os.Stdout,
+		interactiveStderr: os.Stderr,
+		mkdirTemp:         os.MkdirTemp,
 		fileExists: func(path string) bool {
 			_, err := os.Stat(path)
 			return err == nil
 		},
-		copyFile: filesystems.CopyFile,
-		chmod: func(path string, mode os.FileMode) error {
-			return os.Chmod(path, mode)
-		},
-		chown: func(path string, uid, gid int) error {
-			return os.Chown(path, uid, gid)
-		},
+		chmod:              os.Chmod,
+		chown:              os.Chown,
 		getMountDevice:     filesystems.MountpointToDevice,
 		getPartitionNumber: filesystems.PartitionNumber,
 		getPartitionLabel:  filesystems.PartitionLabel,
@@ -129,9 +94,6 @@ func defaultSetupOSRunner() *setupOSRunner {
 		},
 		getEuid:        getEuid,
 		getCurrentUser: func() string { return os.Getenv("USER") },
-		stdin:          os.Stdin,
-		stdout:         os.Stdout,
-		stderr:         os.Stderr,
 		glob:           filepath.Glob,
 	}
 }
@@ -201,19 +163,14 @@ func (c *SetupOSCommand) parseArgs(args []string) error {
 }
 
 func (c *SetupOSCommand) configStr(key string) (string, error) {
-	val, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("config key %s: %w", key, err)
-	}
-	if val == "" {
-		return "", fmt.Errorf("config key %s is empty", key)
-	}
-	return val, nil
+	return c.configItem(key)
 }
 
 func (c *SetupOSCommand) Run() error {
-	if c.run.getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	defer c.FlushPrinters()
+
+	if err := requireRootFn(c.run.getEuid); err != nil {
+		return err
 	}
 	if c.run.getCurrentUser() != "root" {
 		fmt.Fprintf(c.run.stderr,
@@ -454,17 +411,12 @@ func (c *SetupOSCommand) changeUserPassword(targetUser string) error {
 
 	fmt.Fprintf(c.run.stdout, "   %s%sChanging password for user: %s%s\n",
 		c.cBold, c.iconGear, targetUser, c.cReset)
+	c.FlushPrinters()
 
 	passwdCmd := c.run.execCommand("passwd", targetUser)
-	passwdCmd.SetStdout(c.run.stdout)
-	passwdCmd.SetStderr(c.run.stderr)
-	// passwd reads from the controlling terminal directly, but we wire stdin
-	// through the runner so tests can supply mock input.
-	if rr, ok := passwdCmd.(*realCmdRunner); ok {
-		if ec, ok := rr.cmd.(*exec.Cmd); ok {
-			ec.Stdin = c.run.stdin
-		}
-	}
+	passwdCmd.SetStdin(c.run.stdin)
+	passwdCmd.SetStdout(c.run.getInteractiveStdout())
+	passwdCmd.SetStderr(c.run.getInteractiveStderr())
 	if err := passwdCmd.Run(); err != nil {
 		return fmt.Errorf("failed to change password for %s: %w", targetUser, err)
 	}
@@ -512,21 +464,24 @@ func (c *SetupOSCommand) changeLuksPassword() error {
 	fmt.Fprintf(c.run.stdout, "   %sPlease pick a new password for the encrypted disk.%s\n",
 		c.iconQuestion, c.cReset)
 
-	for {
+	var lastErr error
+	for attempt := 1; attempt <= maxLuksPasswordAttempts; attempt++ {
+		c.FlushPrinters()
 		cryptsetupCmd := c.run.execCommand("cryptsetup", "luksChangeKey", luksDevice)
-		cryptsetupCmd.SetStdout(c.run.stdout)
-		cryptsetupCmd.SetStderr(c.run.stderr)
-		if rr, ok := cryptsetupCmd.(*realCmdRunner); ok {
-			if ec, ok := rr.cmd.(*exec.Cmd); ok {
-				ec.Stdin = c.run.stdin
-			}
+		cryptsetupCmd.SetStdin(c.run.stdin)
+		cryptsetupCmd.SetStdout(c.run.getInteractiveStdout())
+		cryptsetupCmd.SetStderr(c.run.getInteractiveStderr())
+		lastErr = cryptsetupCmd.Run()
+		if lastErr == nil {
+			break
 		}
-		if err := cryptsetupCmd.Run(); err != nil {
-			fmt.Fprintf(c.run.stderr, "   %s%sFailed to change LUKS password. Please try again.%s\n",
-				c.cRed, c.iconError, c.cReset)
-			continue
+		if attempt < maxLuksPasswordAttempts {
+			fmt.Fprintf(c.run.stderr, "   %s%sFailed to change LUKS password (%d/%d). Please try again.%s\n",
+				c.cRed, c.iconError, attempt, maxLuksPasswordAttempts, c.cReset)
 		}
-		break
+	}
+	if lastErr != nil {
+		return fmt.Errorf("failed to change LUKS password after %d attempts: %w", maxLuksPasswordAttempts, lastErr)
 	}
 
 	fmt.Fprintf(c.run.stdout, "   %s%sLUKS password changed successfully.%s\n",
@@ -555,14 +510,11 @@ func (c *SetupOSCommand) setupLocalization() error {
 	if c.localeFlag == "" || c.keymapFlag == "" || c.timezoneFlag == "" || c.hostnameFlag == "" {
 		firstbootArgs = append(firstbootArgs, "--prompt")
 	}
+	c.FlushPrinters()
 	firstbootCmd := c.run.execCommand("systemd-firstboot", firstbootArgs...)
-	firstbootCmd.SetStdout(c.run.stdout)
-	firstbootCmd.SetStderr(c.run.stderr)
-	if rr, ok := firstbootCmd.(*realCmdRunner); ok {
-		if ec, ok := rr.cmd.(*exec.Cmd); ok {
-			ec.Stdin = c.run.stdin
-		}
-	}
+	firstbootCmd.SetStdin(c.run.stdin)
+	firstbootCmd.SetStdout(c.run.getInteractiveStdout())
+	firstbootCmd.SetStderr(c.run.getInteractiveStderr())
 	if err := firstbootCmd.Run(); err != nil {
 		return fmt.Errorf("systemd-firstboot failed: %w", err)
 	}
@@ -777,22 +729,32 @@ func (c *SetupOSCommand) checkPartitionForWindows(part, grubCfg, msblPath string
 	}
 
 	var mountPoint string
-	wasMounted := false
 	if existingMount != "" {
-		wasMounted = true
 		mountPoint = existingMount
 	} else {
-		// Create temp mount point and mount.
-		tmpDir := fmt.Sprintf("/tmp/setupos-win-%s", filepath.Base(part))
-		c.run.mkdirAll(tmpDir, 0700)
+		// Create unique temp mount point and mount.
+		mkdirTemp := c.run.mkdirTemp
+		if mkdirTemp == nil {
+			mkdirTemp = os.MkdirTemp
+		}
+		tmpDir, err := mkdirTemp("", fmt.Sprintf("setupos-win-%s-*", filepath.Base(part)))
+		if err != nil {
+			return fmt.Errorf("unable to create temp mount dir for %s: %w", part, err)
+		}
 		mountCmd := c.run.execCommand("mount", "-o", "ro", part, tmpDir)
 		if err := mountCmd.Run(); err != nil {
+			_ = c.run.removeFile(tmpDir)
 			return fmt.Errorf("unable to mount %s: %w", part, err)
 		}
 		mountPoint = tmpDir
 		defer func() {
 			umountCmd := c.run.execCommand("umount", mountPoint)
-			umountCmd.Run()
+			if err := umountCmd.Run(); err != nil {
+				fmt.Fprintf(c.run.stderr, "   %s%sWarning: failed to unmount %s: %v%s\n",
+					c.cYellow, c.iconWarn, mountPoint, err, c.cReset)
+				return
+			}
+			_ = c.run.removeFile(mountPoint)
 		}()
 	}
 
@@ -827,7 +789,6 @@ menuentry "%s" --class windows {
 	}
 
 	// If we mounted it, unmount happens via defer.
-	_ = wasMounted
 	return nil
 }
 

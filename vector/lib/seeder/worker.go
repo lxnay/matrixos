@@ -3,7 +3,6 @@ package seeder
 import (
 	"bytes"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,7 +137,7 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 		Args:   []string{"-c", script},
 		Env:    env,
 		Stdout: &stdout,
-		Stderr: s.stderr,
+		Stderr: s.Stderr(),
 	}
 	if err := s.runner(cmd); err != nil {
 		return nil, fmt.Errorf(
@@ -167,22 +166,11 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 		}
 	}
 
-	var completeChrootDirs []string
-	for _, line := range lines[5:6] {
-		for field := range strings.FieldsSeq(line) {
-			if field != "" {
-				completeChrootDirs = append(completeChrootDirs, field)
-			}
-		}
-	}
+	completeChrootDirs := strings.Fields(lines[5])
 
 	var partialChrootDirs []string
 	for _, line := range lines[6:] {
-		for field := range strings.FieldsSeq(line) {
-			if field != "" {
-				partialChrootDirs = append(partialChrootDirs, field)
-			}
-		}
+		partialChrootDirs = append(partialChrootDirs, strings.Fields(line)...)
 	}
 
 	params := &SeederParams{
@@ -210,6 +198,19 @@ func (s *Seeder) parseParamsVariables(name, paramsPath string) (*SeederParams, e
 			"PREFERRED_SEEDER_CHROOT_DIR is empty in %s", paramsPath,
 		)
 	}
+
+	params.ChrootsDir = filepath.Clean(params.ChrootsDir)
+	params.PreferredChrootDir = filepath.Clean(params.PreferredChrootDir)
+	if params.LatestAvailableChrootDir != "" {
+		params.LatestAvailableChrootDir = filepath.Clean(params.LatestAvailableChrootDir)
+	}
+	for i, d := range params.CompleteChrootDirs {
+		params.CompleteChrootDirs[i] = filepath.Clean(d)
+	}
+	for i, d := range params.PartialChrootDirs {
+		params.PartialChrootDirs[i] = filepath.Clean(d)
+	}
+
 	return params, nil
 }
 
@@ -238,22 +239,9 @@ func (s *Seeder) ImportGentooGpgKeys() error {
 		return err
 	}
 
-	if err := os.MkdirAll(homedir, 0700); err != nil {
-		return fmt.Errorf("mkdir GPG homedir %s: %w", homedir, err)
+	if err := ostree.PatchGpgHomeDir(homedir); err != nil {
+		return fmt.Errorf("patch GPG homedir %s: %w", homedir, err)
 	}
-	if err := os.Chmod(homedir, 0700); err != nil {
-		return fmt.Errorf("chmod GPG homedir: %w", err)
-	}
-
-	// Fix permissions on existing files inside the GPG homedir.
-	_ = filepath.WalkDir(homedir,
-		func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return err
-			}
-			return os.Chmod(path, 0600)
-		},
-	)
 
 	s.Print("Importing Gentoo GPG keys (--homedir=%s) ...\n", homedir)
 	return s.runner(&runner.Cmd{
@@ -265,8 +253,8 @@ func (s *Seeder) ImportGentooGpgKeys() error {
 			"--locate-key",
 			"releng@gentoo.org",
 		},
-		Stdout: s.stdout,
-		Stderr: s.stderr,
+		Stdout: s.Stdout(),
+		Stderr: s.Stderr(),
 	})
 }
 
@@ -278,7 +266,7 @@ func (s *Seeder) KillGpgDaemons() {
 		return
 	}
 	s.Print("Killing GPG daemons for %s ...\n", homedir)
-	ostree.KillGpgDaemons(s.runner, homedir, s.stdout, s.stderr)
+	ostree.KillGpgDaemons(s.runner, homedir, s.Stdout(), s.Stderr())
 }
 
 // generateSharedEnvVars generates the environment variables that need to be shared
@@ -438,30 +426,50 @@ func (s *Seeder) ExecutePrepper(info SeederInfo, params *SeederParams, opts *Pre
 	cmd := &runner.Cmd{
 		Name:   info.PrepperExec,
 		Env:    env,
-		Stdout: s.stdout,
-		Stderr: s.stderr,
+		Stdout: s.Stdout(),
+		Stderr: s.Stderr(),
 	}
 	return s.runner(cmd)
 }
 
 // --- Chroot DNS ---
 
-// SetupChrootDNS copies /etc/resolv.conf into the chroot.
+// SetupChrootDNS copies /etc/resolv.conf into the chroot without following
+// symlinks outside chrootDir or overwriting host targets through a symlinked
+// /etc/resolv.conf.
 func (s *Seeder) SetupChrootDNS(chrootDir string) error {
+	if err := filesystems.CheckDirIsRoot(chrootDir); err != nil {
+		return err
+	}
 	src := "/etc/resolv.conf"
-	dst := filepath.Join(chrootDir, "etc", "resolv.conf")
+	chrootDir = filepath.Clean(chrootDir)
 
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return fmt.Errorf("failed to create %s: %w", filepath.Dir(dst), err)
+	etcPath := filepath.Join(chrootDir, "etc")
+	var etcDir string
+	if _, err := os.Lstat(etcPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(etcPath, 0755); err != nil {
+			return fmt.Errorf("failed to create %s: %w", etcPath, err)
+		}
+		etcDir = etcPath
+	} else if err != nil {
+		return fmt.Errorf("failed to stat %s: %w", etcPath, err)
+	} else {
+		resolved, fi, err := filesystems.ResolvePathInRoot(chrootDir, "/etc")
+		if err != nil {
+			return fmt.Errorf("failed to resolve /etc inside %s: %w", chrootDir, err)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", resolved)
+		}
+		etcDir = resolved
 	}
 
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", src, err)
-	}
-
+	dst := filepath.Join(etcDir, "resolv.conf")
 	s.Print("Copying %s to %s\n", src, dst)
-	return os.WriteFile(dst, data, 0644)
+	if err := filesystems.CopyFile(src, dst); err != nil {
+		return err
+	}
+	return os.Chmod(dst, 0644)
 }
 
 // --- Chroot directory setup ---
@@ -491,8 +499,8 @@ func (s *Seeder) setupDevDir(chrootDevDir string) error {
 		if err := s.runner(&runner.Cmd{
 			Name:   "git",
 			Args:   args,
-			Stdout: s.stdout,
-			Stderr: s.stderr,
+			Stdout: s.Stdout(),
+			Stderr: s.Stderr(),
 		}); err != nil {
 			return fmt.Errorf("error cloning git repo (local): %w", err)
 		}
@@ -619,13 +627,9 @@ func (s *Seeder) generateSeederEnvVars(env []string) ([]string, error) {
 
 // --- Chroot execution ---
 
-// Seed runs the seeder's chroot script inside the chroot
-// using unshare for namespace isolation.
-func (s *Seeder) Seed(opts *SeedOptions) error {
-	if opts == nil {
-		return fmt.Errorf("opts cannot be nil")
-	}
-
+// runInChroot executes execName (with optional args) inside opts.ChrootDir
+// with the standard seeder environment and init.sh wrapper.
+func (s *Seeder) runInChroot(opts *SeedOptions, execName string, args []string) error {
 	// Start with a pristine environment.
 	env, err := s.generateSharedEnvVars(opts.Env)
 	if err != nil {
@@ -649,11 +653,11 @@ func (s *Seeder) Seed(opts *SeedOptions) error {
 	}
 	stdout := opts.Stdout
 	if stdout == nil {
-		stdout = s.stdout
+		stdout = s.Stdout()
 	}
 	stderr := opts.Stderr
 	if stderr == nil {
-		stderr = s.stderr
+		stderr = s.Stderr()
 	}
 	dir := opts.Dir
 	if dir == "" {
@@ -662,8 +666,8 @@ func (s *Seeder) Seed(opts *SeedOptions) error {
 
 	return s.chrootRunner(&runner.ChrootCmd{
 		Cmd: runner.Cmd{
-			Name:        opts.Info.ChrootChrootExec,
-			Args:        opts.Info.ChrootChrootArgs,
+			Name:        execName,
+			Args:        args,
 			Env:         env,
 			Dir:         dir,
 			Stdin:       stdin,
@@ -676,6 +680,15 @@ func (s *Seeder) Seed(opts *SeedOptions) error {
 	})
 }
 
+// Seed runs the seeder's chroot script inside the chroot
+// using unshare for namespace isolation.
+func (s *Seeder) Seed(opts *SeedOptions) error {
+	if opts == nil {
+		return fmt.Errorf("opts cannot be nil")
+	}
+	return s.runInChroot(opts, opts.Info.ChrootChrootExec, opts.Info.ChrootChrootArgs)
+}
+
 // PostBuild runs the post-build script inside the chroot.
 // It follows the same pattern as Seed but uses the PostBuildChrootExec path.
 func (s *Seeder) PostBuild(opts *SeedOptions) error {
@@ -685,52 +698,5 @@ func (s *Seeder) PostBuild(opts *SeedOptions) error {
 	if opts.Info.PostBuildChrootExec == "" {
 		return nil // No post-build script configured.
 	}
-
-	// Start with a pristine environment.
-	env, err := s.generateSharedEnvVars(opts.Env)
-	if err != nil {
-		return err
-	}
-	env, err = s.generateSeederEnvVars(env)
-	if err != nil {
-		return err
-	}
-
-	devDir, err := s.DevDir()
-	if err != nil {
-		return err
-	}
-
-	initScript := filepath.Join(devDir, "build", "init", "init.sh")
-
-	stdin := opts.Stdin
-	if stdin == nil {
-		stdin = s.stdin
-	}
-	stdout := opts.Stdout
-	if stdout == nil {
-		stdout = s.stdout
-	}
-	stderr := opts.Stderr
-	if stderr == nil {
-		stderr = s.stderr
-	}
-	dir := opts.Dir
-	if dir == "" {
-		dir = "/"
-	}
-
-	return s.chrootRunner(&runner.ChrootCmd{
-		Cmd: runner.Cmd{
-			Name:        opts.Info.PostBuildChrootExec,
-			Env:         env,
-			Dir:         dir,
-			Stdin:       stdin,
-			Stdout:      stdout,
-			Stderr:      stderr,
-			SysProcAttr: opts.SysProcAttr,
-		},
-		ChrootExec: initScript,
-		ChrootDir:  opts.ChrootDir,
-	})
+	return s.runInChroot(opts, opts.Info.PostBuildChrootExec, nil)
 }

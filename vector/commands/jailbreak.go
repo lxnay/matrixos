@@ -3,7 +3,6 @@ package commands
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,96 +19,20 @@ type mountInfo struct {
 
 // jailbreakRunner abstracts OS-level operations so they can be replaced in tests.
 type jailbreakRunner struct {
-	// execCommand wraps exec.Command for spawning processes.
-	execCommand func(name string, args ...string) cmdRunner
-	// readFile reads a file's content.
-	readFile func(path string) ([]byte, error)
-	// writeFile writes data to a file with the given permissions.
-	writeFile func(path string, data []byte, perm os.FileMode) error
-	// appendFile appends data to a file.
-	appendFile func(path string, data []byte) error
-	// mkdirAll creates directories recursively.
-	mkdirAll func(path string, perm os.FileMode) error
-	// stat returns file info for a path.
-	stat func(path string) (os.FileInfo, error)
-	// removeFile removes a file.
-	removeFile func(path string) error
-	// remove recursively removes a path.
-	removeAll func(path string) error
-	// rename renames a file.
-	rename func(src, dst string) error
-	// realpath resolves a path to its real absolute form.
-	realpath func(path string) (string, error)
-	// copyFile copies src to dst.
-	copyFile func(src, dst string) error
-	// getMountInfo returns UUID and filesystem type for a mountpoint.
+	osRunner
+	removeAll    func(path string) error
+	rename       func(src, dst string) error
 	getMountInfo func(mnt string) (*mountInfo, error)
-	// remountRW remounts a filesystem read-write.
-	remountRW func(mnt string) error
-	// stdin provides user input for confirmation prompts.
-	stdin io.Reader
-	// stdout is the writer for info output.
-	stdout io.Writer
-	// stderr is the writer for error/warning output.
-	stderr io.Writer
+	remountRW    func(mnt string) error
 }
-
-// cmdRunner abstracts an exec.Cmd for testability.
-type cmdRunner interface {
-	Run() error
-	Output() ([]byte, error)
-	SetStdout(w io.Writer)
-	SetStderr(w io.Writer)
-}
-
-// realCmdRunner wraps a real os/exec.Cmd.
-type realCmdRunner struct {
-	cmd interface {
-		Run() error
-		Output() ([]byte, error)
-	}
-	stdout *io.Writer
-	stderr *io.Writer
-}
-
-func (r *realCmdRunner) Run() error              { return r.cmd.Run() }
-func (r *realCmdRunner) Output() ([]byte, error) { return r.cmd.Output() }
-func (r *realCmdRunner) SetStdout(w io.Writer)   { *r.stdout = w }
-func (r *realCmdRunner) SetStderr(w io.Writer)   { *r.stderr = w }
 
 func defaultRunner() *jailbreakRunner {
 	return &jailbreakRunner{
-		execCommand: func(name string, args ...string) cmdRunner {
-			cmd := execCommand(name, args...)
-			return &realCmdRunner{
-				cmd:    cmd,
-				stdout: &cmd.Stdout,
-				stderr: &cmd.Stderr,
-			}
-		},
-		readFile:  os.ReadFile,
-		writeFile: os.WriteFile,
-		appendFile: func(path string, data []byte) error {
-			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-			_, err = f.Write(data)
-			return err
-		},
-		mkdirAll:     os.MkdirAll,
-		stat:         os.Stat,
-		removeFile:   os.Remove,
+		osRunner:     defaultOSRunner(),
 		removeAll:    os.RemoveAll,
 		rename:       filesystems.Move,
-		realpath:     filepath.EvalSymlinks,
-		copyFile:     filesystems.CopyFile,
 		getMountInfo: getMountInfoFromSystem,
 		remountRW:    filesystems.RemountReadWrite,
-		stdin:        os.Stdin,
-		stdout:       os.Stdout,
-		stderr:       os.Stderr,
 	}
 }
 
@@ -189,19 +112,14 @@ func (c *JailbreakCommand) parseArgs(args []string) error {
 
 // configStr fetches a mandatory string value from config, returning an error if missing.
 func (c *JailbreakCommand) configStr(key string) (string, error) {
-	val, err := c.cfg.GetItem(key)
-	if err != nil {
-		return "", fmt.Errorf("config key %s: %w", key, err)
-	}
-	if val == "" {
-		return "", fmt.Errorf("config key %s is empty", key)
-	}
-	return val, nil
+	return c.configItem(key)
 }
 
 func (c *JailbreakCommand) Run() error {
-	if getEuid() != 0 {
-		return fmt.Errorf("this command must be run as root")
+	defer c.FlushPrinters()
+
+	if err := requireRoot(); err != nil {
+		return err
 	}
 
 	sysroot, err := c.configStr("Ostree.Sysroot")
@@ -726,12 +644,27 @@ func (c *JailbreakCommand) cleanConfigSetupVarDbPkg(sysroot string) error {
 	return c.run.rename(src, varDbPkg)
 }
 
+// statInSysroot resolves virtual path p strictly inside sysroot using lstat
+// and readlink so absolute or escaping symlinks (e.g. /srv -> /var/srv) are
+// evaluated against sysroot rather than the live host filesystem.
+func (c *JailbreakCommand) statInSysroot(sysroot, p string) (os.FileInfo, error) {
+	if c.run.lstat == nil || c.run.readlink == nil {
+		return c.run.stat(filepath.Join(filepath.Clean(sysroot), p))
+	}
+	_, fi, err := filesystems.ResolvePathInRootWith(sysroot, p, c.run.lstat, c.run.stat, c.run.readlink)
+	return fi, err
+}
+
 func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 	fmt.Fprintf(c.run.stdout, "%s%sFixing /srv ...%s\n",
 		c.cBold, c.iconGear, c.cReset)
 	srv := filepath.Join(sysroot, "srv")
 
-	info, err := c.run.stat(srv)
+	lstatFn := c.run.lstat
+	if lstatFn == nil {
+		lstatFn = c.run.stat
+	}
+	info, err := lstatFn(srv)
 	if err != nil {
 		// Does not exist at all — create it.
 		if err := c.run.mkdirAll(srv, 0755); err != nil {
@@ -740,8 +673,20 @@ func (c *JailbreakCommand) cleanConfigFixSrv(sysroot string) error {
 		return c.run.writeFile(filepath.Join(srv, ".keep"), []byte{}, 0644)
 	}
 
-	// If it's a dangling symlink, replace it with a directory.
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	needsReplace := false
+	if info.Mode()&os.ModeSymlink != 0 {
+		// Preserve valid symlinks pointing to an existing directory inside
+		// sysroot (e.g. OSTree's /srv -> var/srv); only replace symlinks that
+		// are dangling or point to non-directories within sysroot.
+		targetInfo, statErr := c.statInSysroot(sysroot, "/srv")
+		if statErr != nil || !targetInfo.IsDir() {
+			needsReplace = true
+		}
+	} else if !info.IsDir() {
+		needsReplace = true
+	}
+
+	if needsReplace {
 		if err := c.run.removeFile(srv); err != nil {
 			return fmt.Errorf("failed to remove %s: %w", srv, err)
 		}

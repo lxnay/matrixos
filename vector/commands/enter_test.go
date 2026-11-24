@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"matrixos/vector/lib/config"
-	"matrixos/vector/lib/runner"
 	"matrixos/vector/lib/seeder"
 )
 
@@ -18,7 +17,6 @@ import (
 // command uses the provided MockSeeder instead of a real one.
 func newTestEnterCommand(
 	det *seeder.MockSeederDetector,
-	chrootRunner runner.ChrootRunFunc,
 	args []string,
 ) (*EnterCommand, error) {
 	origEuid := getEuid
@@ -33,9 +31,6 @@ func newTestEnterCommand(
 			return nil, fmt.Errorf("seeder detection failed: %w", err)
 		}
 		cmd.detected = detected
-	}
-	if chrootRunner != nil {
-		cmd.chrootRunner = chrootRunner
 	}
 
 	if err := cmd.parseArgs(args); err != nil {
@@ -100,9 +95,6 @@ func TestNewEnterCommand(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("NewEnterCommand returned nil")
 	}
-	if cmd.chrootRunner == nil {
-		t.Fatal("chrootRunner should be set to default")
-	}
 }
 
 func TestEnterParseArgsNotRoot(t *testing.T) {
@@ -162,7 +154,7 @@ func TestEnterRunWithDirectoryTarget(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -231,7 +223,7 @@ func TestEnterRunWithNamedTarget(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"bedrock"})
+	cmd, err := newTestEnterCommand(det, []string{"bedrock"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -256,7 +248,7 @@ func TestEnterRunNoMatchingNames(t *testing.T) {
 		Detect_: nil, // no seeders detected
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"nonexistent"})
+	cmd, err := newTestEnterCommand(det, []string{"nonexistent"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -278,7 +270,7 @@ func TestEnterRunSeedError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -303,7 +295,7 @@ func TestEnterRunChrootError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -357,7 +349,7 @@ func TestEnterRunUnrecognizedPath(t *testing.T) {
 
 	det := &seeder.MockSeederDetector{}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"/nonexistent/path/to/chroot"})
+	cmd, err := newTestEnterCommand(det, []string{"/nonexistent/path/to/chroot"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -379,7 +371,7 @@ func TestEnterRunMultipleDirectories(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir1, chrootDir2})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir1, chrootDir2})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -406,7 +398,7 @@ func TestEnterDetectionError(t *testing.T) {
 
 	// Detection now happens during Init (simulated by newTestEnterCommand),
 	// so the error is returned at construction time.
-	_, err := newTestEnterCommand(det, nil, []string{"somename"})
+	_, err := newTestEnterCommand(det, []string{"somename"})
 	if err == nil {
 		t.Fatal("Expected error, got nil")
 	}
@@ -429,7 +421,7 @@ func TestEnterParamsExecNameError(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -484,7 +476,7 @@ func TestEnterRunAcquiresLockByDefault(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -507,7 +499,7 @@ func TestEnterRunSkipsLockWithFlag(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -534,7 +526,7 @@ func TestEnterRunLockAcquisitionError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -559,7 +551,7 @@ func TestEnterRunSkipLockWithMultipleDirectories(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir1, chrootDir2})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir1, chrootDir2})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -615,7 +607,7 @@ func TestEnterRunLockUsesSeederName(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -667,7 +659,7 @@ func TestEnterRunLockNoMatchingSeeder(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -698,7 +690,7 @@ func TestEnterRunNewSeederError(t *testing.T) {
 	defer func() { newSeeder = orig }()
 
 	det := &seeder.MockSeederDetector{}
-	cmd, err := newTestEnterCommand(det, nil, []string{"/some/dir"})
+	cmd, err := newTestEnterCommand(det, []string{"/some/dir"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -732,7 +724,7 @@ func TestEnterRunMakeSeederParamsSkipsErrors(t *testing.T) {
 			{Name: "00-broken", Dir: seederDir},
 		},
 	}
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -772,7 +764,7 @@ func TestEnterMakeSeederParamsSkipsUnparseable(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -807,7 +799,7 @@ func TestEnterMakeSeederParamsSkipsMissingParamsFile(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -862,7 +854,7 @@ func TestEnterRunSeederNameTargetPreferredChrootDir(t *testing.T) {
 
 	// Target contains '/' and is NOT an existing directory, so it hits the
 	// seedersParams lookup. The seeder name "sub/00-bedrock" matches.
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-bedrock"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-bedrock"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -915,7 +907,7 @@ func TestEnterRunSeederNameTargetLatestAvailableChrootDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-server"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-server"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -961,7 +953,7 @@ func TestEnterRunSeederNameTargetNoChrootDirs(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/00-empty"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/00-empty"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -984,7 +976,7 @@ func TestEnterRunSeederNameTargetNotInParams(t *testing.T) {
 
 	det := &seeder.MockSeederDetector{} // no seeders detected
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"sub/nonexistent"})
+	cmd, err := newTestEnterCommand(det, []string{"sub/nonexistent"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1032,7 +1024,7 @@ func TestEnterRunLockWithPreferredChrootDirMatch(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1061,7 +1053,7 @@ func TestEnterRunSkipLockWorkerError(t *testing.T) {
 	restore := withMockSeeder(sd)
 	defer restore()
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"--skiplock", chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{"--skiplock", chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1106,7 +1098,7 @@ func TestEnterResolveNamesEmptyChrootsDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1145,7 +1137,7 @@ func TestEnterResolveNamesSeederNotInSps(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{"somename"})
+	cmd, err := newTestEnterCommand(det, []string{"somename"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1199,7 +1191,7 @@ func TestEnterRunMixedTargetsSeederNameAndDirectory(t *testing.T) {
 	}
 
 	// First target is a real dir, second is a seeder name (resolved via params).
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir1, "sub/00-server"})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir1, "sub/00-server"})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1249,7 +1241,7 @@ func TestEnterRunWithPartialChrootDirTarget(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1310,7 +1302,7 @@ func TestEnterRunLockResolvesPartialChrootDir(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{chrootDir})
+	cmd, err := newTestEnterCommand(det, []string{chrootDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1362,7 +1354,7 @@ func TestEnterRunPartialAndCompleteMixed(t *testing.T) {
 		},
 	}
 
-	cmd, err := newTestEnterCommand(det, nil, []string{completeDir, partialDir})
+	cmd, err := newTestEnterCommand(det, []string{completeDir, partialDir})
 	if err != nil {
 		t.Fatalf("newTestEnterCommand: %v", err)
 	}
@@ -1376,4 +1368,336 @@ func TestEnterRunPartialAndCompleteMixed(t *testing.T) {
 	if !sd.SeedCalled {
 		t.Fatal("Seed was not called")
 	}
+}
+
+// --- Path normalization tests ---
+
+func TestEnterRunPathNormalization(t *testing.T) {
+	// Set up a real directory tree plus a symlinked alias (simulating
+	// OSTree /home -> /var/home where MATRIXOS_DEV_DIR and user CLI args
+	// may traverse different sides of the symlink).
+	baseDir := t.TempDir()
+	realRoot := filepath.Join(baseDir, "real")
+	chrootsDir := filepath.Join(realRoot, "out", "seeder", "chroots")
+	completeDir := filepath.Join(chrootsDir, "gnome-20261116")
+	partialDir := filepath.Join(chrootsDir, "gnome-20261123")
+	preferredDir := filepath.Join(chrootsDir, "gnome-20261130")
+	for _, d := range []string{completeDir, partialDir, preferredDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", d, err)
+		}
+	}
+
+	symlinkRoot := filepath.Join(baseDir, "link")
+	if err := os.Symlink(realRoot, symlinkRoot); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	symlinkCompleteDir := filepath.Join(symlinkRoot, "out", "seeder", "chroots", "gnome-20261116")
+
+	// Resolve realRoot in case the host's /tmp itself traverses a symlink.
+	canonicalCompleteDir, err := filepath.EvalSymlinks(completeDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", completeDir, err)
+	}
+	canonicalPartialDir, err := filepath.EvalSymlinks(partialDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", partialDir, err)
+	}
+	canonicalPreferredDir, err := filepath.EvalSymlinks(preferredDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", preferredDir, err)
+	}
+
+	seederDir := filepath.Join(t.TempDir(), "20-gnome")
+	if err := os.MkdirAll(seederDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		cwd          string
+		params       *seeder.SeederParams
+		args         []string
+		wantChroot   string
+		wantLockName string
+		wantLocked   bool
+	}{
+		{
+			name: "trailing slash on CompleteChrootDirs with skiplock",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:       []string{"--skiplock", completeDir + "/"},
+			wantChroot: canonicalCompleteDir,
+			wantLocked: false,
+		},
+		{
+			name: "trailing slash on CompleteChrootDirs with lock",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{completeDir + "/"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "multiple trailing slashes and redundant separators",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{chrootsDir + "//./gnome-20261116///"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "trailing slash on PartialChrootDirs",
+			params: &seeder.SeederParams{
+				ChrootsDir:        chrootsDir,
+				PartialChrootDirs: []string{partialDir},
+			},
+			args:         []string{partialDir + "/"},
+			wantChroot:   canonicalPartialDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "trailing slash on PreferredChrootDir",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				PreferredChrootDir: preferredDir,
+			},
+			args:         []string{preferredDir + "/"},
+			wantChroot:   canonicalPreferredDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "relative path with trailing slash",
+			cwd:  realRoot,
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{"out/seeder/chroots/gnome-20261116/"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "dot-relative path from inside chroots dir",
+			cwd:  chrootsDir,
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{"./gnome-20261116/"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "current directory dot when inside chroot dir",
+			cwd:  completeDir,
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{"."},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "symlinked target path against real params path",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir,
+				CompleteChrootDirs: []string{completeDir},
+			},
+			args:         []string{symlinkCompleteDir + "/"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "real target path against symlinked params path",
+			params: &seeder.SeederParams{
+				ChrootsDir:         filepath.Join(symlinkRoot, "out", "seeder", "chroots"),
+				CompleteChrootDirs: []string{symlinkCompleteDir},
+			},
+			args:         []string{completeDir + "/"},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "uncleaned params path with duplicate and trailing slashes",
+			params: &seeder.SeederParams{
+				ChrootsDir:         chrootsDir + "/",
+				CompleteChrootDirs: []string{chrootsDir + "//gnome-20261116/"},
+			},
+			args:         []string{completeDir},
+			wantChroot:   canonicalCompleteDir,
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+		{
+			name: "non-existent dir listed in CompleteChrootDirs matched with trailing slash",
+			params: &seeder.SeederParams{
+				ChrootsDir:         "/nonexistent/chroots",
+				CompleteChrootDirs: []string{"/nonexistent/chroots/gnome-20261116"},
+			},
+			args:         []string{"/nonexistent/chroots/gnome-20261116/"},
+			wantChroot:   "/nonexistent/chroots/gnome-20261116",
+			wantLockName: "20-gnome",
+			wantLocked:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cwd != "" {
+				origWd, err := os.Getwd()
+				if err != nil {
+					t.Fatalf("Getwd: %v", err)
+				}
+				if err := os.Chdir(tc.cwd); err != nil {
+					t.Fatalf("Chdir(%s): %v", tc.cwd, err)
+				}
+				defer func() { _ = os.Chdir(origWd) }()
+			}
+
+			sd := seeder.DefaultMockSeeder()
+			sd.ParseSeederParams_ = tc.params
+			restore := withMockSeeder(sd)
+			defer restore()
+
+			det := &seeder.MockSeederDetector{
+				Detect_: []seeder.SeederInfo{
+					{
+						Name:       "20-gnome",
+						Dir:        seederDir,
+						ChrootExec: filepath.Join(seederDir, "chroot.sh"),
+					},
+				},
+			}
+
+			cmd, err := newTestEnterCommand(det, tc.args)
+			if err != nil {
+				t.Fatalf("newTestEnterCommand: %v", err)
+			}
+
+			captureStdout(t, func() {
+				if err := cmd.run(); err != nil {
+					t.Fatalf("run failed: %v", err)
+				}
+			})
+
+			if !sd.SeedCalled {
+				t.Fatal("Seed was not called")
+			}
+			if len(sd.SeedOpts) != 1 {
+				t.Fatalf("expected 1 Seed call, got %d", len(sd.SeedOpts))
+			}
+			if sd.SeedOpts[0].ChrootDir != tc.wantChroot {
+				t.Errorf("SeedOptions.ChrootDir = %q, want %q", sd.SeedOpts[0].ChrootDir, tc.wantChroot)
+			}
+			if sd.ExecuteWithSeederLockCalled != tc.wantLocked {
+				t.Errorf("ExecuteWithSeederLockCalled = %v, want %v", sd.ExecuteWithSeederLockCalled, tc.wantLocked)
+			}
+			if tc.wantLocked && sd.ExecuteWithSeederLockName != tc.wantLockName {
+				t.Errorf("ExecuteWithSeederLockName = %q, want %q", sd.ExecuteWithSeederLockName, tc.wantLockName)
+			}
+		})
+	}
+}
+
+func TestEnterChrootWorkerStopsAtFirstMatchingSeeder(t *testing.T) {
+	// Ensure chrootWorker breaks out of the outer detected-seeder loop on the
+	// first matching seeder rather than letting a later seeder overwrite it.
+	chrootDir := t.TempDir()
+
+	sd := seeder.DefaultMockSeeder()
+	det := &seeder.MockSeederDetector{
+		Detect_: []seeder.SeederInfo{
+			{Name: "00-first", Dir: "/seeders/00-first"},
+			{Name: "10-second", Dir: "/seeders/10-second"},
+		},
+	}
+
+	cmd, err := newTestEnterCommand(det, []string{chrootDir + "/"})
+	if err != nil {
+		t.Fatalf("newTestEnterCommand: %v", err)
+	}
+	cmd.SetupPrinters("test")
+
+	params := SeedersParams{
+		"00-first": {
+			CompleteChrootDirs: []string{chrootDir},
+		},
+		"10-second": {
+			CompleteChrootDirs: []string{chrootDir},
+		},
+	}
+
+	captureStdout(t, func() {
+		if err := cmd.chrootWorker(sd, params, chrootDir+"/"); err != nil {
+			t.Fatalf("chrootWorker failed: %v", err)
+		}
+	})
+
+	if sd.ExecuteWithSeederLockName != "00-first" {
+		t.Errorf("expected first matching seeder %q, got %q", "00-first", sd.ExecuteWithSeederLockName)
+	}
+}
+
+func TestNormalizeChrootPath(t *testing.T) {
+	if got := normalizeChrootPath(""); got != "" {
+		t.Errorf("normalizeChrootPath(%q) = %q, want empty string", "", got)
+	}
+	if got := normalizeChrootPath("/"); got != "/" {
+		t.Errorf("normalizeChrootPath(%q) = %q, want %q", "/", got, "/")
+	}
+	if got := normalizeChrootPath("///"); got != "/" {
+		t.Errorf("normalizeChrootPath(%q) = %q, want %q", "///", got, "/")
+	}
+	if got := normalizeChrootPath("/nonexistent//a/./b/"); got != "/nonexistent/a/b" {
+		t.Errorf("normalizeChrootPath(%q) = %q, want %q", "/nonexistent//a/./b/", got, "/nonexistent/a/b")
+	}
+
+	if containsNormalizedPath([]string{"", "/a/b"}, "") {
+		t.Error("containsNormalizedPath should return false for empty target")
+	}
+
+	t.Run("SymlinkDotDotPosixOrder", func(t *testing.T) {
+		tmp, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c1 := filepath.Join(tmp, "real", "chroots", "bedrock-20260101")
+		c2 := filepath.Join(tmp, "real", "chroots", "bedrock-20260102")
+		other := filepath.Join(tmp, "other")
+		for _, d := range []string{c1, c2, other} {
+			if err := os.MkdirAll(d, 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Symlink(c2, filepath.Join(other, "latest")); err != nil {
+			t.Fatal(err)
+		}
+
+		absViaLink := filepath.Join(other, "latest") + "/../bedrock-20260101"
+		if got := normalizeChrootPath(absViaLink); got != c1 {
+			t.Errorf("normalizeChrootPath(%q) = %q, want %q", absViaLink, got, c1)
+		}
+
+		t.Chdir(other)
+		if got := normalizeChrootPath("latest/../bedrock-20260101"); got != c1 {
+			t.Errorf("normalizeChrootPath(relative) = %q, want %q", got, c1)
+		}
+	})
 }

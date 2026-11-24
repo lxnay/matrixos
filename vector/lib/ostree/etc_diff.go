@@ -1,7 +1,6 @@
 package ostree
 
 import (
-	"bufio"
 	"sort"
 	"strings"
 
@@ -38,6 +37,14 @@ type EtcChange struct {
 	User   *filesystems.PathInfo // Current live state (nil if absent)
 }
 
+func addIndexedPathInfo(m map[string]*filesystems.PathInfo, pi *filesystems.PathInfo, prefix string) {
+	rel := strings.TrimPrefix(pi.Path, prefix)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel != "" {
+		m[rel] = pi
+	}
+}
+
 // indexPathInfoSlice builds a map from relative path to *PathInfo.
 // It strips the given prefix from each entry's Path and skips the root
 // directory itself (empty relative path after stripping).
@@ -47,13 +54,7 @@ func indexPathInfoSlice(items *[]filesystems.PathInfo, prefix string) map[string
 	}
 	m := make(map[string]*filesystems.PathInfo, len(*items))
 	for i := range *items {
-		pi := &(*items)[i]
-		rel := strings.TrimPrefix(pi.Path, prefix)
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
-			continue
-		}
-		m[rel] = pi
+		addIndexedPathInfo(m, &(*items)[i], prefix)
 	}
 	return m
 }
@@ -62,12 +63,7 @@ func indexPathInfoSlice(items *[]filesystems.PathInfo, prefix string) map[string
 func indexPathInfoPtrSlice(items []*filesystems.PathInfo, prefix string) map[string]*filesystems.PathInfo {
 	m := make(map[string]*filesystems.PathInfo, len(items))
 	for _, pi := range items {
-		rel := strings.TrimPrefix(pi.Path, prefix)
-		rel = strings.TrimPrefix(rel, "/")
-		if rel == "" {
-			continue
-		}
-		m[rel] = pi
+		addIndexedPathInfo(m, pi, prefix)
 	}
 	return m
 }
@@ -211,53 +207,4 @@ func (o *Ostree) ListEtcChanges(aCommit, bCommit string) ([]EtcChange, error) {
 
 	changes := computeEtcDiff(oldEtcContent, newEtcContent, userEtcContent)
 	return changes, nil
-}
-
-// ConfigDiff runs "ostree admin --sysroot=<root> config-diff" and returns a
-// map whose keys are the status letter (e.g. "A", "M", "D") and whose values
-// are sorted slices of paths that have that status.
-func (o *Ostree) ConfigDiff() (map[string][]string, error) {
-	root, err := o.Root()
-	if err != nil {
-		return nil, err
-	}
-
-	stdout, err := o.ostreeRunCapture(
-		"admin",
-		"--sysroot="+root,
-		"config-diff",
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string][]string)
-
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-
-		status := fields[0]
-		path := fields[1]
-		result[status] = append(result[status], path)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	for key := range result {
-		sort.Strings(result[key])
-	}
-
-	return result, nil
 }

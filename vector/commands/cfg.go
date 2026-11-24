@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -11,9 +10,7 @@ import (
 // All data output goes to stdout; errors go to stderr. No fancy UI formatting.
 type CfgCommand struct {
 	BaseCommand
-	fs   *flag.FlagSet
-	sub  string
-	args []string
+	subcommandRouter
 }
 
 // NewCfgCommand creates a new CfgCommand.
@@ -36,23 +33,10 @@ func (c *CfgCommand) Init(args []string) error {
 
 // parseArgs parses the command-line arguments without initializing config.
 func (c *CfgCommand) parseArgs(args []string) error {
-	c.fs = flag.NewFlagSet("cfg", flag.ContinueOnError)
-	c.fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: vector %s <subcommand> [args...]\n", c.Name())
-		fmt.Fprintf(os.Stderr, "Subcommands: get\n")
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  vector cfg get matrixOS.Root Ostree.Remote\n")
-	}
-	if err := c.fs.Parse(args); err != nil {
-		return err
-	}
-	if c.fs.NArg() < 1 {
-		c.fs.Usage()
-		return fmt.Errorf("no subcommand provided")
-	}
-	c.sub = c.fs.Arg(0)
-	c.args = c.fs.Args()[1:]
-	return nil
+	return c.parseSubcommandArgs(
+		c.Name(), args, c.subcommands(), os.Stderr, "<subcommand> [args...]",
+		"vector cfg get matrixOS.Root Ostree.Remote",
+	)
 }
 
 func (c *CfgCommand) subcommands() map[string]func() error {
@@ -63,11 +47,7 @@ func (c *CfgCommand) subcommands() map[string]func() error {
 
 // Run dispatches to the selected subcommand.
 func (c *CfgCommand) Run() error {
-	sc, ok := c.subcommands()[c.sub]
-	if !ok {
-		return fmt.Errorf("unknown subcommand: %s", c.sub)
-	}
-	return sc()
+	return c.dispatchSubcommand(c.subcommands())
 }
 
 // runGet retrieves config values for the given keys and prints them as key=value lines.
